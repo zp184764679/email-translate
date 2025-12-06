@@ -1,0 +1,431 @@
+/* Outlook-style 全局样式 */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  font-family: 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', -apple-system, sans-serif;
+  font-size: 14px;
+  background-color: #f3f3f3;
+  color: #1a1a1a;
+}
+
+#app {
+  height: 100%;
+}
+
+// Outlook 主题颜色
+$outlook-primary: #0078d4;
+$outlook-primary-hover: #106ebe;
+$outlook-danger: #d83b01;
+$outlook-success: #107c10;
+$outlook-warning: #ffb900;
+$outlook-gray-100: #faf9f8;
+$outlook-gray-200: #f3f2f1;
+$outlook-gray-300: #edebe9;
+$outlook-gray-400: #d2d0ce;
+$outlook-gray-500: #c8c6c4;
+$outlook-gray-600: #a19f9d;
+$outlook-gray-700: #8a8886;
+$outlook-gray-800: #605e5c;
+$outlook-gray-900: #323130;
+$outlook-gray-950: #201f1e;
+
+// 覆盖 Element Plus 主题
+:root {
+  --el-color-primary: #{$outlook-primary};
+  --el-color-primary-light-3: #4ea6dc;
+  --el-color-primary-light-5: #7fc4e8;
+  --el-color-primary-light-7: #b3dcf0;
+  --el-color-primary-light-8: #cce8f5;
+  --el-color-primary-light-9: #e5f4fa;
+  --el-color-primary-dark-2: #0062ab;
+  --el-border-radius-base: 2px;
+}
+
+// 滚动条样式（Outlook 风格）
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: $outlook-gray-500;
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: $outlook-gray-700;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+// 通用卡片样式
+.outlook-card {
+  background-color: #fff;
+  border-radius: 2px;
+  box-shadow: 0 1.6px 3.6px 0 rgba(0, 0, 0, 0.132), 0 0.3px 0.9px 0 rgba(0, 0, 0, 0.108);
+}
+
+// 工具栏按钮样式
+.toolbar-btn {
+  height: 32px;
+  padding: 0 12px;
+  border: none;
+  background: transparent;
+  color: $outlook-gray-900;
+  font-size: 13px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 2px;
+  transition: background-color 0.1s;
+
+  &:hover {
+    background-color: $outlook-gray-200;
+  }
+
+  &:active {
+    background-color: $outlook-gray-300;
+  }
+
+  &.primary {
+    background-color: $outlook-primary;
+    color: #fff;
+
+    &:hover {
+      background-color: $outlook-primary-hover;
+    }
+  }
+}
+
+// 文件夹项目样式
+.folder-item-style {
+  display: flex;
+  align-items: center;
+  padding: 8px 16px;
+  cursor: pointer;
+  color: $outlook-gray-900;
+  font-size: 13px;
+  transition: background-color 0.1s;
+
+  &:hover {
+    background-color: $outlook-gray-200;
+  }
+
+  &.active {
+    background-color: #e1efff;
+    color: $outlook-primary;
+  }
+
+  .folder-icon {
+    margin-right: 10px;
+    font-size: 16px;
+  }
+
+  .folder-name {
+    flex: 1;
+  }
+
+  .folder-count {
+    font-size: 12px;
+    color: $outlook-gray-700;
+  }
+}
+
+// 邮件项目样式
+.email-item-style {
+  display: flex;
+  padding: 12px 16px;
+  border-bottom: 1px solid $outlook-gray-300;
+  cursor: pointer;
+  transition: background-color 0.1s;
+  position: relative;
+
+  &:hover {
+    background-color: $outlook-gray-100;
+  }
+
+  &.unread {
+    background-color: #fff;
+
+    .sender-name,
+    .email-subject {
+      font-weight: 600;
+    }
+
+    &::before {
+      content: '';
+      position: absolute;
+      left: 4px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background-color: $outlook-primary;
+    }
+  }
+
+  &.selected {
+    background-color: #ecf5ff;
+  }
+
+  &.active {
+    background-color: #e1efff;
+    border-left: 3px solid $outlook-primary;
+    padding-left: 13px;
+  }
+}
+
+// 分隔线
+.divider {
+  height: 1px;
+  background-color: $outlook-gray-300;
+  margin: 8px 16px;
+}
+
+// 标签样式
+.outlook-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 2px;
+  font-size: 11px;
+  font-weight: 500;
+
+  &.primary {
+    background-color: #e1efff;
+    color: $outlook-primary;
+  }
+
+  &.success {
+    background-color: #dff6dd;
+    color: $outlook-success;
+  }
+
+  &.warning {
+    background-color: #fff4ce;
+    color: #8a6914;
+  }
+
+  &.danger {
+    background-color: #fde7e9;
+    color: $outlook-danger;
+  }
+}
+
+// 头像样式
+.outlook-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-weight: 600;
+  font-size: 14px;
+  color: #fff;
+}
+
+// 搜索框样式
+.outlook-search {
+  position: relative;
+
+  input {
+    width: 100%;
+    height: 32px;
+    padding: 0 12px 0 36px;
+    border: 1px solid $outlook-gray-400;
+    border-radius: 2px;
+    font-size: 13px;
+    background-color: #fff;
+    transition: border-color 0.1s, box-shadow 0.1s;
+
+    &:focus {
+      outline: none;
+      border-color: $outlook-primary;
+      box-shadow: 0 0 0 1px $outlook-primary;
+    }
+
+    &::placeholder {
+      color: $outlook-gray-600;
+    }
+  }
+
+  .search-icon {
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: $outlook-gray-700;
+  }
+}
+
+// 对话框样式覆盖
+.el-dialog {
+  border-radius: 4px !important;
+
+  .el-dialog__header {
+    border-bottom: 1px solid $outlook-gray-300;
+    padding: 16px 20px;
+    margin: 0;
+  }
+
+  .el-dialog__title {
+    font-size: 18px;
+    font-weight: 600;
+    color: $outlook-gray-950;
+  }
+
+  .el-dialog__body {
+    padding: 20px;
+  }
+
+  .el-dialog__footer {
+    border-top: 1px solid $outlook-gray-300;
+    padding: 12px 20px;
+  }
+}
+
+// 按钮样式覆盖
+.el-button {
+  border-radius: 2px !important;
+  font-weight: 400;
+
+  &--primary {
+    background-color: $outlook-primary !important;
+    border-color: $outlook-primary !important;
+
+    &:hover,
+    &:focus {
+      background-color: $outlook-primary-hover !important;
+      border-color: $outlook-primary-hover !important;
+    }
+  }
+}
+
+// 输入框样式覆盖
+.el-input__wrapper {
+  border-radius: 2px !important;
+}
+
+.el-textarea__inner {
+  border-radius: 2px !important;
+}
+
+// 标签样式覆盖
+.el-tag {
+  border-radius: 2px !important;
+}
+
+// 分页样式覆盖
+.el-pagination {
+  .el-pager li {
+    border-radius: 2px !important;
+  }
+
+  .btn-prev,
+  .btn-next {
+    border-radius: 2px !important;
+  }
+}
+
+// 选项卡样式
+.el-tabs__item {
+  font-weight: 400;
+
+  &.is-active {
+    font-weight: 500;
+  }
+}
+
+// 表格样式覆盖
+.el-table {
+  th.el-table__cell {
+    background-color: $outlook-gray-100 !important;
+    font-weight: 600;
+  }
+}
+
+// 空状态
+.el-empty {
+  padding: 40px 0;
+
+  .el-empty__description {
+    color: $outlook-gray-700;
+  }
+}
+
+// 加载状态
+.el-loading-mask {
+  background-color: rgba(255, 255, 255, 0.9);
+}
+
+// 消息提示覆盖
+.el-message {
+  border-radius: 2px !important;
+}
+
+// 登录页面样式
+.login-page {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #0078d4 0%, #00a2ed 100%);
+
+  .login-box {
+    width: 400px;
+    background-color: #fff;
+    border-radius: 4px;
+    padding: 40px;
+    box-shadow: 0 25px 50px rgba(0, 0, 0, 0.25);
+
+    .login-title {
+      text-align: center;
+      font-size: 24px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      color: $outlook-gray-950;
+    }
+
+    .login-subtitle {
+      text-align: center;
+      font-size: 14px;
+      color: $outlook-gray-700;
+      margin-bottom: 32px;
+    }
+
+    .login-form {
+      .el-form-item {
+        margin-bottom: 24px;
+      }
+
+      .login-btn {
+        width: 100%;
+        height: 40px;
+        font-size: 15px;
+        font-weight: 500;
+      }
+    }
+  }
+}
+
+// 响应式调整
+@media (max-width: 768px) {
+  .login-box {
+    width: 90% !important;
+    padding: 24px !important;
+  }
+}

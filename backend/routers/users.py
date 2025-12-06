@@ -1,0 +1,249 @@
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from pydantic import BaseModel
+from typing import Optional
+from datetime import datetime, timedelta
+from jose import JWTError, jwt
+import imaplib
+
+from database.database import get_db
+from database.models import EmailAccount
+from config import get_settings
+
+router = APIRouter(prefix="/api/users", tags=["users"])
+settings = get_settings()
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/users/login", auto_error=False)
+
+# 允许登录的邮箱域名
+ALLOWED_DOMAINS = ["jingzhicheng.com.cn"]
+
+# 邮箱服务器配置
+EMAIL_SERVERS = {
+    "jingzhicheng.com.cn": {
+        "imap": "imap-ent.21cn.com",  # 21cn 企业邮箱
+        "smtp": "smtp-ent.21cn.com",
+        "imap_port": 993,
+        "smtp_port": 465
+    },
+}
+
+
+# ============ Schemas ============
+class EmailLoginRequest(BaseModel):
+    email: str
+    password: str  # 邮箱密码
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str
+    email: str
+    account_id: int
+
+
+class AccountResponse(BaseModel):
+    id: int
+    email: str
+    imap_server: str
+    smtp_server: str
+    is_active: bool
+    last_sync_at: Optional[datetime]
+
+    class Config:
+        from_attributes = True
+
+
+# ============ Helper Functions ============
+def get_email_domain(email: str) -> str:
+    """提取邮箱域名"""
+    return email.split("@")[-1].lower() if "@" in email else ""
+
+
+def verify_email_credentials(email: str, password: str, imap_server: str, imap_port: int = 993) -> tuple[bool, str]:
+    """验证邮箱账号密码是否正确
+
+    返回: (success, error_message)
+    """
+    import socket
+
+    # 设置超时
+    socket.setdefaulttimeout(30)
+
+    try:
+        print(f"[IMAP] Connecting to {imap_server}:{imap_port}...")
+        imap = imaplib.IMAP4_SSL(imap_server, imap_port)
+        print(f"[IMAP] Connected, attempting login for {email}...")
+
+        # 尝试登录
+        imap.login(email, password)
+        print(f"[IMAP] Login successful!")
+
+        # 验证能够选择收件箱
+        imap.select("INBOX")
+        print(f"[IMAP] INBOX selected successfully")
+
+        imap.logout()
+        return True, ""
+
+    except imaplib.IMAP4.error as e:
+        error_msg = str(e)
+        print(f"[IMAP] Login failed: {error_msg}")
+
+        # 解析常见错误
+        if "password" in error_msg.lower() or "incorrect" in error_msg.lower():
+            return False, "邮箱密码错误，请检查密码是否正确"
+        elif "abnormal" in error_msg.lower() or "not open" in error_msg.lower():
+            return False, "IMAP服务未开启，请在企业邮箱设置中开启IMAP/SMTP服务"
+        elif "frequency" in error_msg.lower() or "limited" in error_msg.lower():
+            return False, "登录频率受限，请稍后再试"
+        elif "busy" in error_msg.lower():
+            return False, "邮箱服务器繁忙，请稍后再试"
+        else:
+            return False, f"登录失败: {error_msg}"
+
+    except socket.timeout:
+        print(f"[IMAP] Connection timeout")
+        return False, "连接邮箱服务器超时，请检查网络连接"
+
+    except socket.gaierror as e:
+        print(f"[IMAP] DNS error: {e}")
+        return False, "无法解析邮箱服务器地址，请检查网络连接"
+
+    except ConnectionRefusedError:
+        print(f"[IMAP] Connection refused")
+        return False, "邮箱服务器拒绝连接，请检查服务器配置"
+
+    except Exception as e:
+        print(f"[IMAP] Unexpected error: {type(e).__name__}: {e}")
+        return False, f"连接错误: {str(e)}"
+    finally:
+        socket.setdefaulttimeout(None)
+
+
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=settings.access_token_expire_minutes))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
+
+
+# ============ Routes ============
+@router.post("/login", response_model=LoginResponse)
+async def login_with_email(
+    request: EmailLoginRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """用公司邮箱登录"""
+    email = request.email.strip().lower()
+    password = request.password
+    domain = get_email_domain(email)
+
+    # 检查邮箱域名是否允许
+    if domain not in ALLOWED_DOMAINS:
+        raise HTTPException(
+            status_code=403,
+            detail="只允许使用公司邮箱 (@jingzhicheng.com.cn) 登录"
+        )
+
+    # 获取服务器配置
+    config = EMAIL_SERVERS.get(domain)
+    if not config:
+        raise HTTPException(status_code=400, detail="无法识别邮箱服务器配置")
+
+    imap_server = config["imap"]
+    smtp_server = config["smtp"]
+    imap_port = config["imap_port"]
+    smtp_port = config["smtp_port"]
+
+    # 验证邮箱登录
+    success, error_msg = verify_email_credentials(email, password, imap_server, imap_port)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=error_msg or "邮箱账号或密码错误"
+        )
+
+    # 查找或创建邮箱账户
+    result = await db.execute(select(EmailAccount).where(EmailAccount.email == email))
+    account = result.scalar_one_or_none()
+
+    if account:
+        # 更新密码
+        account.password = password
+        account.is_active = True
+    else:
+        # 创建新账户
+        account = EmailAccount(
+            email=email,
+            password=password,
+            imap_server=imap_server,
+            smtp_server=smtp_server,
+            imap_port=imap_port,
+            smtp_port=smtp_port,
+            is_active=True
+        )
+        db.add(account)
+
+    await db.commit()
+    await db.refresh(account)
+
+    # 生成 JWT
+    access_token = create_access_token(
+        data={"sub": email, "account_id": account.id},
+        expires_delta=timedelta(days=7)
+    )
+
+    return LoginResponse(
+        access_token=access_token,
+        token_type="bearer",
+        email=email,
+        account_id=account.id
+    )
+
+
+async def get_current_account(
+    token: str = Depends(oauth2_scheme),
+    db: AsyncSession = Depends(get_db)
+) -> EmailAccount:
+    """从 JWT 获取当前登录的邮箱账户"""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="登录已过期，请重新登录",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    if not token:
+        raise credentials_exception
+
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+        email: str = payload.get("sub")
+        account_id: int = payload.get("account_id")
+        if email is None or account_id is None:
+            raise credentials_exception
+
+        result = await db.execute(select(EmailAccount).where(EmailAccount.id == account_id))
+        account = result.scalar_one_or_none()
+
+        if account is None or not account.is_active:
+            raise credentials_exception
+
+        return account
+
+    except JWTError:
+        raise credentials_exception
+
+
+@router.get("/me", response_model=AccountResponse)
+async def get_current_account_info(account: EmailAccount = Depends(get_current_account)):
+    """获取当前登录账户信息"""
+    return account
+
+
+@router.post("/logout")
+async def logout():
+    """退出登录（前端清除token即可）"""
+    return {"message": "已退出登录"}

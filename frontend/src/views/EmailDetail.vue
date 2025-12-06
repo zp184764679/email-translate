@@ -1,0 +1,1000 @@
+<template>
+  <div class="email-detail-page" v-loading="loading">
+    <!-- 顶部操作栏 -->
+    <div class="detail-toolbar">
+      <div class="toolbar-left">
+        <el-button :icon="ArrowLeft" @click="$router.back()">返回</el-button>
+        <el-divider direction="vertical" />
+        <el-button-group>
+          <el-button :icon="Back" @click="handleReply">回复</el-button>
+          <el-button :icon="ChatLineSquare" @click="handleReplyAll">全部回复</el-button>
+          <el-button :icon="Right" @click="handleForward">转发</el-button>
+        </el-button-group>
+        <el-divider direction="vertical" />
+        <el-button-group>
+          <el-button :icon="Delete" type="danger" plain @click="handleDelete">删除</el-button>
+          <el-button :icon="Star" @click="handleFlag">
+            {{ email?.is_flagged ? '取消标记' : '标记' }}
+          </el-button>
+        </el-button-group>
+      </div>
+      <div class="toolbar-right">
+        <el-button :icon="Printer" @click="handlePrint">打印</el-button>
+      </div>
+    </div>
+
+    <!-- 邮件内容区 -->
+    <div class="detail-content" v-if="email">
+      <!-- 主题 -->
+      <div class="email-subject-section">
+        <h1 class="email-subject">{{ email.subject_translated || email.subject_original }}</h1>
+        <div class="email-labels">
+          <el-tag v-if="email.direction === 'inbound'" type="primary" size="small">收件</el-tag>
+          <el-tag v-else type="success" size="small">发件</el-tag>
+          <el-tag
+            v-if="email.language_detected && email.language_detected !== 'zh'"
+            :type="email.is_translated ? 'success' : 'warning'"
+            size="small"
+          >
+            {{ email.is_translated ? '已翻译' : getLanguageName(email.language_detected) }}
+          </el-tag>
+        </div>
+      </div>
+
+      <!-- 发件人信息 -->
+      <div class="sender-section">
+        <el-avatar :size="48" :style="{ backgroundColor: getAvatarColor(email.from_email) }">
+          {{ getInitials(email.from_name || email.from_email) }}
+        </el-avatar>
+        <div class="sender-info">
+          <div class="sender-primary">
+            <span class="sender-name">{{ email.from_name || email.from_email }}</span>
+            <span class="sender-email" v-if="email.from_name">&lt;{{ email.from_email }}&gt;</span>
+          </div>
+          <div class="recipient-info">
+            <div class="recipient-row">
+              <span class="label">收件人：</span>
+              <span class="value">{{ formatAddressList(email.to_email) }}</span>
+            </div>
+            <div class="recipient-row" v-if="email.cc_email">
+              <span class="label">抄送：</span>
+              <span class="value cc">{{ formatAddressList(email.cc_email) }}</span>
+            </div>
+            <div class="recipient-row" v-if="email.bcc_email">
+              <span class="label">密送：</span>
+              <span class="value bcc">{{ formatAddressList(email.bcc_email) }}</span>
+            </div>
+            <div class="recipient-row" v-if="email.reply_to && email.reply_to !== email.from_email">
+              <span class="label">回复至：</span>
+              <span class="value">{{ email.reply_to }}</span>
+            </div>
+          </div>
+        </div>
+        <div class="email-datetime">
+          <div class="date-primary">{{ formatDate(email.received_at) }}</div>
+          <div class="date-secondary">{{ formatTime(email.received_at) }}</div>
+        </div>
+      </div>
+
+      <!-- 翻译提示条 -->
+      <div class="translation-notice" v-if="!email.is_translated && email.language_detected !== 'zh'">
+        <el-icon><InfoFilled /></el-icon>
+        <span>此邮件为 {{ getLanguageName(email.language_detected) }}，尚未翻译</span>
+        <el-button type="primary" size="small" @click="translateEmail" :loading="translating">
+          立即翻译
+        </el-button>
+      </div>
+
+      <!-- 附件区域 -->
+      <div class="attachments-section" v-if="email.attachments && email.attachments.length > 0">
+        <div class="section-header">
+          <el-icon><Paperclip /></el-icon>
+          <span>附件 ({{ email.attachments.length }})</span>
+          <el-button text size="small">全部下载</el-button>
+        </div>
+        <div class="attachments-grid">
+          <div class="attachment-card" v-for="att in email.attachments" :key="att.id">
+            <div class="attachment-icon">
+              <el-icon :size="24"><Document /></el-icon>
+            </div>
+            <div class="attachment-info">
+              <div class="attachment-name">{{ att.filename }}</div>
+              <div class="attachment-size">{{ formatFileSize(att.file_size) }}</div>
+            </div>
+            <div class="attachment-actions">
+              <el-button text size="small" :icon="Download">下载</el-button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 邮件正文 - Split View -->
+      <div class="body-section split-view">
+        <div class="split-header">
+          <div class="split-header-left">
+            <el-icon><Document /></el-icon>
+            <span>原文 ({{ getLanguageName(email.language_detected) }})</span>
+            <el-tag v-if="!email.body_original || !email.body_original.trim()" type="info" size="small">HTML</el-tag>
+          </div>
+          <div class="split-header-right">
+            <el-icon><Document /></el-icon>
+            <span>翻译 (中文)</span>
+            <el-tag v-if="!email.is_translated" type="warning" size="small">未翻译</el-tag>
+          </div>
+        </div>
+
+        <div class="split-body">
+          <!-- 左侧原文 -->
+          <div
+            class="split-pane original-pane"
+            ref="originalPane"
+            @scroll="handleOriginalScroll"
+          >
+            <!-- 优先显示纯文本，否则显示 HTML 渲染 -->
+            <div class="pane-content" v-if="email.body_original && email.body_original.trim()">
+              {{ email.body_original }}
+            </div>
+            <div class="pane-content html-content" v-else-if="email.body_html" v-html="sanitizeHtml(email.body_html)">
+            </div>
+            <div class="pane-content empty-content" v-else>
+              (无文本内容)
+            </div>
+          </div>
+
+          <!-- 分隔线 -->
+          <div class="split-divider"></div>
+
+          <!-- 右侧翻译 -->
+          <div
+            class="split-pane translated-pane"
+            ref="translatedPane"
+            @scroll="handleTranslatedScroll"
+          >
+            <div class="pane-content" v-if="email.body_translated">
+              {{ email.body_translated }}
+            </div>
+            <div class="pane-placeholder" v-else>
+              <el-icon :size="32"><DocumentCopy /></el-icon>
+              <p>尚未翻译</p>
+              <el-button type="primary" @click="translateEmail" :loading="translating">
+                立即翻译
+              </el-button>
+            </div>
+          </div>
+        </div>
+
+        <!-- HTML 原文切换（可选） -->
+        <div class="html-toggle" v-if="email.body_html">
+          <el-button text size="small" @click="showHtmlDialog = true">
+            <el-icon><View /></el-icon>
+            查看 HTML 原文
+          </el-button>
+        </div>
+      </div>
+
+      <!-- HTML 原文对话框 -->
+      <el-dialog v-model="showHtmlDialog" title="HTML 原文" width="80%" top="5vh">
+        <div class="body-html" v-html="sanitizeHtml(email.body_html)"></div>
+      </el-dialog>
+
+      <!-- 回复区域 -->
+      <div class="reply-section">
+        <div class="reply-header">
+          <h3>回复邮件</h3>
+          <el-button type="primary" @click="showReplyDialog = true">
+            撰写回复
+          </el-button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 回复对话框 -->
+    <el-dialog
+      v-model="showReplyDialog"
+      title="回复邮件"
+      width="75%"
+      top="5vh"
+      :close-on-click-modal="false"
+    >
+      <div class="reply-dialog-content">
+        <div class="reply-to-info">
+          <span>回复给：</span>
+          <strong>{{ email?.from_name || email?.from_email }}</strong>
+        </div>
+
+        <div class="reply-body-grid">
+          <div class="reply-input">
+            <div class="section-label">
+              中文内容
+              <el-select v-model="replyForm.target_language" size="small" style="margin-left: 12px; width: 100px;">
+                <el-option label="英语" value="en" />
+                <el-option label="日语" value="ja" />
+                <el-option label="韩语" value="ko" />
+                <el-option label="德语" value="de" />
+                <el-option label="法语" value="fr" />
+              </el-select>
+            </div>
+            <el-input
+              v-model="replyForm.body_chinese"
+              type="textarea"
+              :rows="12"
+              placeholder="请输入中文回复内容..."
+            />
+          </div>
+
+          <div class="reply-preview">
+            <div class="section-label">
+              翻译预览 ({{ getLanguageName(replyForm.target_language) }})
+              <el-button size="small" type="primary" @click="translateReply" :loading="translating">
+                翻译
+              </el-button>
+            </div>
+            <el-input
+              v-model="replyForm.body_translated"
+              type="textarea"
+              :rows="12"
+              placeholder="点击翻译按钮生成译文..."
+            />
+          </div>
+        </div>
+      </div>
+
+      <template #footer>
+        <el-button @click="showReplyDialog = false">取消</el-button>
+        <el-button @click="saveDraft">保存草稿</el-button>
+        <el-button type="primary" @click="submitReply" :loading="submitting">
+          发送
+        </el-button>
+      </template>
+    </el-dialog>
+  </div>
+</template>
+
+<script setup>
+import { ref, reactive, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import {
+  ArrowLeft, Back, ChatLineSquare, Right, Delete, Star,
+  Printer, Paperclip, Document, Download, InfoFilled, DocumentCopy, View
+} from '@element-plus/icons-vue'
+import api from '@/api'
+import dayjs from 'dayjs'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import DOMPurify from 'dompurify'
+
+const route = useRoute()
+const router = useRouter()
+
+const email = ref(null)
+const loading = ref(false)
+const showReplyDialog = ref(false)
+const showHtmlDialog = ref(false)
+const translating = ref(false)
+const submitting = ref(false)
+
+// Split View 滚动同步
+const originalPane = ref(null)
+const translatedPane = ref(null)
+let isScrollingSynced = false  // 防止无限循环
+
+function handleOriginalScroll(e) {
+  if (isScrollingSynced) return
+  if (!translatedPane.value) return
+
+  isScrollingSynced = true
+  const sourceEl = e.target
+  const targetEl = translatedPane.value
+
+  // 按比例同步滚动
+  const scrollPercentage = sourceEl.scrollTop / (sourceEl.scrollHeight - sourceEl.clientHeight)
+  targetEl.scrollTop = scrollPercentage * (targetEl.scrollHeight - targetEl.clientHeight)
+
+  setTimeout(() => { isScrollingSynced = false }, 50)
+}
+
+function handleTranslatedScroll(e) {
+  if (isScrollingSynced) return
+  if (!originalPane.value) return
+
+  isScrollingSynced = true
+  const sourceEl = e.target
+  const targetEl = originalPane.value
+
+  // 按比例同步滚动
+  const scrollPercentage = sourceEl.scrollTop / (sourceEl.scrollHeight - sourceEl.clientHeight)
+  targetEl.scrollTop = scrollPercentage * (targetEl.scrollHeight - targetEl.clientHeight)
+
+  setTimeout(() => { isScrollingSynced = false }, 50)
+}
+
+const replyForm = reactive({
+  body_chinese: '',
+  body_translated: '',
+  target_language: 'en'
+})
+
+onMounted(() => {
+  loadEmail()
+})
+
+async function loadEmail() {
+  const id = route.params.id
+  loading.value = true
+
+  try {
+    email.value = await api.getEmail(id)
+
+    // 自动标记为已读
+    if (!email.value.is_read) {
+      try {
+        await api.markAsRead(id)
+        email.value.is_read = true
+      } catch (e) {
+        console.error('Failed to mark as read:', e)
+      }
+    }
+
+    // 设置目标语言
+    if (email.value.language_detected && email.value.language_detected !== 'zh') {
+      replyForm.target_language = email.value.language_detected
+    }
+
+    // 如果URL带有reply参数，自动打开回复对话框
+    if (route.query.reply === 'true') {
+      showReplyDialog.value = true
+    }
+  } catch (e) {
+    console.error('Failed to load email:', e)
+    ElMessage.error('加载邮件失败')
+  } finally {
+    loading.value = false
+  }
+}
+
+function handleReply() {
+  showReplyDialog.value = true
+}
+
+function handleReplyAll() {
+  showReplyDialog.value = true
+}
+
+function handleForward() {
+  ElMessage.info('转发功能开发中')
+}
+
+async function handleDelete() {
+  try {
+    await ElMessageBox.confirm('确定要删除这封邮件吗？', '删除确认', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+
+    await api.deleteEmail(email.value.id)
+    ElMessage.success('邮件已删除')
+    router.back()
+  } catch (e) {
+    if (e !== 'cancel') {
+      console.error('Failed to delete email:', e)
+      ElMessage.error('删除失败')
+    }
+  }
+}
+
+async function handleFlag() {
+  if (!email.value) return
+
+  const originalState = email.value.is_flagged
+  email.value.is_flagged = !email.value.is_flagged
+
+  try {
+    if (email.value.is_flagged) {
+      await api.flagEmail(email.value.id)
+      ElMessage.success('已标记')
+    } else {
+      await api.unflagEmail(email.value.id)
+      ElMessage.success('已取消标记')
+    }
+  } catch (e) {
+    email.value.is_flagged = originalState
+    console.error('Failed to toggle flag:', e)
+    ElMessage.error('操作失败')
+  }
+}
+
+function handlePrint() {
+  window.print()
+}
+
+async function translateEmail() {
+  translating.value = true
+  try {
+    await api.translateEmail(email.value.id)
+    ElMessage.success('翻译完成')
+    loadEmail()
+  } catch (e) {
+    console.error('Translation failed:', e)
+    ElMessage.error('翻译失败')
+  } finally {
+    translating.value = false
+  }
+}
+
+async function translateReply() {
+  if (!replyForm.body_chinese.trim()) {
+    ElMessage.warning('请先输入中文内容')
+    return
+  }
+
+  translating.value = true
+  try {
+    const result = await api.translateReply(
+      replyForm.body_chinese,
+      replyForm.target_language,
+      email.value.supplier_id,
+      email.value.body_original?.substring(0, 500)
+    )
+    replyForm.body_translated = result.translated_text
+    ElMessage.success('翻译完成')
+  } catch (e) {
+    console.error('Translation failed:', e)
+    ElMessage.error('翻译失败')
+  } finally {
+    translating.value = false
+  }
+}
+
+async function saveDraft() {
+  if (!replyForm.body_chinese.trim()) {
+    ElMessage.warning('请输入回复内容')
+    return
+  }
+
+  try {
+    await api.createDraft({
+      reply_to_email_id: email.value.id,
+      body_chinese: replyForm.body_chinese,
+      body_translated: replyForm.body_translated,
+      target_language: replyForm.target_language
+    })
+    ElMessage.success('草稿已保存')
+    showReplyDialog.value = false
+  } catch (e) {
+    console.error('Failed to save draft:', e)
+    ElMessage.error('保存草稿失败')
+  }
+}
+
+async function submitReply() {
+  if (!replyForm.body_chinese.trim()) {
+    ElMessage.warning('请输入回复内容')
+    return
+  }
+
+  if (!replyForm.body_translated.trim()) {
+    ElMessage.warning('请先翻译内容')
+    return
+  }
+
+  submitting.value = true
+  try {
+    const draft = await api.createDraft({
+      reply_to_email_id: email.value.id,
+      body_chinese: replyForm.body_chinese,
+      body_translated: replyForm.body_translated,
+      target_language: replyForm.target_language
+    })
+
+    const result = await api.submitDraft(draft.id)
+
+    if (result.status === 'sent') {
+      ElMessage.success('邮件已发送')
+    } else if (result.status === 'pending') {
+      ElMessage.info(`邮件已提交审批 (触发规则: ${result.rule})`)
+    }
+
+    showReplyDialog.value = false
+    replyForm.body_chinese = ''
+    replyForm.body_translated = ''
+  } catch (e) {
+    console.error('Failed to submit reply:', e)
+    ElMessage.error('发送失败')
+  } finally {
+    submitting.value = false
+  }
+}
+
+function formatDate(date) {
+  return dayjs(date).format('YYYY年MM月DD日')
+}
+
+function formatTime(date) {
+  return dayjs(date).format('HH:mm')
+}
+
+function formatAddressList(addressStr) {
+  if (!addressStr) return ''
+  return addressStr
+    .replace(/\r\n/g, ' ')
+    .replace(/\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(',')
+    .map(addr => addr.trim())
+    .filter(addr => addr)
+    .join('; ')
+}
+
+function getLanguageName(lang) {
+  const names = {
+    en: '英语',
+    ja: '日语',
+    ko: '韩语',
+    zh: '中文',
+    de: '德语',
+    fr: '法语',
+    es: '西班牙语',
+    pt: '葡萄牙语',
+    ru: '俄语',
+    unknown: '未知'
+  }
+  return names[lang] || lang
+}
+
+function getInitials(name) {
+  if (!name) return '?'
+  const parts = name.split(/[@\s]+/)
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[1][0]).toUpperCase()
+  }
+  return name.substring(0, 2).toUpperCase()
+}
+
+function getAvatarColor(email) {
+  if (!email) return '#409eff'
+  const colors = [
+    '#409eff', '#67c23a', '#e6a23c', '#f56c6c',
+    '#909399', '#00bcd4', '#9c27b0', '#ff5722'
+  ]
+  let hash = 0
+  for (let i = 0; i < email.length; i++) {
+    hash = email.charCodeAt(i) + ((hash << 5) - hash)
+  }
+  return colors[Math.abs(hash) % colors.length]
+}
+
+function formatFileSize(bytes) {
+  if (!bytes || bytes === 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  const k = 1024
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + units[i]
+}
+
+function sanitizeHtml(html) {
+  if (!html) return ''
+  return DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: ['p', 'br', 'div', 'span', 'b', 'i', 'u', 'strong', 'em',
+                   'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li',
+                   'table', 'tr', 'td', 'th', 'thead', 'tbody', 'a', 'img',
+                   'blockquote', 'pre', 'code', 'hr', 'font', 'center'],
+    ALLOWED_ATTR: ['href', 'src', 'alt', 'title', 'style', 'class', 'color', 'size', 'face'],
+    ALLOW_DATA_ATTR: false
+  })
+}
+</script>
+
+<style scoped>
+.email-detail-page {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background-color: #fff;
+}
+
+/* 工具栏 */
+.detail-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 20px;
+  border-bottom: 1px solid #e8e8e8;
+  background-color: #fafafa;
+  flex-shrink: 0;
+}
+
+.toolbar-left,
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 内容区 */
+.detail-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 20px 20px;
+}
+
+/* 主题区域 */
+.email-subject-section {
+  padding: 20px 0 12px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.email-subject {
+  font-size: 22px;
+  font-weight: 600;
+  color: #1a1a1a;
+  margin: 0 0 8px;
+  line-height: 1.4;
+}
+
+.email-labels {
+  display: flex;
+  gap: 8px;
+}
+
+/* 发件人区域 */
+.sender-section {
+  display: flex;
+  align-items: flex-start;
+  padding: 16px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.sender-info {
+  flex: 1;
+  margin-left: 12px;
+}
+
+.sender-primary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.sender-name {
+  font-weight: 600;
+  font-size: 15px;
+  color: #1a1a1a;
+}
+
+.sender-email {
+  font-size: 13px;
+  color: #909399;
+}
+
+.recipient-info {
+  font-size: 13px;
+  color: #606266;
+}
+
+.recipient-row {
+  margin-top: 4px;
+}
+
+.recipient-row .label {
+  color: #909399;
+  margin-right: 4px;
+}
+
+.recipient-row .value.cc,
+.recipient-row .value.bcc {
+  color: #909399;
+}
+
+.email-datetime {
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.date-primary {
+  font-size: 14px;
+  color: #303133;
+}
+
+.date-secondary {
+  font-size: 12px;
+  color: #909399;
+  margin-top: 2px;
+}
+
+/* 翻译提示 */
+.translation-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  margin: 12px 0;
+  background-color: #fdf6ec;
+  border: 1px solid #faecd8;
+  border-radius: 4px;
+  font-size: 13px;
+  color: #e6a23c;
+}
+
+/* 附件区域 */
+.attachments-section {
+  margin: 16px 0;
+  padding: 12px 16px;
+  background-color: #fafafa;
+  border-radius: 4px;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #606266;
+  margin-bottom: 12px;
+}
+
+.attachments-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.attachment-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background-color: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  min-width: 200px;
+}
+
+.attachment-card:hover {
+  border-color: #409eff;
+  background-color: #ecf5ff;
+}
+
+.attachment-icon {
+  color: #909399;
+}
+
+.attachment-info {
+  flex: 1;
+}
+
+.attachment-name {
+  font-size: 13px;
+  color: #303133;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+
+.attachment-size {
+  font-size: 11px;
+  color: #909399;
+  margin-top: 2px;
+}
+
+/* Split View 正文区域 */
+.body-section.split-view {
+  margin-top: 16px;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 400px;
+}
+
+.split-header {
+  display: flex;
+  background-color: #fafafa;
+  border-bottom: 1px solid #e8e8e8;
+}
+
+.split-header-left,
+.split-header-right {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #606266;
+}
+
+.split-header-left {
+  border-right: 1px solid #e8e8e8;
+  background-color: #fff9e6;
+}
+
+.split-header-right {
+  background-color: #e6f7ff;
+}
+
+.split-body {
+  display: flex;
+  flex: 1;
+  min-height: 300px;
+}
+
+.split-pane {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.original-pane {
+  background-color: #fffef0;
+  border-right: none;
+}
+
+.translated-pane {
+  background-color: #f0f9ff;
+}
+
+.split-divider {
+  width: 4px;
+  background: linear-gradient(to bottom, #e8e8e8 0%, #d0d0d0 50%, #e8e8e8 100%);
+  cursor: col-resize;
+  flex-shrink: 0;
+}
+
+.split-divider:hover {
+  background: linear-gradient(to bottom, #409eff 0%, #79bbff 50%, #409eff 100%);
+}
+
+.pane-content {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.8;
+  font-size: 14px;
+  color: #303133;
+}
+
+.pane-content.html-content {
+  white-space: normal;
+}
+
+.pane-content.html-content :deep(img) {
+  max-width: 100%;
+  height: auto;
+}
+
+.pane-content.html-content :deep(table) {
+  border-collapse: collapse;
+  max-width: 100%;
+}
+
+.pane-content.html-content :deep(td),
+.pane-content.html-content :deep(th) {
+  border: 1px solid #ddd;
+  padding: 6px;
+}
+
+.pane-content.html-content :deep(a) {
+  color: #409eff;
+}
+
+.pane-content.html-content :deep(blockquote) {
+  border-left: 3px solid #ddd;
+  padding-left: 12px;
+  margin-left: 0;
+  color: #666;
+}
+
+.pane-content.empty-content {
+  color: #909399;
+  font-style: italic;
+}
+
+.pane-placeholder {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: #909399;
+  gap: 12px;
+}
+
+.pane-placeholder p {
+  margin: 0;
+  font-size: 14px;
+}
+
+.html-toggle {
+  padding: 8px 16px;
+  border-top: 1px solid #e8e8e8;
+  background-color: #fafafa;
+  text-align: center;
+}
+
+.body-html {
+  padding: 16px;
+  background-color: #fafafa;
+  border-radius: 4px;
+  overflow: auto;
+  max-height: 600px;
+}
+
+.body-html :deep(img) {
+  max-width: 100%;
+  height: auto;
+}
+
+.body-html :deep(table) {
+  border-collapse: collapse;
+  max-width: 100%;
+}
+
+.body-html :deep(td),
+.body-html :deep(th) {
+  border: 1px solid #ddd;
+  padding: 8px;
+}
+
+.body-html :deep(a) {
+  color: #409eff;
+}
+
+.body-html :deep(blockquote) {
+  border-left: 3px solid #ddd;
+  padding-left: 12px;
+  margin-left: 0;
+  color: #666;
+}
+
+/* 回复区域 */
+.reply-section {
+  margin-top: 24px;
+  padding: 16px;
+  background-color: #fafafa;
+  border-radius: 4px;
+}
+
+.reply-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.reply-header h3 {
+  margin: 0;
+  font-size: 16px;
+  color: #303133;
+}
+
+/* 回复对话框 */
+.reply-dialog-content {
+  padding: 0 10px;
+}
+
+.reply-to-info {
+  margin-bottom: 16px;
+  font-size: 14px;
+  color: #606266;
+}
+
+.reply-body-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+.section-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 14px;
+  font-weight: 500;
+  color: #606266;
+  margin-bottom: 8px;
+}
+</style>

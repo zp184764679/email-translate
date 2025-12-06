@@ -1,0 +1,76 @@
+{
+  "name": "supplier-email-translator",
+  "version": "1.0.0",
+  "description": "供应商邮件翻译管理系统",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "vite:dev": "vite --port 3456",
+    "electron:dev": "concurrently --kill-others-on-fail \"npm run vite:dev\" \"wait-on http://localhost:3456 && electron .\"",
+    "electron:build": "vite build && electron-builder",
+    "electron:build:win": "vite build && electron-builder --win",
+    "electron:build:mac": "vite build && electron-builder --mac"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.1",
+    "axios": "^1.6.5",
+    "dayjs": "^1.11.10",
+    "dompurify": "^3.3.0",
+    "element-plus": "^2.5.0",
+    "electron-updater": "^6.1.0",
+    "pinia": "^2.1.7",
+    "vue": "^3.4.0",
+    "vue-router": "^4.2.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.0",
+    "concurrently": "^8.2.0",
+    "electron": "^28.3.3",
+    "electron-builder": "^24.9.0",
+    "sass": "^1.69.0",
+    "vite": "^5.0.0",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.supplier.email.translator",
+    "productName": "供应商邮件翻译系统",
+    "directories": {
+      "output": "dist_electron"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../backend/dist/backend.exe",
+        "to": "backend/backend.exe"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "signAndEditExecutable": false
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "icon": "public/icon.icns"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "供应商邮件翻译系统"
+    },
+    "publish": {
+      "provider": "generic",
+      "url": "https://your-update-server.com/updates"
+    }
+  }
+}
