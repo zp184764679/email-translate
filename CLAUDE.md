@@ -382,3 +382,81 @@ emails 表（新增字段）
 4. 集成 Claude Batch API
 
 **当前测试**：先用本地 Ollama 模型测试定时任务流程，确认无误后再切换到 Claude Batch API
+
+---
+
+## 生产环境部署
+
+### 服务器信息
+
+- **服务器地址**: 61.145.212.28 (jzchardware.cn)
+- **用户**: aaa
+- **代码目录**: `/www/email-translate/`
+- **访问地址**: `https://jzchardware.cn:8888/email/`
+- **GitHub**: https://github.com/zp184764679/email-translate
+
+### 端口配置
+
+| 环境 | 后端端口 | 前端端口 | 前端路径 | API路径 |
+|------|----------|----------|----------|---------|
+| 开发 | 8000 | 4567 | - | /api/ |
+| 生产 | 8007 | - | /email/ | /email/api/ |
+
+**PM2服务名**: email-backend
+
+### 部署命令
+
+```bash
+# Git 自动部署
+git add . && git commit -m "更新说明" && git push origin main
+# GitHub Actions 自动触发部署
+
+# 手动部署
+cd /www/email-translate
+git pull origin main
+cd backend && source venv/bin/activate && pip install -r requirements.txt
+cd ../frontend && npm install && npm run build
+pm2 restart email-backend
+
+# 健康检查
+curl http://127.0.0.1:8007/health
+```
+
+### 配置文件
+
+| 文件 | 说明 |
+|------|------|
+| `ecosystem.config.js` | PM2 开发配置 (Windows) |
+| `ecosystem.prod.config.js` | PM2 生产配置 (Linux) |
+| `.github/workflows/deploy.yml` | GitHub Actions 自动部署 |
+| `nginx.conf.example` | Nginx 配置示例 |
+| `deploy.sh` | Linux 部署脚本 |
+
+### Nginx 路由
+
+```nginx
+# 前端静态文件
+location /email/ {
+    alias /www/email-translate/frontend/dist/;
+    try_files $uri $uri/ /email/index.html;
+}
+
+# API 代理
+location /email/api/ {
+    rewrite ^/email/api/(.*)$ /$1 break;
+    proxy_pass http://127.0.0.1:8007;
+}
+```
+
+**注意**: Nginx 会去掉 `/email/api/` 前缀，后端路由不需要包含此前缀
+
+### GitHub Actions Secrets
+
+需要在 GitHub 仓库设置以下 Secrets:
+
+| Secret | 说明 |
+|--------|------|
+| SERVER_HOST | 服务器 IP (61.145.212.28) |
+| SERVER_USER | SSH 用户名 (aaa) |
+| SSH_PRIVATE_KEY | SSH 私钥 |
+| SERVER_PORT | SSH 端口 (默认 22) |

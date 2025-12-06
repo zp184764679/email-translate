@@ -88,3 +88,20 @@ htmlcov/
 *.bak
 *.backup
 nul
+
+# ===== 临时测试文件 =====
+test_*.py
+export_*.py
+*_export.json
+prompt_optimization*.md
+create_icon.py
+
+# ===== 数据目录 =====
+data/
+backend/data/
+
+# ===== Claude Code =====
+.claude/
+
+# ===== 生产环境配置 (敏感信息) =====
+backend/.env.production
