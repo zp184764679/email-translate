@@ -3,18 +3,20 @@ const path = require('path')
 const { autoUpdater } = require('electron-updater')
 const https = require('https')
 
-// 单实例锁定 - 确保只能运行一个 Electron 实例
-const gotTheLock = app.requestSingleInstanceLock()
+const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
+
+// 单实例锁定 - 开发版和生产版使用不同的锁，可以同时运行
+// 开发版使用 'email-translate-dev'，生产版使用默认锁
+const lockKey = isDev ? { additionalData: { dev: true } } : undefined
+const gotTheLock = app.requestSingleInstanceLock(lockKey)
 
 if (!gotTheLock) {
-  console.log('另一个实例已在运行，退出当前实例')
+  console.log(`另一个${isDev ? '开发版' : '生产版'}实例已在运行，退出当前实例`)
   app.quit()
 }
 
 let mainWindow = null
 let tray = null
-
-const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
 // 后端配置 - 统一部署在服务器
 const BACKEND_URL = 'https://jzchardware.cn:8888/email/api'
