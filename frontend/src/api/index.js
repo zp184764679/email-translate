@@ -2,9 +2,9 @@ import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
 // Create axios instance
-// 开发环境使用 vite 代理，生产环境直连服务器
+// 开发环境直连本地后端，生产环境直连服务器
 const isDev = import.meta.env.DEV
-const baseURL = isDev ? '/api' : 'https://jzchardware.cn:8888/email/api'
+const baseURL = isDev ? 'http://127.0.0.1:2000/api' : 'https://jzchardware.cn:8888/email/api'
 
 const instance = axios.create({
   baseURL,
