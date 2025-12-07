@@ -21,6 +21,15 @@ class TranslateService:
     DEEPL_API_FREE = "https://api-free.deepl.com/v2/translate"
     DEEPL_API_PRO = "https://api.deepl.com/v2/translate"
 
+    # Token 统计（类级别，跨实例累计）
+    _token_stats = {
+        "total_input_tokens": 0,
+        "total_output_tokens": 0,
+        "total_requests": 0,
+        "session_start": None,
+        "requests_log": []  # 最近的请求记录
+    }
+
     # 核心术语表（优化版 - 仅收录高频+易错术语）
     CORE_GLOSSARY = {
         # 行业缩写 - 必须明确定义
@@ -324,7 +333,13 @@ class TranslateService:
             result = response.json()
             translated = result["content"][0]["text"].strip()
 
-            print(f"[Claude] Translated to {target_lang}")
+            # 记录 token 使用情况
+            usage = result.get("usage", {})
+            input_tokens = usage.get("input_tokens", 0)
+            output_tokens = usage.get("output_tokens", 0)
+            self._record_token_usage(input_tokens, output_tokens, len(text))
+
+            print(f"[Claude] Translated to {target_lang} (tokens: {input_tokens} in / {output_tokens} out)")
             return translated
 
         except httpx.HTTPStatusError as e:
@@ -333,6 +348,63 @@ class TranslateService:
         except Exception as e:
             print(f"Claude translation error: {e}")
             raise
+
+    def _record_token_usage(self, input_tokens: int, output_tokens: int, text_length: int):
+        """记录 token 使用情况"""
+        if self._token_stats["session_start"] is None:
+            self._token_stats["session_start"] = datetime.now().isoformat()
+
+        self._token_stats["total_input_tokens"] += input_tokens
+        self._token_stats["total_output_tokens"] += output_tokens
+        self._token_stats["total_requests"] += 1
+
+        # 保留最近 100 条记录
+        self._token_stats["requests_log"].append({
+            "timestamp": datetime.now().isoformat(),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "text_length": text_length
+        })
+        if len(self._token_stats["requests_log"]) > 100:
+            self._token_stats["requests_log"] = self._token_stats["requests_log"][-100:]
+
+    @classmethod
+    def get_token_stats(cls) -> Dict:
+        """获取 token 统计信息"""
+        stats = cls._token_stats.copy()
+        total_tokens = stats["total_input_tokens"] + stats["total_output_tokens"]
+
+        # Claude Sonnet 价格: $3/M input, $15/M output
+        input_cost = stats["total_input_tokens"] / 1_000_000 * 3
+        output_cost = stats["total_output_tokens"] / 1_000_000 * 15
+        total_cost = input_cost + output_cost
+
+        # 计算平均值
+        avg_input = stats["total_input_tokens"] / max(stats["total_requests"], 1)
+        avg_output = stats["total_output_tokens"] / max(stats["total_requests"], 1)
+
+        return {
+            "total_input_tokens": stats["total_input_tokens"],
+            "total_output_tokens": stats["total_output_tokens"],
+            "total_tokens": total_tokens,
+            "total_requests": stats["total_requests"],
+            "avg_input_tokens_per_request": round(avg_input, 1),
+            "avg_output_tokens_per_request": round(avg_output, 1),
+            "estimated_cost_usd": round(total_cost, 4),
+            "session_start": stats["session_start"],
+            "recent_requests": stats["requests_log"][-10:]  # 最近 10 条
+        }
+
+    @classmethod
+    def reset_token_stats(cls):
+        """重置 token 统计"""
+        cls._token_stats = {
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "total_requests": 0,
+            "session_start": None,
+            "requests_log": []
+        }
 
     # ============ Main Translation Method ============
     def translate_text(self, text: str, target_lang: str = "zh",

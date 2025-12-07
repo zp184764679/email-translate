@@ -278,6 +278,21 @@ async def get_translation_usage(account: EmailAccount = Depends(get_current_acco
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/token-stats")
+async def get_token_stats(account: EmailAccount = Depends(get_current_account)):
+    """获取 Claude API Token 使用统计"""
+    stats = TranslateService.get_token_stats()
+    stats["provider"] = settings.translate_provider
+    return stats
+
+
+@router.post("/token-stats/reset")
+async def reset_token_stats(account: EmailAccount = Depends(get_current_account)):
+    """重置 Token 统计"""
+    TranslateService.reset_token_stats()
+    return {"message": "Token 统计已重置"}
+
+
 # ============ Glossary Routes ============
 @router.get("/glossary/{supplier_id}", response_model=List[GlossaryResponse])
 async def get_glossary(
