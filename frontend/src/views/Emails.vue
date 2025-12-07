@@ -1,121 +1,6 @@
 <template>
-  <div class="emails-container" :class="{ 'split-mode': viewMode === 'split' }">
-    <!-- 普通列表模式 -->
-    <template v-if="viewMode !== 'split'">
-      <div class="email-list-pane">
-        <!-- 列表头部 -->
-        <div class="list-header">
-          <div class="header-left">
-            <el-checkbox
-              v-model="selectAll"
-              :indeterminate="isIndeterminate"
-              @change="handleSelectAll"
-            />
-            <span class="header-title">{{ getHeaderTitle }}</span>
-            <span class="email-count">({{ emails.length }})</span>
-          </div>
-          <div class="header-right">
-            <el-dropdown @command="handleSort">
-              <span class="sort-trigger">
-                <el-icon><Sort /></el-icon>
-                排序
-              </span>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item command="date_desc">按时间（最新）</el-dropdown-item>
-                  <el-dropdown-item command="date_asc">按时间（最早）</el-dropdown-item>
-                  <el-dropdown-item command="from">按发件人</el-dropdown-item>
-                  <el-dropdown-item command="subject">按主题</el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
-          </div>
-        </div>
-
-        <!-- 邮件列表 -->
-        <div class="email-list" v-loading="loading">
-          <div
-            v-for="email in emails"
-            :key="email.id"
-            class="email-item"
-            :class="{
-              'unread': !email.is_read,
-              'selected': selectedEmails.includes(email.id)
-            }"
-            @click="handleEmailClick(email)"
-          >
-            <!-- 左侧操作区 -->
-            <div class="email-actions">
-              <el-checkbox
-                :model-value="selectedEmails.includes(email.id)"
-                @change="toggleSelect(email.id)"
-                @click.stop
-              />
-              <el-icon
-                class="star-icon"
-                :class="{ 'starred': email.is_flagged }"
-                @click.stop="toggleFlag(email)"
-              >
-                <component :is="email.is_flagged ? StarFilled : Star" />
-              </el-icon>
-            </div>
-
-            <!-- 发件人头像 -->
-            <div class="sender-avatar">
-              <el-avatar :size="36" :style="{ backgroundColor: getAvatarColor(email.from_email) }">
-                {{ getInitials(email.from_name || email.from_email) }}
-              </el-avatar>
-            </div>
-
-            <!-- 邮件主要内容 -->
-            <div class="email-content">
-              <div class="email-top-row">
-                <span class="sender-name">{{ email.from_name || extractEmailName(email.from_email) }}</span>
-                <span class="email-time">{{ formatTime(email.received_at) }}</span>
-              </div>
-              <div class="email-subject">
-                {{ email.subject_translated || email.subject_original }}
-              </div>
-              <div class="email-preview">
-                {{ getPreview(email) }}
-              </div>
-            </div>
-
-            <!-- 右侧标签区 -->
-            <div class="email-tags">
-              <el-icon v-if="hasAttachments(email)" class="attachment-icon" title="有附件">
-                <Paperclip />
-              </el-icon>
-              <el-tag
-                v-if="email.language_detected && email.language_detected !== 'zh'"
-                size="small"
-                :type="email.is_translated ? 'success' : 'warning'"
-              >
-                {{ email.is_translated ? '已翻译' : getLanguageName(email.language_detected) }}
-              </el-tag>
-            </div>
-          </div>
-
-          <!-- 空状态 -->
-          <el-empty v-if="!loading && emails.length === 0" description="暂无邮件" />
-        </div>
-
-        <!-- 分页 -->
-        <div class="list-footer" v-if="total > pageSize">
-          <el-pagination
-            v-model:current-page="currentPage"
-            :page-size="pageSize"
-            :total="total"
-            layout="prev, pager, next"
-            small
-            @current-change="loadEmails"
-          />
-        </div>
-      </div>
-    </template>
-
+  <div class="emails-container split-mode">
     <!-- Split View 模式：左边原文，右边译文 -->
-    <template v-else>
       <!-- 左侧原文列表 -->
       <div class="split-pane original-pane">
         <div class="split-pane-header">
@@ -222,24 +107,16 @@
           @current-change="loadEmails"
         />
       </div>
-    </template>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import { Star, StarFilled, Sort, Paperclip, Message, Document, DocumentCopy } from '@element-plus/icons-vue'
 import api from '@/api'
 import dayjs from 'dayjs'
-
-const props = defineProps({
-  viewMode: {
-    type: String,
-    default: 'list'
-  }
-})
 
 const route = useRoute()
 const router = useRouter()
@@ -279,22 +156,6 @@ function handleTranslatedScroll(e) {
   setTimeout(() => { isScrollingSynced = false }, 50)
 }
 
-// 计算属性
-const selectAll = computed({
-  get: () => emails.value.length > 0 && selectedEmails.value.length === emails.value.length,
-  set: () => {}
-})
-
-const isIndeterminate = computed(() => {
-  return selectedEmails.value.length > 0 && selectedEmails.value.length < emails.value.length
-})
-
-const getHeaderTitle = computed(() => {
-  const direction = route.query.direction
-  if (direction === 'outbound') return '已发送'
-  return '收件箱'
-})
-
 // 初始化
 onMounted(() => {
   loadEmails()
@@ -310,6 +171,11 @@ watch(() => route.query, () => {
 watch(() => userStore.emailRefreshKey, () => {
   loadEmails()
 })
+
+// 暴露选中的邮件ID给父组件（Layout.vue）使用
+watch(selectedEmails, (newVal) => {
+  window.__selectedEmailIds = newVal
+}, { immediate: true })
 
 async function loadEmails() {
   loading.value = true
@@ -335,11 +201,6 @@ async function loadEmails() {
     const result = await api.getEmails(params)
     emails.value = result.emails
     total.value = result.total
-
-    // 如果是分割视图且有邮件，自动选中第一封
-    if (props.viewMode === 'split' && emails.value.length > 0 && !activeEmailId.value) {
-      handleEmailClick(emails.value[0])
-    }
   } catch (e) {
     console.error('Failed to load emails:', e)
   } finally {
@@ -348,12 +209,8 @@ async function loadEmails() {
 }
 
 function handleEmailClick(email) {
-  if (props.viewMode === 'split') {
-    activeEmailId.value = email.id
-    loadEmailDetail(email.id)
-  } else {
-    router.push(`/emails/${email.id}`)
-  }
+  // 点击邮件跳转到详情页
+  router.push(`/emails/${email.id}`)
 }
 
 async function loadEmailDetail(id) {

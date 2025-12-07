@@ -166,6 +166,9 @@ import DOMPurify from 'dompurify'
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
 import api from '@/api'
+import { useUserStore } from '@/stores/user'
+
+const userStore = useUserStore()
 
 const props = defineProps({
   email: {
@@ -245,6 +248,8 @@ async function handleTranslate() {
     await api.translateEmail(props.email.id)
     ElMessage.success('翻译完成')
     emit('refresh')
+    // 触发全局邮件列表刷新
+    userStore.triggerEmailRefresh()
   } catch (e) {
     console.error('Translation failed:', e)
     ElMessage.error('翻译失败')
@@ -326,7 +331,14 @@ function formatFileSize(bytes) {
 
 function sanitizeHtml(html) {
   if (!html) return ''
-  return DOMPurify.sanitize(html, {
+
+  // 先处理 cid: 图片，替换为占位符提示
+  let processedHtml = html.replace(
+    /<img[^>]*src=["']cid:[^"']+["'][^>]*>/gi,
+    '<span style="display:inline-block;padding:4px 8px;background:#f5f5f5;border:1px solid #ddd;border-radius:4px;color:#999;font-size:12px;">[嵌入图片]</span>'
+  )
+
+  return DOMPurify.sanitize(processedHtml, {
     ALLOWED_TAGS: ['p', 'br', 'div', 'span', 'b', 'i', 'u', 'strong', 'em',
                    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li',
                    'table', 'tr', 'td', 'th', 'thead', 'tbody', 'a', 'img',

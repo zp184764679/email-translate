@@ -212,7 +212,7 @@ async def fetch_emails(
 
 
 async def fetch_emails_background(account: EmailAccount, since_days: int):
-    """后台任务：拉取邮件并自动翻译"""
+    """后台任务：拉取邮件并自动翻译（增量拉取优化）"""
     import asyncio
     import traceback
     import hashlib
@@ -222,9 +222,27 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
     from config import get_settings
 
     settings = get_settings()
-    since_date = datetime.utcnow() - timedelta(days=since_days)
 
     print(f"[Background] Starting email fetch for {account.email}")
+
+    # 增量拉取优化：查询数据库中最新邮件的时间
+    async with async_session() as db:
+        latest_result = await db.execute(
+            select(Email.received_at)
+            .where(Email.account_id == account.id)
+            .order_by(Email.received_at.desc())
+            .limit(1)
+        )
+        last_sync_time = latest_result.scalar()
+
+    if last_sync_time:
+        # 有历史邮件：从最新邮件时间开始拉取（往前推1天避免边界问题）
+        since_date = last_sync_time - timedelta(days=1)
+        print(f"[Background] Incremental fetch since {since_date} (last email: {last_sync_time})")
+    else:
+        # 首次同步：使用 since_days 参数
+        since_date = datetime.utcnow() - timedelta(days=since_days)
+        print(f"[Background] First sync, fetching emails from last {since_days} days")
 
     try:
         service = EmailService(
@@ -546,6 +564,100 @@ async def delete_email(
     return {"message": "邮件已删除"}
 
 
+# ============ 批量操作 API ============
+class BatchEmailRequest(BaseModel):
+    email_ids: List[int]
+
+
+@router.post("/batch/read")
+async def batch_mark_as_read(
+    request: BatchEmailRequest,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """批量标记邮件为已读"""
+    from sqlalchemy import update
+
+    result = await db.execute(
+        update(Email)
+        .where(Email.id.in_(request.email_ids), Email.account_id == account.id)
+        .values(is_read=True)
+    )
+    await db.commit()
+    return {"message": f"已将 {result.rowcount} 封邮件标记为已读"}
+
+
+@router.post("/batch/unread")
+async def batch_mark_as_unread(
+    request: BatchEmailRequest,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """批量标记邮件为未读"""
+    from sqlalchemy import update
+
+    result = await db.execute(
+        update(Email)
+        .where(Email.id.in_(request.email_ids), Email.account_id == account.id)
+        .values(is_read=False)
+    )
+    await db.commit()
+    return {"message": f"已将 {result.rowcount} 封邮件标记为未读"}
+
+
+@router.post("/batch/delete")
+async def batch_delete_emails(
+    request: BatchEmailRequest,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """批量删除邮件"""
+    from sqlalchemy import delete as sql_delete
+
+    result = await db.execute(
+        sql_delete(Email)
+        .where(Email.id.in_(request.email_ids), Email.account_id == account.id)
+    )
+    await db.commit()
+    return {"message": f"已删除 {result.rowcount} 封邮件"}
+
+
+@router.post("/batch/flag")
+async def batch_flag_emails(
+    request: BatchEmailRequest,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """批量添加星标"""
+    from sqlalchemy import update
+
+    result = await db.execute(
+        update(Email)
+        .where(Email.id.in_(request.email_ids), Email.account_id == account.id)
+        .values(is_flagged=True)
+    )
+    await db.commit()
+    return {"message": f"已为 {result.rowcount} 封邮件添加星标"}
+
+
+@router.post("/batch/unflag")
+async def batch_unflag_emails(
+    request: BatchEmailRequest,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """批量取消星标"""
+    from sqlalchemy import update
+
+    result = await db.execute(
+        update(Email)
+        .where(Email.id.in_(request.email_ids), Email.account_id == account.id)
+        .values(is_flagged=False)
+    )
+    await db.commit()
+    return {"message": f"已为 {result.rowcount} 封邮件取消星标"}
+
+
 @router.post("/{email_id}/translate", response_model=EmailResponse)
 async def translate_email(
     email_id: int,
@@ -667,3 +779,43 @@ async def translate_email(
     await db.commit()
     await db.refresh(email)
     return email
+
+
+# ============ 发送邮件 API ============
+class SendEmailRequest(BaseModel):
+    to: str
+    cc: Optional[str] = None
+    subject: str
+    body: str
+
+
+@router.post("/send")
+async def send_email(
+    request: SendEmailRequest,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """直接发送邮件（非回复）"""
+    try:
+        service = EmailService(
+            imap_server=account.imap_server,
+            smtp_server=account.smtp_server,
+            email_address=account.email,
+            password=account.password,
+            smtp_port=account.smtp_port
+        )
+
+        success = service.send_email(
+            to=request.to,
+            subject=request.subject,
+            body=request.body,
+            cc=request.cc
+        )
+
+        if success:
+            return {"status": "sent", "message": "邮件发送成功"}
+        else:
+            raise HTTPException(status_code=500, detail="邮件发送失败")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"发送失败: {str(e)}")

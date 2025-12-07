@@ -3,7 +3,7 @@
     <!-- 顶部操作栏 -->
     <div class="detail-toolbar">
       <div class="toolbar-left">
-        <el-button :icon="ArrowLeft" @click="$router.back()">返回</el-button>
+        <el-button :icon="ArrowLeft" @click="$router.push('/emails')">返回</el-button>
         <el-divider direction="vertical" />
         <el-button-group>
           <el-button :icon="Back" @click="handleReply">回复</el-button>
@@ -261,9 +261,11 @@ import api from '@/api'
 import dayjs from 'dayjs'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import DOMPurify from 'dompurify'
+import { useUserStore } from '@/stores/user'
 
 const route = useRoute()
 const router = useRouter()
+const userStore = useUserStore()
 
 const email = ref(null)
 const loading = ref(false)
@@ -373,7 +375,7 @@ async function handleDelete() {
 
     await api.deleteEmail(email.value.id)
     ElMessage.success('邮件已删除')
-    router.back()
+    router.push('/emails')
   } catch (e) {
     if (e !== 'cancel') {
       console.error('Failed to delete email:', e)
@@ -413,6 +415,8 @@ async function translateEmail() {
     await api.translateEmail(email.value.id)
     ElMessage.success('翻译完成')
     loadEmail()
+    // 触发全局邮件列表刷新
+    userStore.triggerEmailRefresh()
   } catch (e) {
     console.error('Translation failed:', e)
     ElMessage.error('翻译失败')
@@ -574,7 +578,14 @@ function formatFileSize(bytes) {
 
 function sanitizeHtml(html) {
   if (!html) return ''
-  return DOMPurify.sanitize(html, {
+
+  // 先处理 cid: 图片，替换为占位符提示
+  let processedHtml = html.replace(
+    /<img[^>]*src=["']cid:[^"']+["'][^>]*>/gi,
+    '<span style="display:inline-block;padding:4px 8px;background:#f5f5f5;border:1px solid #ddd;border-radius:4px;color:#999;font-size:12px;">[嵌入图片]</span>'
+  )
+
+  return DOMPurify.sanitize(processedHtml, {
     ALLOWED_TAGS: ['p', 'br', 'div', 'span', 'b', 'i', 'u', 'strong', 'em',
                    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li',
                    'table', 'tr', 'td', 'th', 'thead', 'tbody', 'a', 'img',

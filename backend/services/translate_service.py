@@ -76,7 +76,8 @@ class TranslateService:
     }
 
     def __init__(self, api_key: str = None, provider: str = "deepl", proxy_url: str = None,
-                 is_free_api: bool = True, ollama_base_url: str = None, ollama_model: str = None):
+                 is_free_api: bool = True, ollama_base_url: str = None, ollama_model: str = None,
+                 claude_model: str = None):
         """
         Initialize translate service
 
@@ -87,12 +88,14 @@ class TranslateService:
             is_free_api: For DeepL, whether using free API (default True)
             ollama_base_url: Ollama API base URL (e.g., "http://localhost:11434")
             ollama_model: Ollama model name (e.g., "qwen3:8b")
+            claude_model: Claude model name (e.g., "claude-sonnet-4-20250514")
         """
         self.api_key = api_key
         self.provider = provider
         self.is_free_api = is_free_api
         self.ollama_base_url = ollama_base_url or "http://localhost:11434"
         self.ollama_model = ollama_model or "qwen3:8b"
+        self.claude_model = claude_model or "claude-sonnet-4-20250514"
 
         # Get proxy from parameter or env var
         proxy = proxy_url or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
@@ -100,6 +103,9 @@ class TranslateService:
         if proxy and provider != "ollama":
             print(f"[TranslateService] Using proxy: {proxy}")
             self.http_client = httpx.Client(proxy=proxy, timeout=120.0)
+        elif provider == "ollama":
+            # Ollama 本地模型需要更长的超时时间
+            self.http_client = httpx.Client(timeout=300.0)
         else:
             self.http_client = httpx.Client(timeout=120.0)
 
@@ -306,7 +312,7 @@ class TranslateService:
                     "content-type": "application/json"
                 },
                 json={
-                    "model": "claude-sonnet-4-20250514",
+                    "model": self.claude_model,
                     "max_tokens": 4096,
                     "messages": [
                         {"role": "user", "content": prompt}

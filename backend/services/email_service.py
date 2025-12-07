@@ -11,7 +11,7 @@ from typing import List, Dict, Optional, Tuple
 import os
 import re
 from datetime import datetime
-from langdetect import detect, LangDetectException
+from langdetect import detect, detect_langs, LangDetectException
 
 
 class EmailService:
@@ -287,21 +287,70 @@ class EmailService:
         return message_id
 
     def _detect_language(self, text: str) -> str:
-        """Detect language of text"""
+        """Detect language of text with improved accuracy"""
         if not text or len(text.strip()) < 10:
             return "unknown"
+
+        # 清理文本：移除邮件签名、HTML标签等噪音
+        clean_text = self._clean_text_for_detection(text)
+        if len(clean_text.strip()) < 20:
+            return "unknown"
+
         try:
-            lang = detect(text)
-            # Map to our supported languages
+            # 使用 detect_langs 获取概率
+            langs = detect_langs(clean_text)
+            if not langs:
+                return "unknown"
+
+            top_lang = langs[0]
+            lang_code = top_lang.lang
+            confidence = top_lang.prob
+
+            # 如果置信度低于 0.5，认为不确定
+            if confidence < 0.5:
+                return "unknown"
+
+            # 语言映射
             lang_map = {
                 "zh-cn": "zh", "zh-tw": "zh", "zh": "zh",
                 "en": "en",
                 "ja": "ja",
-                "ko": "ko"
+                "ko": "ko",
+                "de": "de",  # 德语
+                "fr": "fr",  # 法语
+                "es": "es",  # 西班牙语
+                "it": "it",  # 意大利语
+                "pt": "pt",  # 葡萄牙语
+                "nl": "nl",  # 荷兰语
+                "ru": "ru",  # 俄语
             }
-            return lang_map.get(lang, lang)
+
+            detected = lang_map.get(lang_code, lang_code)
+
+            # 对于西方语言，如果置信度不够高且第二选项是英语，倾向于英语
+            # 这是因为 langdetect 对于英德、英法等容易混淆
+            if detected in ["de", "fr", "nl", "es", "it", "pt"] and confidence < 0.8:
+                if len(langs) > 1 and langs[1].lang == "en" and langs[1].prob > 0.2:
+                    detected = "en"
+
+            return detected
+
         except LangDetectException:
             return "unknown"
+
+    def _clean_text_for_detection(self, text: str) -> str:
+        """Clean text for better language detection"""
+        import re
+        # 移除 HTML 标签
+        text = re.sub(r'<[^>]+>', ' ', text)
+        # 移除 URL
+        text = re.sub(r'http[s]?://\S+', ' ', text)
+        # 移除邮箱地址
+        text = re.sub(r'\S+@\S+\.\S+', ' ', text)
+        # 移除多余空白
+        text = re.sub(r'\s+', ' ', text)
+        # 取前 500 字符进行检测（避免签名等噪音影响）
+        return text[:500].strip()
 
     def send_email(self, to: str, subject: str, body: str, cc: str = None,
                    attachments: List[str] = None, is_html: bool = False) -> bool:

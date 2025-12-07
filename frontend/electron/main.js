@@ -1,133 +1,38 @@
 const { app, BrowserWindow, ipcMain, Notification, Menu, Tray } = require('electron')
 const path = require('path')
-const { spawn } = require('child_process')
 const { autoUpdater } = require('electron-updater')
-const http = require('http')
+const https = require('https')
+
+// 单实例锁定 - 确保只能运行一个 Electron 实例
+const gotTheLock = app.requestSingleInstanceLock()
+
+if (!gotTheLock) {
+  console.log('另一个实例已在运行，退出当前实例')
+  app.quit()
+}
 
 let mainWindow = null
 let tray = null
-let backendProcess = null
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
-// 后端配置
-const BACKEND_PORT = 8000
-const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`
-
-// 绕过代理设置，直接连接本地后端
-delete process.env.http_proxy
-delete process.env.HTTP_PROXY
-delete process.env.https_proxy
-delete process.env.HTTPS_PROXY
+// 后端配置 - 统一部署在服务器
+const BACKEND_URL = 'https://jzchardware.cn:8888/email/api'
 
 /**
- * 启动后端服务
+ * 检查服务器后端是否可用
  */
-function startBackend() {
-  return new Promise((resolve, reject) => {
-    if (isDev) {
-      // 开发模式：假设后端已手动启动
-      console.log('开发模式：请手动启动后端服务')
-      resolve()
-      return
-    }
-
-    // 生产模式：启动打包的后端exe
-    const backendPath = path.join(process.resourcesPath, 'backend', 'backend.exe')
-    const fs = require('fs')
-
-    if (!fs.existsSync(backendPath)) {
-      console.error('后端程序不存在:', backendPath)
-      reject(new Error('后端程序不存在'))
-      return
-    }
-
-    console.log('启动后端服务:', backendPath)
-
-    // 设置数据目录
-    const userDataPath = app.getPath('userData')
-    const dataDir = path.join(userDataPath, 'data')
-
-    // 确保数据目录存在
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true })
-    }
-
-    // 启动后端进程
-    backendProcess = spawn(backendPath, [], {
-      cwd: path.dirname(backendPath),
-      env: {
-        ...process.env,
-        DATA_DIR: dataDir,
-        BACKEND_PORT: BACKEND_PORT.toString()
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true
+function checkBackendHealth() {
+  return new Promise((resolve) => {
+    const req = https.get(`${BACKEND_URL}/health`, (res) => {
+      resolve(res.statusCode === 200)
     })
-
-    backendProcess.stdout.on('data', (data) => {
-      console.log(`[Backend] ${data}`)
+    req.on('error', () => resolve(false))
+    req.setTimeout(5000, () => {
+      req.destroy()
+      resolve(false)
     })
-
-    backendProcess.stderr.on('data', (data) => {
-      console.error(`[Backend Error] ${data}`)
-    })
-
-    backendProcess.on('error', (error) => {
-      console.error('后端启动失败:', error)
-      reject(error)
-    })
-
-    backendProcess.on('exit', (code) => {
-      console.log(`后端进程退出，退出码: ${code}`)
-      backendProcess = null
-    })
-
-    // 等待后端启动完成
-    waitForBackend(resolve, reject)
   })
-}
-
-/**
- * 等待后端服务就绪
- */
-function waitForBackend(resolve, reject, retries = 60) {
-  const checkBackend = () => {
-    http.get(`${BACKEND_URL}/health`, (res) => {
-      if (res.statusCode === 200) {
-        console.log('后端服务已就绪')
-        resolve()
-      } else {
-        retry()
-      }
-    }).on('error', (err) => {
-      console.log(`等待后端服务... (剩余重试: ${retries}, 错误: ${err.code})`)
-      retry()
-    })
-  }
-
-  const retry = () => {
-    retries--
-    if (retries <= 0) {
-      reject(new Error('后端服务启动超时'))
-    } else {
-      setTimeout(checkBackend, 1000)
-    }
-  }
-
-  // 开始检查 - 给后端更多启动时间
-  setTimeout(checkBackend, 3000)
-}
-
-/**
- * 停止后端服务
- */
-function stopBackend() {
-  if (backendProcess) {
-    console.log('停止后端服务...')
-    backendProcess.kill()
-    backendProcess = null
-  }
 }
 
 async function createWindow() {
@@ -148,7 +53,7 @@ async function createWindow() {
 
   // Load the app
   if (isDev) {
-    mainWindow.loadURL('http://localhost:3456')
+    mainWindow.loadURL('http://localhost:4567')
     mainWindow.webContents.openDevTools()
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
@@ -285,6 +190,15 @@ function closeSplash() {
   }
 }
 
+// 当第二个实例尝试启动时，聚焦已有窗口
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  }
+})
+
 // App events
 app.whenReady().then(async () => {
   // 显示启动画面
@@ -293,8 +207,11 @@ app.whenReady().then(async () => {
   }
 
   try {
-    // 启动后端服务
-    await startBackend()
+    // 检查服务器后端是否可用
+    const backendOk = await checkBackendHealth()
+    if (!backendOk) {
+      console.warn('服务器后端暂时不可用，但仍继续启动应用')
+    }
 
     // 创建主窗口
     await createWindow()
@@ -312,7 +229,7 @@ app.whenReady().then(async () => {
     await dialog.showMessageBox({
       type: 'error',
       title: '启动失败',
-      message: '后端服务启动失败，请检查系统配置',
+      message: '应用启动失败，请检查网络连接',
       detail: error.message
     })
 
@@ -334,12 +251,6 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   app.isQuitting = true
-  stopBackend()
-})
-
-// 确保后端进程被清理
-app.on('quit', () => {
-  stopBackend()
 })
 
 // IPC handlers

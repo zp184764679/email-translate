@@ -81,7 +81,8 @@ def get_translate_service() -> TranslateService:
     elif settings.translate_provider == "claude":
         return TranslateService(
             api_key=settings.claude_api_key,
-            provider="claude"
+            provider="claude",
+            claude_model=settings.claude_model
         )
     else:  # ollama (default for local testing)
         return TranslateService(

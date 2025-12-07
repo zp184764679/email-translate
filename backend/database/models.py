@@ -1,5 +1,6 @@
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey, JSON, Float
+from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.orm import relationship
 from .database import Base
 
@@ -58,9 +59,9 @@ class Email(Base):
     subject_original = Column(Text)
     subject_translated = Column(Text)
 
-    body_original = Column(Text)
-    body_translated = Column(Text)
-    body_html = Column(Text)
+    body_original = Column(MEDIUMTEXT)
+    body_translated = Column(MEDIUMTEXT)
+    body_html = Column(MEDIUMTEXT)
 
     language_detected = Column(String(10))
     direction = Column(String(20))  # inbound, outbound

@@ -1,46 +1,30 @@
-// ===== 供应商邮件翻译系统 - PM2 配置 =====
-// Windows 开发环境
+// ===== 供应商邮件翻译系统 - PM2 配置 (服务器部署) =====
+//
+// 服务器使用方法:
+//   pm2 start ecosystem.config.js
+//   pm2 restart email-backend
+//   pm2 logs email-backend
+//   pm2 save
 
 module.exports = {
   apps: [
-    // ==================== 前端服务 ====================
-    {
-      name: 'email-frontend',
-      cwd: 'C:\\Users\\Admin\\Desktop\\供应商邮件翻译系统\\frontend',
-      script: 'cmd.exe',
-      args: '/c npm run dev',
-      interpreter: 'none',
-      windowsHide: true,
-      env: {
-        NODE_ENV: 'development',
-        PORT: '4567',
-      },
-      error_file: 'C:\\Users\\Admin\\Desktop\\logs\\email-frontend-error.log',
-      out_file: 'C:\\Users\\Admin\\Desktop\\logs\\email-frontend-out.log',
-      time: true,
-      autorestart: true,
-      max_restarts: 10,
-      min_uptime: '10s',
-    },
-
-    // ==================== 后端服务 ====================
     {
       name: 'email-backend',
-      cwd: 'C:\\Users\\Admin\\Desktop\\供应商邮件翻译系统\\backend',
-      script: 'C:\\Users\\Admin\\Desktop\\供应商邮件翻译系统\\backend\\venv\\Scripts\\python.exe',
-      args: '-m uvicorn main:app --host 0.0.0.0 --port 8007',
+      cwd: '/www/email-translate/backend',
+      script: './venv/bin/uvicorn',
+      args: 'main:app --host 0.0.0.0 --port 2000',
       interpreter: 'none',
-      windowsHide: true,
       env: {
-        PYTHONUNBUFFERED: '1',
-        PORT: '8007',
+        NODE_ENV: 'production',
+        PYTHONUNBUFFERED: '1'
       },
-      error_file: 'C:\\Users\\Admin\\Desktop\\logs\\email-backend-error.log',
-      out_file: 'C:\\Users\\Admin\\Desktop\\logs\\email-backend-out.log',
-      time: true,
+      instances: 1,
       autorestart: true,
-      max_restarts: 10,
-      min_uptime: '10s',
-    },
-  ],
+      watch: false,
+      max_memory_restart: '500M',
+      error_file: '/www/email-translate/logs/error.log',
+      out_file: '/www/email-translate/logs/out.log',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss'
+    }
+  ]
 };

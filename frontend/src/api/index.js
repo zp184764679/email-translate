@@ -2,8 +2,12 @@ import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
 // Create axios instance
+// 开发环境使用 vite 代理，生产环境直连服务器
+const isDev = import.meta.env.DEV
+const baseURL = isDev ? '/api' : 'https://jzchardware.cn:8888/email/api'
+
 const instance = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || '/api',
+  baseURL,
   timeout: 30000
 })
 
@@ -178,6 +182,27 @@ const api = {
 
   async deleteEmail(id) {
     return instance.delete(`/emails/${id}`)
+  },
+
+  // 批量操作
+  async batchMarkAsRead(emailIds) {
+    return instance.post('/emails/batch/read', { email_ids: emailIds })
+  },
+
+  async batchMarkAsUnread(emailIds) {
+    return instance.post('/emails/batch/unread', { email_ids: emailIds })
+  },
+
+  async batchDelete(emailIds) {
+    return instance.post('/emails/batch/delete', { email_ids: emailIds })
+  },
+
+  async batchFlag(emailIds) {
+    return instance.post('/emails/batch/flag', { email_ids: emailIds })
+  },
+
+  async batchUnflag(emailIds) {
+    return instance.post('/emails/batch/unflag', { email_ids: emailIds })
   },
 
   async sendEmail(data) {

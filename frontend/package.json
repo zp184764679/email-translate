@@ -7,8 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "vite:dev": "vite --port 3456",
-    "electron:dev": "concurrently --kill-others-on-fail \"npm run vite:dev\" \"wait-on http://localhost:3456 && electron .\"",
+    "vite:dev": "vite --port 4567",
+    "electron:dev": "concurrently --kill-others-on-fail \"npm run vite:dev\" \"wait-on http://localhost:4567 && electron .\"",
     "electron:build": "vite build && electron-builder",
     "electron:build:win": "vite build && electron-builder --win",
     "electron:build:mac": "vite build && electron-builder --mac"

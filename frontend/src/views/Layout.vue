@@ -139,23 +139,17 @@
         </div>
 
         <div class="toolbar-right">
-          <!-- 视图切换 -->
-          <el-radio-group v-model="viewMode" size="small">
-            <el-radio-button value="list">
-              <el-icon><List /></el-icon>
-            </el-radio-button>
-            <el-radio-button value="split">
-              <el-icon><Reading /></el-icon>
-            </el-radio-button>
-          </el-radio-group>
+          <!-- 双语对比模式提示 -->
+          <span class="view-mode-hint">
+            <el-icon><Reading /></el-icon>
+            双语对比
+          </span>
         </div>
       </header>
 
       <!-- 内容区域 -->
-      <div class="content-area" :class="{ 'split-view': viewMode === 'split' }">
-        <router-view v-slot="{ Component }">
-          <component :is="Component" :view-mode="viewMode" />
-        </router-view>
+      <div class="content-area split-view">
+        <router-view />
       </div>
     </div>
 
@@ -177,13 +171,13 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import {
   Refresh, RefreshRight, Message, EditPen, Document, Delete,
   OfficeBuilding, Setting, Promotion, Star, ChatDotSquare,
-  SwitchButton, Checked, List, Reading
+  SwitchButton, Checked, Reading
 } from '@element-plus/icons-vue'
 import api from '@/api'
 import { ElMessage } from 'element-plus'
@@ -197,7 +191,6 @@ const userStore = useUserStore()
 const fetching = ref(false)
 const currentFolder = ref('inbox')
 const searchQuery = ref('')
-const viewMode = ref('list')
 const showComposeDialog = ref(false)
 const unreadCount = ref(0)
 const draftCount = ref(0)
@@ -216,6 +209,19 @@ const isEmailView = computed(() => {
 onMounted(() => {
   loadCounts()
   updateCurrentFolder()
+
+  // 请求通知权限
+  if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+    Notification.requestPermission()
+  }
+
+  // 启动自动收件
+  userStore.startAutoFetch()
+})
+
+// 组件卸载时停止自动收件
+onUnmounted(() => {
+  userStore.stopAutoFetch()
 })
 
 // 监听路由变化
@@ -293,24 +299,71 @@ function handleSearch() {
   }
 }
 
-function markAsRead() {
-  ElMessage.info('标记为已读')
-  // TODO: 实现批量标记已读
+async function markAsRead() {
+  const selectedIds = getSelectedEmailIds()
+  if (selectedIds.length === 0) {
+    ElMessage.warning('请先选择邮件')
+    return
+  }
+  try {
+    await api.batchMarkAsRead(selectedIds)
+    ElMessage.success(`已将 ${selectedIds.length} 封邮件标记为已读`)
+    userStore.triggerEmailRefresh()
+  } catch (e) {
+    ElMessage.error('操作失败')
+  }
 }
 
-function markAsUnread() {
-  ElMessage.info('标记为未读')
-  // TODO: 实现批量标记未读
+async function markAsUnread() {
+  const selectedIds = getSelectedEmailIds()
+  if (selectedIds.length === 0) {
+    ElMessage.warning('请先选择邮件')
+    return
+  }
+  try {
+    await api.batchMarkAsUnread(selectedIds)
+    ElMessage.success(`已将 ${selectedIds.length} 封邮件标记为未读`)
+    userStore.triggerEmailRefresh()
+  } catch (e) {
+    ElMessage.error('操作失败')
+  }
 }
 
-function toggleFlag() {
-  ElMessage.info('切换标记')
-  // TODO: 实现星标切换
+async function toggleFlag() {
+  const selectedIds = getSelectedEmailIds()
+  if (selectedIds.length === 0) {
+    ElMessage.warning('请先选择邮件')
+    return
+  }
+  try {
+    await api.batchFlag(selectedIds)
+    ElMessage.success(`已为 ${selectedIds.length} 封邮件添加星标`)
+    userStore.triggerEmailRefresh()
+  } catch (e) {
+    ElMessage.error('操作失败')
+  }
 }
 
-function deleteSelected() {
-  ElMessage.warning('删除选中的邮件')
-  // TODO: 实现批量删除
+async function deleteSelected() {
+  const selectedIds = getSelectedEmailIds()
+  if (selectedIds.length === 0) {
+    ElMessage.warning('请先选择邮件')
+    return
+  }
+  try {
+    await api.batchDelete(selectedIds)
+    ElMessage.success(`已删除 ${selectedIds.length} 封邮件`)
+    userStore.triggerEmailRefresh()
+  } catch (e) {
+    ElMessage.error('删除失败')
+  }
+}
+
+// 获取选中的邮件ID（由 Emails.vue 通过 provide/inject 提供）
+function getSelectedEmailIds() {
+  // 通过事件总线或 store 获取选中的邮件
+  // 暂时返回空数组，需要在 Emails.vue 中实现选中状态共享
+  return window.__selectedEmailIds || []
 }
 
 function onEmailSent() {
@@ -479,6 +532,17 @@ function handleLogout() {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.view-mode-hint {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: #909399;
+  padding: 4px 8px;
+  background-color: #f0f9ff;
+  border-radius: 4px;
 }
 
 .action-group {
