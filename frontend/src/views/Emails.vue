@@ -458,6 +458,7 @@ function hasAttachments(email) {
 .email-list {
   flex: 1;
   overflow-y: auto;
+  min-height: 0;
 }
 
 .email-item {
