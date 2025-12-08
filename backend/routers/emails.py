@@ -1,9 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime, timedelta
+import os
 
 from database.database import get_db
 from database import crud
@@ -325,12 +327,14 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                                     email_data["subject_original"], lang, "zh"
                                 )
 
-                            # 翻译正文
+                            # 智能翻译正文（检测引用，只翻译新内容）
                             body_translated = ""
                             if email_data.get("body_original"):
-                                body_translated = await translate_with_cache_async(
+                                in_reply_to = email_data.get("in_reply_to")
+                                body_translated = await smart_translate_email_body(
                                     db, translate_service,
-                                    email_data["body_original"], lang, "zh"
+                                    email_data["body_original"], lang, "zh",
+                                    in_reply_to=in_reply_to
                                 )
 
                             new_email.subject_translated = subject_translated
@@ -364,6 +368,77 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
     except Exception as e:
         print(f"[Background] Error fetching emails for {account.email}: {e}")
         traceback.print_exc()
+
+
+def extract_new_content_from_reply(body: str) -> tuple[str, str, int]:
+    """
+    从回复邮件中提取新内容，分离引用部分
+
+    返回: (new_content, quoted_content, quote_start_line)
+    """
+    import re
+
+    if not body:
+        return "", "", -1
+
+    lines = body.split('\n')
+    quote_patterns = [
+        # 英文引用标记
+        r'^On .+ wrote:$',
+        r'^From: .+$',
+        r'^Sent: .+$',
+        r'^-----Original Message-----',
+        r'^----- Original Message -----',
+        r'^> ',
+        r'^_{3,}',  # _____ 分隔线
+        r'^-{3,}',  # ----- 分隔线
+        # 中文引用标记
+        r'^发件人[:：].+$',
+        r'^发送时间[:：].+$',
+        r'^原始邮件',
+        # 日文引用
+        r'^差出人[:：].+$',
+        # 常见邮件客户端格式
+        r'^\[mailto:.+\]',
+        r'^Date: .+$',
+        r'^To: .+$',
+        r'^Subject: .+$',
+        r'^Cc: .+$',
+    ]
+
+    quote_start = -1
+    consecutive_quotes = 0
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+
+        # 检查是否是引用开始标记
+        is_quote_marker = False
+        for pattern in quote_patterns:
+            if re.match(pattern, stripped, re.IGNORECASE):
+                is_quote_marker = True
+                break
+
+        if is_quote_marker:
+            consecutive_quotes += 1
+            if consecutive_quotes >= 1 and quote_start == -1:
+                # 找到引用开始位置，往前查找可能的空行
+                quote_start = i
+                # 往前跳过空行
+                while quote_start > 0 and not lines[quote_start - 1].strip():
+                    quote_start -= 1
+                break
+        else:
+            consecutive_quotes = 0
+
+    if quote_start == -1:
+        # 没有找到引用，返回全部内容
+        return body, "", -1
+
+    new_content = '\n'.join(lines[:quote_start]).strip()
+    quoted_content = '\n'.join(lines[quote_start:]).strip()
+
+    return new_content, quoted_content, quote_start
 
 
 async def translate_with_cache_async(db, translate_service, text: str, source_lang: str, target_lang: str) -> str:
@@ -401,6 +476,60 @@ async def translate_with_cache_async(db, translate_service, text: str, source_la
     print(f"[Cache SAVE] text={text[:30]}...")
 
     return translated
+
+
+async def smart_translate_email_body(
+    db, translate_service, body: str, source_lang: str, target_lang: str,
+    in_reply_to: str = None
+) -> str:
+    """
+    智能翻译邮件正文：
+    1. 检测并分离新内容和引用内容
+    2. 只翻译新内容
+    3. 尝试复用引用内容的已有翻译
+    4. 合并结果
+    """
+    from database.models import SharedEmailTranslation
+
+    if not body:
+        return ""
+
+    # 分离新内容和引用
+    new_content, quoted_content, quote_start = extract_new_content_from_reply(body)
+
+    if quote_start == -1:
+        # 没有引用，全文翻译
+        return await translate_with_cache_async(db, translate_service, body, source_lang, target_lang)
+
+    print(f"[SmartTranslate] Found quote at line {quote_start}, new content: {len(new_content)} chars, quoted: {len(quoted_content)} chars")
+
+    # 翻译新内容
+    new_translated = ""
+    if new_content:
+        new_translated = await translate_with_cache_async(db, translate_service, new_content, source_lang, target_lang)
+
+    # 尝试查找引用内容的已有翻译
+    quoted_translated = ""
+    if quoted_content and in_reply_to:
+        # 通过 in_reply_to 查找原邮件的翻译
+        shared_result = await db.execute(
+            select(SharedEmailTranslation).where(
+                SharedEmailTranslation.message_id == in_reply_to
+            )
+        )
+        shared = shared_result.scalar_one_or_none()
+        if shared and shared.body_translated:
+            # 使用已有翻译，加上引用标记
+            quoted_translated = f"\n\n--- 以下为引用内容（已翻译）---\n{shared.body_translated}"
+            print(f"[SmartTranslate] Reused translation from {in_reply_to[:30]}")
+        else:
+            # 没有找到已有翻译，标记为引用（不翻译）
+            quoted_translated = f"\n\n--- 以下为引用内容（原文）---\n{quoted_content[:500]}{'...' if len(quoted_content) > 500 else ''}"
+    elif quoted_content:
+        # 没有 in_reply_to，只标记引用
+        quoted_translated = f"\n\n--- 以下为引用内容（原文）---\n{quoted_content[:500]}{'...' if len(quoted_content) > 500 else ''}"
+
+    return new_translated + quoted_translated
 
 
 @router.get("/stats/unread")
@@ -451,12 +580,122 @@ async def get_email_stats(
     )
     untranslated = untranslated_result.scalar()
 
+    # 未读邮件数
+    unread_result = await db.execute(
+        select(func.count(Email.id)).where(
+            Email.account_id == account.id,
+            Email.is_read == False,
+            Email.direction == "inbound"
+        )
+    )
+    unread = unread_result.scalar()
+
     return {
         "total": total,
         "inbound": inbound,
         "outbound": total - inbound,
-        "untranslated": untranslated
+        "untranslated": untranslated,
+        "unread": unread
     }
+
+
+# ============ 附件下载 API ============
+@router.get("/{email_id}/attachment/{attachment_id}")
+async def download_attachment(
+    email_id: int,
+    attachment_id: int,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """下载单个附件"""
+    # 验证邮件属于当前用户
+    email_result = await db.execute(
+        select(Email).where(Email.id == email_id, Email.account_id == account.id)
+    )
+    email = email_result.scalar_one_or_none()
+    if not email:
+        raise HTTPException(status_code=404, detail="邮件不存在")
+
+    # 获取附件
+    att_result = await db.execute(
+        select(Attachment).where(
+            Attachment.id == attachment_id,
+            Attachment.email_id == email_id
+        )
+    )
+    attachment = att_result.scalar_one_or_none()
+    if not attachment:
+        raise HTTPException(status_code=404, detail="附件不存在")
+
+    # 检查文件是否存在
+    if not attachment.file_path or not os.path.exists(attachment.file_path):
+        raise HTTPException(status_code=404, detail="附件文件不存在")
+
+    # 返回文件
+    return FileResponse(
+        path=attachment.file_path,
+        filename=attachment.filename,
+        media_type=attachment.mime_type or "application/octet-stream"
+    )
+
+
+# ============ 邮件导出 API ============
+@router.get("/{email_id}/export")
+async def export_email_as_eml(
+    email_id: int,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """导出邮件为 EML 格式"""
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    from email.utils import formatdate, make_msgid
+    import io
+
+    # 获取邮件
+    result = await db.execute(
+        select(Email).where(Email.id == email_id, Email.account_id == account.id)
+    )
+    email_obj = result.scalar_one_or_none()
+    if not email_obj:
+        raise HTTPException(status_code=404, detail="邮件不存在")
+
+    # 构建 EML 内容
+    msg = MIMEMultipart('alternative')
+    msg['Message-ID'] = email_obj.message_id or make_msgid()
+    msg['Subject'] = email_obj.subject_original or ''
+    msg['From'] = f"{email_obj.from_name} <{email_obj.from_email}>" if email_obj.from_name else email_obj.from_email
+    msg['To'] = email_obj.to_email or ''
+    if email_obj.cc_email:
+        msg['Cc'] = email_obj.cc_email
+    msg['Date'] = formatdate(localtime=True)
+    if email_obj.in_reply_to:
+        msg['In-Reply-To'] = email_obj.in_reply_to
+
+    # 添加纯文本正文
+    if email_obj.body_original:
+        text_part = MIMEText(email_obj.body_original, 'plain', 'utf-8')
+        msg.attach(text_part)
+
+    # 添加 HTML 正文
+    if email_obj.body_html:
+        html_part = MIMEText(email_obj.body_html, 'html', 'utf-8')
+        msg.attach(html_part)
+
+    # 生成 EML 内容
+    eml_content = msg.as_string()
+
+    # 生成文件名
+    subject_safe = (email_obj.subject_original or 'email')[:50].replace('/', '_').replace('\\', '_').replace(':', '_')
+    filename = f"{subject_safe}.eml"
+
+    return Response(
+        content=eml_content,
+        media_type="message/rfc822",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        }
+    )
 
 
 # ============ 邮件操作API ============
@@ -752,9 +991,26 @@ async def translate_email(
         email.subject_original, source_lang, "zh"
     ) if email.subject_original else ""
 
-    body_translated = await translate_with_cache(
-        email.body_original, source_lang, "zh"
-    ) if email.body_original else ""
+    # 智能翻译正文（检测引用，只翻译新内容）
+    body_translated = ""
+    if email.body_original:
+        # 创建翻译服务用于智能翻译
+        if settings.translate_provider == "deepl":
+            service = TranslateService(
+                api_key=settings.deepl_api_key,
+                provider="deepl",
+                is_free_api=settings.deepl_free_api
+            )
+        else:
+            service = TranslateService(
+                provider="ollama",
+                ollama_base_url=settings.ollama_base_url,
+                ollama_model=settings.ollama_model
+            )
+        body_translated = await smart_translate_email_body(
+            db, service, email.body_original, source_lang, "zh",
+            in_reply_to=email.in_reply_to
+        )
 
     # 4. 更新邮件记录
     email.subject_translated = subject_translated

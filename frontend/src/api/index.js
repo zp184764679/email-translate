@@ -209,6 +209,45 @@ const api = {
     return instance.post('/emails/send', data)
   },
 
+  // 附件下载
+  getAttachmentUrl(emailId, attachmentId) {
+    const token = localStorage.getItem('token')
+    return `${baseURL}/emails/${emailId}/attachment/${attachmentId}?token=${token}`
+  },
+
+  async downloadAttachment(emailId, attachmentId, filename) {
+    const response = await instance.get(
+      `/emails/${emailId}/attachment/${attachmentId}`,
+      { responseType: 'blob' }
+    )
+    // 创建下载链接
+    const url = window.URL.createObjectURL(new Blob([response]))
+    const link = document.createElement('a')
+    link.href = url
+    link.setAttribute('download', filename)
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    window.URL.revokeObjectURL(url)
+  },
+
+  // 邮件导出
+  async exportEmail(emailId, filename) {
+    const response = await instance.get(
+      `/emails/${emailId}/export`,
+      { responseType: 'blob' }
+    )
+    // 创建下载链接
+    const url = window.URL.createObjectURL(new Blob([response]))
+    const link = document.createElement('a')
+    link.href = url
+    link.setAttribute('download', filename || 'email.eml')
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    window.URL.revokeObjectURL(url)
+  },
+
   // Suppliers
   async getSuppliers() {
     return instance.get('/suppliers')
@@ -228,6 +267,35 @@ const api = {
 
   async deleteSupplier(id) {
     return instance.delete(`/suppliers/${id}`)
+  },
+
+  // Signatures
+  async getSignatures() {
+    return instance.get('/signatures')
+  },
+
+  async getDefaultSignature() {
+    return instance.get('/signatures/default')
+  },
+
+  async getSignature(id) {
+    return instance.get(`/signatures/${id}`)
+  },
+
+  async createSignature(data) {
+    return instance.post('/signatures', data)
+  },
+
+  async updateSignature(id, data) {
+    return instance.put(`/signatures/${id}`, data)
+  },
+
+  async deleteSignature(id) {
+    return instance.delete(`/signatures/${id}`)
+  },
+
+  async setDefaultSignature(id) {
+    return instance.post(`/signatures/${id}/set-default`)
   }
 }
 

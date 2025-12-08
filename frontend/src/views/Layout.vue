@@ -253,7 +253,8 @@ function updateCurrentFolder() {
 async function loadCounts() {
   try {
     const stats = await api.getEmailStats()
-    unreadCount.value = stats.untranslated || 0
+    // 使用真正的未读数（unread）而非未翻译数（untranslated）
+    unreadCount.value = stats.unread || 0
 
     // 获取草稿数量
     try {

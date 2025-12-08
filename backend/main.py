@@ -9,7 +9,7 @@ import atexit
 
 from config import get_settings
 from database.database import init_db
-from routers import emails_router, users_router, translate_router, drafts_router, suppliers_router
+from routers import emails_router, users_router, translate_router, drafts_router, suppliers_router, signatures_router
 
 settings = get_settings()
 
@@ -118,6 +118,7 @@ app.include_router(emails_router)
 app.include_router(translate_router)
 app.include_router(drafts_router)
 app.include_router(suppliers_router)
+app.include_router(signatures_router)
 
 
 @app.get("/")

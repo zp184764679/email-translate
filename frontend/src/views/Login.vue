@@ -55,6 +55,7 @@ import { ref, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import { ElMessage } from 'element-plus'
+import api from '@/api'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -85,8 +86,19 @@ async function handleLogin() {
   loading.value = true
   try {
     await userStore.login(form.email, form.password)
-    ElMessage.success('登录成功，正在跳转...')
-    // 直接跳转，不等待
+    ElMessage.success('登录成功，正在同步邮件...')
+
+    // 登录成功后立即同步邮件
+    try {
+      const result = await api.fetchEmails(30)
+      if (result.new_count > 0) {
+        ElMessage.success(`同步完成，收到 ${result.new_count} 封新邮件`)
+      }
+    } catch (e) {
+      console.warn('首次同步邮件失败:', e)
+    }
+
+    // 跳转到邮件页面
     window.location.hash = '#/emails'
   } catch (error) {
     console.error('Login error:', error)
