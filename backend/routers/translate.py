@@ -264,6 +264,73 @@ async def create_batch_translation(
         raise HTTPException(status_code=500, detail=f"批量翻译失败: {str(e)}")
 
 
+@router.post("/batch-all")
+async def batch_translate_all(
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """翻译所有未翻译的邮件"""
+    if not settings.translate_enabled:
+        return {"message": "翻译已禁用", "translated": 0, "total": 0}
+
+    from database.models import Email
+
+    # 查询所有未翻译的非中文邮件
+    result = await db.execute(
+        select(Email).where(
+            Email.is_translated == False,
+            Email.language_detected != "zh",
+            Email.language_detected.isnot(None)
+        )
+    )
+    emails = result.scalars().all()
+
+    if not emails:
+        return {"message": "没有需要翻译的邮件", "translated": 0, "total": 0}
+
+    total = len(emails)
+    translated_count = 0
+    service = get_translate_service()
+
+    for email in emails:
+        try:
+            # 翻译主题
+            subject_translated = email.subject_original
+            if email.subject_original:
+                subject_translated = service.translate(
+                    email.subject_original,
+                    target_lang="zh",
+                    source_lang=email.language_detected
+                )
+
+            # 翻译正文
+            body_translated = email.body_original
+            if email.body_original:
+                body_translated = service.translate(
+                    email.body_original,
+                    target_lang="zh",
+                    source_lang=email.language_detected
+                )
+
+            # 更新邮件
+            email.subject_translated = subject_translated
+            email.body_translated = body_translated
+            email.is_translated = True
+            translated_count += 1
+
+        except Exception as e:
+            print(f"[Batch] Failed to translate email {email.id}: {e}")
+            continue
+
+    await db.commit()
+
+    return {
+        "message": f"已翻译 {translated_count}/{total} 封邮件",
+        "translated": translated_count,
+        "total": total
+    }
+
+
 @router.get("/usage")
 async def get_translation_usage(account: EmailAccount = Depends(get_current_account)):
     """Get translation API usage (DeepL only)"""

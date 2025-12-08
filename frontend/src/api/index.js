@@ -113,6 +113,10 @@ const api = {
     return instance.post('/translate/batch', { email_ids: emailIds })
   },
 
+  async batchTranslateAll() {
+    return instance.post('/translate/batch-all', {}, { timeout: 300000 })
+  },
+
   async getTranslationUsage() {
     return instance.get('/translate/usage')
   },
