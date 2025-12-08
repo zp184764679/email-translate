@@ -157,14 +157,18 @@ function handleTranslatedScroll(e) {
 }
 
 // 初始化
-onMounted(() => {
-  loadEmails()
+onMounted(async () => {
+  // 确保在组件挂载后立即加载邮件
+  await loadEmails()
 })
 
-// 监听路由变化
-watch(() => route.query, () => {
-  currentPage.value = 1
-  loadEmails()
+// 监听路由变化（不包括首次加载，因为 onMounted 已经处理）
+watch(() => route.query, (newQuery, oldQuery) => {
+  // 只有当 query 真正变化时才重新加载
+  if (JSON.stringify(newQuery) !== JSON.stringify(oldQuery)) {
+    currentPage.value = 1
+    loadEmails()
+  }
 }, { deep: true })
 
 // 监听刷新信号
@@ -186,8 +190,12 @@ async function loadEmails() {
       sort_by: sortBy.value
     }
 
+    // 默认显示收件箱（inbound），除非明确指定了其他方向
     if (route.query.direction) {
       params.direction = route.query.direction
+    } else {
+      // 收件箱默认只显示收到的邮件
+      params.direction = 'inbound'
     }
 
     if (route.query.search) {
