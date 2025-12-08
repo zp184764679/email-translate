@@ -124,6 +124,18 @@
             <el-button :icon="Star" @click="toggleFlag">标记</el-button>
             <el-button :icon="Delete" type="danger" plain @click="deleteSelected">删除</el-button>
           </el-button-group>
+
+          <el-divider direction="vertical" v-if="isEmailView" />
+
+          <!-- 批量翻译 -->
+          <el-button
+            v-if="isEmailView"
+            :icon="DocumentCopy"
+            :loading="batchTranslating"
+            @click="batchTranslateAll"
+          >
+            批量翻译
+          </el-button>
         </div>
 
         <div class="toolbar-center">
@@ -177,7 +189,7 @@ import { useUserStore } from '@/stores/user'
 import {
   Refresh, RefreshRight, Message, EditPen, Document, Delete,
   OfficeBuilding, Setting, Promotion, Star, ChatDotSquare,
-  SwitchButton, Checked, Reading
+  SwitchButton, Checked, Reading, DocumentCopy
 } from '@element-plus/icons-vue'
 import api from '@/api'
 import { ElMessage } from 'element-plus'
@@ -189,6 +201,7 @@ const userStore = useUserStore()
 
 // 状态
 const fetching = ref(false)
+const batchTranslating = ref(false)
 const currentFolder = ref('inbox')
 const searchQuery = ref('')
 const showComposeDialog = ref(false)
@@ -292,6 +305,21 @@ async function fetchEmails() {
 function refreshList() {
   userStore.triggerEmailRefresh()
   loadCounts()
+}
+
+async function batchTranslateAll() {
+  batchTranslating.value = true
+  try {
+    ElMessage.info('正在批量翻译所有未翻译邮件，请稍候...')
+    const result = await api.batchTranslateAll()
+    ElMessage.success(result.message || '批量翻译完成')
+    userStore.triggerEmailRefresh()
+  } catch (e) {
+    console.error('Batch translate failed:', e)
+    ElMessage.error('批量翻译失败')
+  } finally {
+    batchTranslating.value = false
+  }
 }
 
 function handleSearch() {
