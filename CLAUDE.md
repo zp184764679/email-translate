@@ -30,23 +30,23 @@
 
 ```
 供应商邮件翻译系统/
-├── backend/                 # FastAPI 后端
+├── backend/                 # FastAPI 后端（服务器部署）
 │   ├── main.py             # 应用入口
 │   ├── config.py           # 配置管理
 │   ├── database/           # 数据库层
-│   │   ├── database.py     # SQLite 异步连接
+│   │   ├── database.py     # MySQL 异步连接
 │   │   ├── models.py       # SQLAlchemy 数据模型
 │   │   └── crud.py         # 数据操作函数
 │   ├── routers/            # API 路由
 │   │   ├── users.py        # 邮箱登录认证
-│   │   ├── emails.py       # 邮件管理
+│   │   ├── emails.py       # 邮件管理（含批量操作）
 │   │   ├── translate.py    # 翻译服务
 │   │   ├── approval.py     # 草稿管理
 │   │   └── suppliers.py    # 供应商管理
 │   └── services/           # 业务服务
 │       ├── email_service.py    # IMAP/SMTP 邮件收发
 │       └── translate_service.py # 翻译引擎
-├── frontend/               # Vue3 + Electron 前端
+├── frontend/               # Vue3 + Electron 前端（桌面客户端）
 │   ├── electron/           # Electron 主进程
 │   ├── src/
 │   │   ├── views/          # 页面组件
@@ -131,24 +131,23 @@ npx electron-builder --win
 
 ### 运行机制
 
-安装后的软件启动流程：
-1. 用户点击快捷方式启动 Electron 应用
-2. Electron 主进程自动启动内置的后端服务 (backend.exe)
-3. 等待后端健康检查通过后显示主界面
-4. 关闭应用时自动停止后端服务
+**服务器统一部署架构**（2024年12月更新）：
+1. 后端服务部署在服务器 `jzchardware.cn:8888`
+2. 用户点击快捷方式启动 Electron 应用
+3. Electron 显示启动画面，等待服务器健康检查通过
+4. 检查通过后显示主界面，直接连接服务器 API
+5. 所有用户共享同一个后端服务
 
-### 数据存储位置
-
-安装版软件的数据保存在：
-```
-%APPDATA%\supplier-email-translator\data\
-```
+**API 地址**：
+- 开发环境：`http://127.0.0.1:2000/api`
+- 生产环境：`https://jzchardware.cn:8888/email/api`
 
 ## 端口配置
 
 | 服务 | 默认端口 | 环境变量 |
 |------|----------|----------|
-| 后端 API | 8000 | `BACKEND_PORT` |
+| 后端 API（开发） | 2000 | `BACKEND_PORT` |
+| 后端 API（生产） | 8888 | 服务器固定 |
 | 前端开发 | 4567 | `VITE_PORT` |
 
 ## 启动安全机制
@@ -236,7 +235,11 @@ VITE_API_URL=http://localhost:8000/api
 | PATCH | /api/emails/{id}/unflag | 取消星标 |
 | POST | /api/emails/{id}/translate | 翻译单个邮件 |
 | DELETE | /api/emails/{id} | 删除邮件 |
+| POST | /api/emails/batch/read | 批量标记已读 |
+| POST | /api/emails/batch/unread | 批量标记未读 |
+| POST | /api/emails/batch/delete | 批量删除 |
 | GET | /api/emails/stats/summary | 邮件统计 |
+| GET | /api/emails/thread/{thread_id} | 获取邮件线程 |
 | POST | /api/translate | 翻译文本 |
 | POST | /api/translate/reverse | 回复翻译（中→外） |
 | GET | /api/drafts | 获取草稿 |
@@ -401,8 +404,15 @@ fetch_emails_background() 后台任务
 **自动翻译逻辑**：
 1. 邮件拉取后检测语言
 2. 非中文邮件自动调用翻译 API
-3. 翻译结果存入 `shared_email_translations` 表
-4. 后续其他用户拉取同一封邮件时直接复用翻译
+3. **智能翻译**：检测邮件中的引用内容，只翻译新增部分
+4. 翻译结果存入 `shared_email_translations` 表
+5. 后续其他用户拉取同一封邮件时直接复用翻译
+
+**智能翻译（回复邮件优化）**：
+- 自动检测引用标记（`On ... wrote:`, `From:`, `>` 等）
+- 只翻译新增内容，跳过引用部分
+- 尝试复用引用邮件的已有翻译（通过 `in_reply_to` 查找）
+- 显著减少 API 调用次数，降低翻译成本
 
 **触发时机**：
 - 用户点击"拉取邮件"按钮
@@ -474,38 +484,35 @@ emails 表（新增字段）
 | 邮件列表显示 | 双语对比视图（原文/译文） |
 | 邮件详情查看 | 分栏显示原文和翻译 |
 | 手动拉取邮件 | 点击"同步"按钮 |
+| 自动定时拉取 | 每5分钟自动检查新邮件（前端定时器实现） |
+| 新邮件桌面通知 | Electron Notification API |
 | 智能翻译 | 支持 Claude/DeepL/Ollama |
 | 翻译缓存 | 相同文本只翻译一次 |
+| 邮件翻译共享 | 同一封邮件跨用户只翻译一次 |
 | 邮件标记 | 星标、已读/未读 |
 | 邮件删除 | 单个删除 |
+| 批量标记已读 | POST /api/emails/batch/read |
+| 批量标记未读 | POST /api/emails/batch/unread |
+| 批量删除 | POST /api/emails/batch/delete |
 | 回复邮件 | 中文撰写 → 翻译 → 发送 |
 | 草稿保存 | 保存回复草稿 |
 | 供应商管理 | 按域名分类供应商 |
 | 邮件搜索 | 按主题、发件人搜索 |
 | 邮件排序 | 按时间、发件人排序 |
 | 语言检测 | 自动识别邮件语言 |
-| 附件存储 | 保存到本地目录 |
+| 附件存储 | 保存到服务器 |
+| 附件下载 | 单个下载、批量下载 |
+| 登录后自动拉取 | 首次登录自动同步邮件 |
+| 邮件线程显示 | 对话分组展示 |
+| 未读计数 | 显示真正的未读邮件数 |
+| 增量拉取 | 只拉取最新邮件，减少服务器负载 |
+| 单实例锁定 | 防止多个实例同时运行 |
+| 启动画面 | Electron 启动时显示加载画面 |
+| 应用自动更新 | electron-updater 实现 |
+| 邮件导出 | 导出为 EML 格式 |
+| 邮件签名 | 自定义签名模板，支持多语言翻译 |
 
 ### 待实现功能
-
-#### 高优先级 🔴
-
-| 功能 | 说明 | 状态 |
-|------|------|------|
-| 自动定时拉取邮件 | 每5分钟自动检查新邮件 | 配置已定义，定时器未实现 |
-| 新邮件桌面通知 | Electron Notification API | 未实现 |
-| 批量标记已读 | 后端 API: POST /api/emails/batch/read | 前端UI有，后端API缺失 |
-| 批量删除 | 后端 API: POST /api/emails/batch/delete | 前端UI有，后端API缺失 |
-| 登录后自动拉取 | 首次登录自动同步邮件 | 未实现 |
-
-#### 中优先级 🟡
-
-| 功能 | 说明 | 状态 |
-|------|------|------|
-| 附件下载 | 单个下载、批量下载 | 后端支持，前端未完成 |
-| 邮件导出 | 导出为 EML/PDF | 未实现 |
-| 邮件签名 | 自定义签名模板 | 未实现 |
-| 邮件线程显示 | 对话分组展示 | 数据库支持，前端未展示 |
 
 #### 低优先级 🟢
 
@@ -513,7 +520,6 @@ emails 表（新增字段）
 |------|------|------|
 | 快捷键系统 | 删除(D)、回复(R)、标记(S) | 仅Enter键 |
 | 新邮件声音提示 | 播放提示音 | 未实现 |
-| 未读计数优化 | 真正的未读数而非未翻译数 | 需优化 |
 
 ### 配置参数
 
@@ -522,12 +528,14 @@ emails 表（新增字段）
 email_poll_interval: int = 300  # 自动拉取间隔（秒），默认5分钟
 ```
 
-### 待添加的 API 端点
+### 签名相关 API 端点
 
 ```
-POST /api/emails/batch/read     # 批量标记已读
-POST /api/emails/batch/unread   # 批量标记未读
-POST /api/emails/batch/delete   # 批量删除
-GET  /api/emails/{id}/attachment/{filename}  # 下载附件
-POST /api/emails/export         # 导出邮件
+GET  /api/signatures            # 获取用户签名列表
+GET  /api/signatures/default    # 获取默认签名
+GET  /api/signatures/{id}       # 获取单个签名
+POST /api/signatures            # 创建签名
+PUT  /api/signatures/{id}       # 更新签名
+DELETE /api/signatures/{id}     # 删除签名
+POST /api/signatures/{id}/set-default  # 设为默认签名
 ```

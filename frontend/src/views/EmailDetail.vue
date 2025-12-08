@@ -19,6 +19,16 @@
         </el-button-group>
       </div>
       <div class="toolbar-right">
+        <el-dropdown @command="handleExport">
+          <el-button>
+            导出 <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="eml">导出为 EML</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <el-button :icon="Printer" @click="handlePrint">打印</el-button>
       </div>
     </div>
@@ -90,7 +100,7 @@
         <div class="section-header">
           <el-icon><Paperclip /></el-icon>
           <span>附件 ({{ email.attachments.length }})</span>
-          <el-button text size="small">全部下载</el-button>
+          <el-button text size="small" @click="downloadAllAttachments">全部下载</el-button>
         </div>
         <div class="attachments-grid">
           <div class="attachment-card" v-for="att in email.attachments" :key="att.id">
@@ -102,7 +112,15 @@
               <div class="attachment-size">{{ formatFileSize(att.file_size) }}</div>
             </div>
             <div class="attachment-actions">
-              <el-button text size="small" :icon="Download">下载</el-button>
+              <el-button
+                text
+                size="small"
+                :icon="Download"
+                :loading="downloadingAttachments[att.id]"
+                @click="downloadAttachment(att)"
+              >
+                下载
+              </el-button>
             </div>
           </div>
         </div>
@@ -177,6 +195,37 @@
         <div class="body-html" v-html="sanitizeHtml(email.body_html)"></div>
       </el-dialog>
 
+      <!-- 邮件线程区域 -->
+      <div class="thread-section" v-if="threadEmails.length > 1">
+        <div class="section-header">
+          <el-icon><ChatLineSquare /></el-icon>
+          <span>对话线程 ({{ threadEmails.length }} 封)</span>
+        </div>
+        <div class="thread-list">
+          <div
+            v-for="threadEmail in threadEmails"
+            :key="threadEmail.id"
+            class="thread-item"
+            :class="{ 'current': threadEmail.id === email.id }"
+            @click="navigateToEmail(threadEmail.id)"
+          >
+            <div class="thread-avatar">
+              <el-avatar :size="32" :style="{ backgroundColor: getAvatarColor(threadEmail.from_email) }">
+                {{ getInitials(threadEmail.from_name || threadEmail.from_email) }}
+              </el-avatar>
+            </div>
+            <div class="thread-content">
+              <div class="thread-header">
+                <span class="thread-sender">{{ threadEmail.from_name || threadEmail.from_email }}</span>
+                <span class="thread-time">{{ formatDateTime(threadEmail.received_at) }}</span>
+              </div>
+              <div class="thread-subject">{{ threadEmail.subject_translated || threadEmail.subject_original }}</div>
+              <div class="thread-preview">{{ getBodyPreview(threadEmail) }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- 回复区域 -->
       <div class="reply-section">
         <div class="reply-header">
@@ -217,9 +266,35 @@
             <el-input
               v-model="replyForm.body_chinese"
               type="textarea"
-              :rows="12"
+              :rows="10"
               placeholder="请输入中文回复内容..."
             />
+            <div class="signature-selector">
+              <span class="signature-label">签名：</span>
+              <el-select
+                v-model="replyForm.signature_id"
+                size="small"
+                placeholder="选择签名"
+                clearable
+                style="width: 150px;"
+              >
+                <el-option label="不使用签名" :value="null" />
+                <el-option
+                  v-for="sig in signatures"
+                  :key="sig.id"
+                  :label="sig.name"
+                  :value="sig.id"
+                />
+              </el-select>
+              <el-button
+                v-if="replyForm.signature_id"
+                text
+                size="small"
+                @click="previewSignature"
+              >
+                预览
+              </el-button>
+            </div>
           </div>
 
           <div class="reply-preview">
@@ -232,9 +307,13 @@
             <el-input
               v-model="replyForm.body_translated"
               type="textarea"
-              :rows="12"
+              :rows="10"
               placeholder="点击翻译按钮生成译文..."
             />
+            <div class="signature-preview-box" v-if="selectedSignature">
+              <div class="signature-preview-label">签名预览：</div>
+              <div class="signature-preview-content">{{ selectedSignature.content_translated || selectedSignature.content_chinese }}</div>
+            </div>
           </div>
         </div>
       </div>
@@ -251,11 +330,11 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeft, Back, ChatLineSquare, Right, Delete, Star,
-  Printer, Paperclip, Document, Download, InfoFilled, DocumentCopy, View
+  Printer, Paperclip, Document, Download, InfoFilled, DocumentCopy, View, ArrowDown
 } from '@element-plus/icons-vue'
 import api from '@/api'
 import dayjs from 'dayjs'
@@ -273,6 +352,9 @@ const showReplyDialog = ref(false)
 const showHtmlDialog = ref(false)
 const translating = ref(false)
 const submitting = ref(false)
+const downloadingAttachments = ref({})  // 跟踪每个附件的下载状态
+const threadEmails = ref([])  // 邮件线程
+const signatures = ref([])  // 签名列表
 
 // Split View 滚动同步
 const originalPane = ref(null)
@@ -312,11 +394,54 @@ function handleTranslatedScroll(e) {
 const replyForm = reactive({
   body_chinese: '',
   body_translated: '',
-  target_language: 'en'
+  target_language: 'en',
+  signature_id: null
 })
+
+// 选中的签名
+const selectedSignature = computed(() => {
+  if (!replyForm.signature_id) return null
+  return signatures.value.find(s => s.id === replyForm.signature_id)
+})
+
+// 加载签名列表
+async function loadSignatures() {
+  try {
+    signatures.value = await api.getSignatures()
+    // 自动选择默认签名
+    const defaultSig = signatures.value.find(s => s.is_default)
+    if (defaultSig) {
+      replyForm.signature_id = defaultSig.id
+    }
+  } catch (e) {
+    console.error('Failed to load signatures:', e)
+  }
+}
+
+function previewSignature() {
+  if (!selectedSignature.value) return
+  ElMessageBox.alert(
+    `<div style="white-space: pre-wrap;">
+      <div style="margin-bottom: 12px;">
+        <strong>中文：</strong><br/>
+        ${selectedSignature.value.content_chinese || '(无)'}
+      </div>
+      <div>
+        <strong>翻译 (${getLanguageName(selectedSignature.value.target_language)})：</strong><br/>
+        ${selectedSignature.value.content_translated || '(无)'}
+      </div>
+    </div>`,
+    '签名预览',
+    {
+      dangerouslyUseHTMLString: true,
+      confirmButtonText: '确定'
+    }
+  )
+}
 
 onMounted(() => {
   loadEmail()
+  loadSignatures()
 })
 
 async function loadEmail() {
@@ -345,12 +470,42 @@ async function loadEmail() {
     if (route.query.reply === 'true') {
       showReplyDialog.value = true
     }
+
+    // 加载邮件线程
+    if (email.value.thread_id) {
+      loadThread(email.value.thread_id)
+    }
   } catch (e) {
     console.error('Failed to load email:', e)
     ElMessage.error('加载邮件失败')
   } finally {
     loading.value = false
   }
+}
+
+async function loadThread(threadId) {
+  try {
+    const result = await api.getEmailThread(threadId)
+    threadEmails.value = result.emails || []
+  } catch (e) {
+    console.error('Failed to load thread:', e)
+    threadEmails.value = []
+  }
+}
+
+function navigateToEmail(emailId) {
+  if (emailId !== email.value.id) {
+    router.push(`/emails/${emailId}`)
+  }
+}
+
+function formatDateTime(date) {
+  return dayjs(date).format('YYYY-MM-DD HH:mm')
+}
+
+function getBodyPreview(email) {
+  const body = email.body_translated || email.body_original || ''
+  return body.substring(0, 100).replace(/\n/g, ' ').trim() + (body.length > 100 ? '...' : '')
 }
 
 function handleReply() {
@@ -409,6 +564,41 @@ function handlePrint() {
   window.print()
 }
 
+async function handleExport(command) {
+  if (command === 'eml') {
+    try {
+      const subject = email.value.subject_original || 'email'
+      const filename = `${subject.substring(0, 50).replace(/[/\\:*?"<>|]/g, '_')}.eml`
+      await api.exportEmail(email.value.id, filename)
+      ElMessage.success('邮件导出成功')
+    } catch (e) {
+      console.error('Export failed:', e)
+      ElMessage.error('导出失败')
+    }
+  }
+}
+
+async function downloadAttachment(att) {
+  downloadingAttachments.value[att.id] = true
+  try {
+    await api.downloadAttachment(email.value.id, att.id, att.filename)
+    ElMessage.success(`附件 "${att.filename}" 下载成功`)
+  } catch (e) {
+    console.error('Download attachment failed:', e)
+    ElMessage.error('下载附件失败')
+  } finally {
+    downloadingAttachments.value[att.id] = false
+  }
+}
+
+async function downloadAllAttachments() {
+  if (!email.value?.attachments?.length) return
+
+  for (const att of email.value.attachments) {
+    await downloadAttachment(att)
+  }
+}
+
 async function translateEmail() {
   translating.value = true
   try {
@@ -449,6 +639,16 @@ async function translateReply() {
   }
 }
 
+// 获取带签名的内容
+function getContentWithSignature(content, isTranslated = false) {
+  if (!selectedSignature.value) return content
+  const signatureContent = isTranslated
+    ? (selectedSignature.value.content_translated || selectedSignature.value.content_chinese)
+    : selectedSignature.value.content_chinese
+  if (!signatureContent) return content
+  return content + '\n\n--\n' + signatureContent
+}
+
 async function saveDraft() {
   if (!replyForm.body_chinese.trim()) {
     ElMessage.warning('请输入回复内容')
@@ -458,8 +658,8 @@ async function saveDraft() {
   try {
     await api.createDraft({
       reply_to_email_id: email.value.id,
-      body_chinese: replyForm.body_chinese,
-      body_translated: replyForm.body_translated,
+      body_chinese: getContentWithSignature(replyForm.body_chinese, false),
+      body_translated: getContentWithSignature(replyForm.body_translated, true),
       target_language: replyForm.target_language
     })
     ElMessage.success('草稿已保存')
@@ -485,8 +685,8 @@ async function submitReply() {
   try {
     const draft = await api.createDraft({
       reply_to_email_id: email.value.id,
-      body_chinese: replyForm.body_chinese,
-      body_translated: replyForm.body_translated,
+      body_chinese: getContentWithSignature(replyForm.body_chinese, false),
+      body_translated: getContentWithSignature(replyForm.body_translated, true),
       target_language: replyForm.target_language
     })
 
@@ -1007,5 +1207,132 @@ function sanitizeHtml(html) {
   font-weight: 500;
   color: #606266;
   margin-bottom: 8px;
+}
+
+.signature-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  background-color: #f5f7fa;
+  border-radius: 4px;
+}
+
+.signature-label {
+  font-size: 13px;
+  color: #606266;
+}
+
+.signature-preview-box {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background-color: #f0f9ff;
+  border: 1px dashed #79bbff;
+  border-radius: 4px;
+}
+
+.signature-preview-label {
+  font-size: 12px;
+  color: #409eff;
+  margin-bottom: 6px;
+}
+
+.signature-preview-content {
+  font-size: 12px;
+  color: #606266;
+  white-space: pre-wrap;
+  max-height: 60px;
+  overflow-y: auto;
+}
+
+/* 邮件线程区域 */
+.thread-section {
+  margin-top: 24px;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.thread-section .section-header {
+  background-color: #f5f7fa;
+  padding: 12px 16px;
+  border-bottom: 1px solid #e8e8e8;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: #606266;
+}
+
+.thread-list {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.thread-item {
+  display: flex;
+  padding: 12px 16px;
+  border-bottom: 1px solid #f0f0f0;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.thread-item:last-child {
+  border-bottom: none;
+}
+
+.thread-item:hover {
+  background-color: #f5f7fa;
+}
+
+.thread-item.current {
+  background-color: #e1efff;
+  border-left: 3px solid #409eff;
+}
+
+.thread-avatar {
+  margin-right: 12px;
+  flex-shrink: 0;
+}
+
+.thread-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.thread-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.thread-sender {
+  font-weight: 500;
+  font-size: 13px;
+  color: #303133;
+}
+
+.thread-time {
+  font-size: 12px;
+  color: #909399;
+}
+
+.thread-subject {
+  font-size: 12px;
+  color: #606266;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.thread-preview {
+  font-size: 11px;
+  color: #909399;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>

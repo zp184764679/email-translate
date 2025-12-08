@@ -200,3 +200,18 @@ class SharedEmailTranslation(Base):
     target_lang = Column(String(10), default="zh")
     translated_by = Column(Integer, ForeignKey("email_accounts.id"))  # 谁触发的翻译
     translated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class EmailSignature(Base):
+    """邮件签名表 - 用户自定义签名模板"""
+    __tablename__ = "email_signatures"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("email_accounts.id"), nullable=False)
+    name = Column(String(100), nullable=False)  # 签名名称
+    content_chinese = Column(Text)  # 中文签名内容
+    content_translated = Column(Text)  # 翻译后的签名（可选）
+    target_language = Column(String(10), default="en")  # 目标语言
+    is_default = Column(Boolean, default=False)  # 是否为默认签名
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
