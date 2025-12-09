@@ -1,0 +1,96 @@
+name: Build and Release Desktop App
+
+on:
+  push:
+    tags:
+      - 'v*'  # 推送 v1.0.0 这样的 tag 时触发
+  workflow_dispatch:  # 支持手动触发
+    inputs:
+      version:
+        description: '版本号 (如 1.0.1)'
+        required: true
+        default: '1.0.0'
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 更新版本号（手动触发时）
+      - name: Update version
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          cd frontend
+          npm version ${{ github.event.inputs.version }} --no-git-tag-version
+        shell: bash
+
+      # 打包后端
+      - name: Build Backend
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          pip install pyinstaller
+          pyinstaller backend.spec --noconfirm
+        shell: bash
+
+      # 构建前端并打包 Electron
+      - name: Build Frontend & Electron
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+          npx electron-builder --win --publish never
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 上传更新文件到服务器
+      - name: Deploy to Update Server
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "frontend/dist_electron/*.exe,frontend/dist_electron/*.blockmap,frontend/dist_electron/latest.yml"
+          target: "/var/www/html/email-updates/"
+          strip_components: 2
+
+      # 设置正确的文件权限
+      - name: Set permissions on server
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            chmod 644 /var/www/html/email-updates/*
+            echo "Update files deployed:"
+            ls -la /var/www/html/email-updates/
+
+      # 上传到 GitHub Releases（可选）
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            frontend/dist_electron/*.exe
+            frontend/dist_electron/latest.yml
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
