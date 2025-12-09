@@ -19,10 +19,6 @@ jobs:
           script: |
             set -e
 
-            # 创建桌面端更新目录（如果不存在）
-            mkdir -p /var/www/html/email-updates
-            chmod 755 /var/www/html/email-updates
-
             # 首次部署：克隆仓库
             if [ ! -d "/www/email-translate" ]; then
               echo "First deployment: cloning repository..."
