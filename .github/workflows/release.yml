@@ -94,19 +94,21 @@ jobs:
       - name: Deploy to Update Server
         shell: bash
         run: |
-          # 创建远程目录
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "mkdir -p /var/www/html/email-updates"
+          SERVER="${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}"
+          SSH_OPTS="-i ~/.ssh/deploy_key -o StrictHostKeyChecking=no"
+
+          # 创建远程目录（使用 sudo）
+          ssh $SSH_OPTS $SERVER "sudo mkdir -p /var/www/html/email-updates && sudo chmod 777 /var/www/html/email-updates"
 
           # 上传文件
-          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+          scp $SSH_OPTS \
             frontend/dist_electron/*.exe \
             frontend/dist_electron/*.blockmap \
             frontend/dist_electron/latest.yml \
-            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/var/www/html/email-updates/
+            $SERVER:/var/www/html/email-updates/
 
           # 设置权限并显示结果
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
-            "chmod 644 /var/www/html/email-updates/* && ls -la /var/www/html/email-updates/"
+          ssh $SSH_OPTS $SERVER "sudo chmod 644 /var/www/html/email-updates/* && ls -la /var/www/html/email-updates/"
 
       # 上传到 GitHub Releases（可选）
       - name: Create GitHub Release
