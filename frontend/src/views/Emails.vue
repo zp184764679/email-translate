@@ -458,6 +458,7 @@ function hasAttachments(email) {
 .email-list {
   flex: 1;
   overflow-y: auto;
+  min-height: 0;  /* 重要：允许 flex 子项收缩 */
 }
 
 .email-item {
@@ -631,12 +632,14 @@ function hasAttachments(email) {
 .emails-container.split-mode {
   display: flex;
   flex-direction: row;
-  flex-wrap: wrap;
+  height: 100%;
 }
 
 .split-pane {
   flex: 1;
   min-width: 0;
+  min-height: 0;  /* 重要：允许 flex 子项收缩，解决滚动问题 */
+  height: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
