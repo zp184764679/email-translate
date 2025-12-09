@@ -602,14 +602,15 @@ async function downloadAllAttachments() {
 async function translateEmail() {
   translating.value = true
   try {
-    await api.translateEmail(email.value.id)
+    // 直接使用API返回的翻译结果更新UI
+    const translatedEmail = await api.translateEmail(email.value.id)
+    email.value = translatedEmail
     ElMessage.success('翻译完成')
-    loadEmail()
     // 触发全局邮件列表刷新
     userStore.triggerEmailRefresh()
   } catch (e) {
     console.error('Translation failed:', e)
-    ElMessage.error('翻译失败')
+    ElMessage.error('翻译失败: ' + (e.response?.data?.detail || e.message))
   } finally {
     translating.value = false
   }
@@ -1037,8 +1038,11 @@ function sanitizeHtml(html) {
 
 .split-pane {
   flex: 1;
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
   padding: 16px;
+  min-width: 0;
 }
 
 .original-pane {
@@ -1062,6 +1066,7 @@ function sanitizeHtml(html) {
 }
 
 .pane-content {
+  flex: 1;
   white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.8;
@@ -1106,7 +1111,7 @@ function sanitizeHtml(html) {
 }
 
 .pane-placeholder {
-  height: 100%;
+  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;

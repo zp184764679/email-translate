@@ -160,7 +160,7 @@
       </header>
 
       <!-- 内容区域 -->
-      <div class="content-area split-view">
+      <div class="content-area">
         <router-view />
       </div>
     </div>
@@ -582,10 +582,6 @@ function handleLogout() {
 .content-area {
   flex: 1;
   overflow: hidden;
-}
-
-.content-area.split-view {
-  display: flex;
 }
 
 /* 响应式调整 */

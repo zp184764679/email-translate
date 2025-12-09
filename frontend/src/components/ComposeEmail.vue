@@ -20,8 +20,8 @@
     <div class="compose-body">
       <div class="body-section">
         <div class="section-header">
-          <span>中文内容</span>
-          <el-select v-model="form.targetLanguage" size="small" style="width: 120px;">
+          <span>邮件内容</span>
+          <el-select v-model="form.targetLanguage" size="small" style="width: 120px;" placeholder="翻译目标语言">
             <el-option label="英语" value="en" />
             <el-option label="日语" value="ja" />
             <el-option label="韩语" value="ko" />
@@ -33,7 +33,7 @@
           v-model="form.bodyChinese"
           type="textarea"
           :rows="10"
-          placeholder="请输入中文内容..."
+          placeholder="输入邮件内容（可直接发送，或点击翻译后发送译文）"
         />
       </div>
 
@@ -48,13 +48,16 @@
           v-model="form.bodyTranslated"
           type="textarea"
           :rows="10"
-          placeholder="点击翻译按钮生成译文..."
+          placeholder="点击翻译按钮生成译文，或直接在此编辑..."
         />
       </div>
     </div>
 
     <!-- 操作按钮 -->
     <div class="compose-actions">
+      <span class="send-hint" v-if="!form.bodyTranslated.trim() && form.bodyChinese.trim()">
+        将发送左侧内容
+      </span>
       <el-button @click="$emit('cancel')">取消</el-button>
       <el-button @click="saveDraft">保存草稿</el-button>
       <el-button type="primary" @click="sendEmail" :loading="sending" :disabled="!canSend">
@@ -65,9 +68,15 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import api from '@/api'
 import { ElMessage } from 'element-plus'
+
+// 接收原邮件语言，用于设置默认目标语言
+const props = defineProps({
+  replyTo: { type: Object, default: null },  // 回复的原邮件
+  defaultLanguage: { type: String, default: '' }  // 默认目标语言
+})
 
 const emit = defineEmits(['sent', 'cancel'])
 
@@ -83,8 +92,30 @@ const form = reactive({
   targetLanguage: 'en'
 })
 
+// 初始化时设置默认语言
+onMounted(() => {
+  if (props.defaultLanguage) {
+    form.targetLanguage = props.defaultLanguage
+  } else if (props.replyTo?.detected_language) {
+    // 根据原邮件语言设置目标语言
+    const lang = props.replyTo.detected_language.toLowerCase()
+    if (['en', 'ja', 'ko', 'de', 'fr'].includes(lang)) {
+      form.targetLanguage = lang
+    }
+  }
+  // 如果是回复，设置收件人和主题
+  if (props.replyTo) {
+    form.to = props.replyTo.from_email || ''
+    form.subject = props.replyTo.subject?.startsWith('Re:')
+      ? props.replyTo.subject
+      : `Re: ${props.replyTo.subject || ''}`
+  }
+})
+
+// 发送条件：左边或右边有内容即可
 const canSend = computed(() => {
-  return form.to.trim() && form.subject.trim() && form.bodyTranslated.trim()
+  const hasContent = form.bodyChinese.trim() || form.bodyTranslated.trim()
+  return form.to.trim() && form.subject.trim() && hasContent
 })
 
 function getLanguageName(lang) {
@@ -150,13 +181,16 @@ async function sendEmail() {
     return
   }
 
+  // 优先发送右边翻译内容，没有则发送左边原始内容
+  const bodyToSend = form.bodyTranslated.trim() || form.bodyChinese.trim()
+
   sending.value = true
   try {
     await api.sendEmail({
       to: form.to,
       cc: form.cc,
       subject: form.subject,
-      body: form.bodyTranslated
+      body: bodyToSend
     })
     emit('sent')
   } catch (e) {
@@ -215,8 +249,15 @@ async function sendEmail() {
 .compose-actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 12px;
   padding-top: 16px;
   border-top: 1px solid #e0e0e0;
+}
+
+.send-hint {
+  margin-right: auto;
+  font-size: 12px;
+  color: #909399;
 }
 </style>

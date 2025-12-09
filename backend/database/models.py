@@ -160,15 +160,65 @@ class Glossary(Base):
 
 
 class TranslationBatch(Base):
+    """Claude Batch API 批次管理表
+
+    状态流转：
+    pending -> submitted -> in_progress -> ended/failed
+
+    价格优势：Batch API 价格是实时 API 的 50%
+    """
     __tablename__ = "translation_batches"
 
     id = Column(Integer, primary_key=True, index=True)
-    batch_id = Column(String(255), unique=True, index=True)
-    status = Column(String(20), default="processing")
-    total_requests = Column(Integer, default=0)
-    completed_requests = Column(Integer, default=0)
+    batch_id = Column(String(255), unique=True, index=True)  # Claude 返回的批次 ID
+
+    # 状态: pending(待提交), submitted(已提交), in_progress(处理中), ended(完成), failed(失败), expired(过期), canceled(取消)
+    status = Column(String(20), default="pending")
+
+    # 统计
+    total_requests = Column(Integer, default=0)      # 总请求数
+    completed_requests = Column(Integer, default=0)  # 已完成数
+    failed_requests = Column(Integer, default=0)     # 失败数
+
+    # 时间
+    created_at = Column(DateTime, default=datetime.utcnow)
+    submitted_at = Column(DateTime)    # 提交到 Claude 的时间
+    completed_at = Column(DateTime)    # 处理完成时间
+    expires_at = Column(DateTime)      # 过期时间（Claude Batch 24小时内有效）
+
+    # 关联
+    items = relationship("TranslationBatchItem", back_populates="batch")
+
+
+class TranslationBatchItem(Base):
+    """批次翻译项 - 记录每封邮件的翻译状态"""
+    __tablename__ = "translation_batch_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    batch_id = Column(Integer, ForeignKey("translation_batches.id"), index=True)
+    custom_id = Column(String(255), index=True)  # 自定义 ID（用于匹配结果）
+
+    # 关联邮件
+    email_id = Column(Integer, ForeignKey("emails.id"), index=True)
+
+    # 翻译内容
+    source_text = Column(Text)          # 原文
+    translated_text = Column(Text)       # 译文
+    source_lang = Column(String(10))
+    target_lang = Column(String(10), default="zh")
+
+    # 状态
+    status = Column(String(20), default="pending")  # pending, succeeded, failed, expired
+    error_message = Column(Text)         # 错误信息
+
+    # Token 统计
+    input_tokens = Column(Integer, default=0)
+    output_tokens = Column(Integer, default=0)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime)
+
+    batch = relationship("TranslationBatch", back_populates="items")
 
 
 class TranslationCache(Base):
@@ -215,3 +265,28 @@ class EmailSignature(Base):
     is_default = Column(Boolean, default=False)  # 是否为默认签名
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class TranslationUsage(Base):
+    """翻译 API 用量统计表 - 按月统计各翻译引擎用量"""
+    __tablename__ = "translation_usage"
+
+    id = Column(Integer, primary_key=True, index=True)
+    provider = Column(String(20), nullable=False)  # tencent, deepl, claude, ollama
+    year_month = Column(String(7), nullable=False)  # 格式: 2024-12
+
+    # 用量统计
+    total_chars = Column(Integer, default=0)       # 总字符数
+    total_requests = Column(Integer, default=0)    # 请求次数
+
+    # 腾讯翻译免费额度配置
+    free_quota = Column(Integer, default=5000000)  # 免费额度（默认500万字符/月）
+    is_disabled = Column(Boolean, default=False)   # 是否已禁用（超额时自动禁用）
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # 复合唯一索引
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
