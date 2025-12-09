@@ -96,22 +96,28 @@ jobs:
 
       - name: Deploy to Update Server
         shell: bash
+        timeout-minutes: 15
         run: |
           SERVER="${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}"
-          SSH_OPTS="-i ~/.ssh/deploy_key -o StrictHostKeyChecking=no"
-          SUDO_PASS="${{ secrets.SUDO_PASSWORD }}"
+          SSH_OPTS="-i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=60"
 
-          # 创建远程目录（放到后端项目目录下，Nginx 8888 端口可访问）
+          echo "=== 测试 SSH 连接 ==="
+          ssh $SSH_OPTS $SERVER "echo 'SSH 连接成功' && whoami"
+
+          echo "=== 创建远程目录 ==="
           ssh $SSH_OPTS $SERVER "mkdir -p /www/email-translate/updates"
 
-          # 上传文件
-          scp $SSH_OPTS \
+          echo "=== 显示要上传的文件 ==="
+          ls -lh frontend/dist_electron/*.exe frontend/dist_electron/*.blockmap frontend/dist_electron/latest.yml
+
+          echo "=== 上传文件（显示进度）==="
+          scp -v $SSH_OPTS \
             frontend/dist_electron/*.exe \
             frontend/dist_electron/*.blockmap \
             frontend/dist_electron/latest.yml \
             $SERVER:/www/email-translate/updates/
 
-          # 设置权限并显示结果
+          echo "=== 设置权限并验证 ==="
           ssh $SSH_OPTS $SERVER "chmod 644 /www/email-translate/updates/* && ls -la /www/email-translate/updates/"
 
       # 上传到 GitHub Releases（可选）
