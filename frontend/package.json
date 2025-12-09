@@ -1,6 +1,6 @@
 {
   "name": "supplier-email-translator",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "供应商邮件翻译管理系统",
   "main": "electron/main.js",
   "scripts": {
