@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Notification, Menu, Tray } = require('electron')
+const { app, BrowserWindow, ipcMain, Notification, Menu, Tray, dialog } = require('electron')
 const path = require('path')
 const { autoUpdater } = require('electron-updater')
 const https = require('https')
@@ -288,16 +288,58 @@ ipcMain.handle('get-app-version', () => {
 })
 
 // Auto updater events
-autoUpdater.on('update-available', () => {
+autoUpdater.on('checking-for-update', () => {
+  console.log('正在检查更新...')
+})
+
+autoUpdater.on('update-available', (info) => {
+  console.log('发现新版本:', info.version)
+  dialog.showMessageBox(mainWindow, {
+    type: 'info',
+    title: '发现新版本',
+    message: `发现新版本 ${info.version}，正在下载...`,
+    buttons: ['确定']
+  })
   mainWindow.webContents.send('update-available')
 })
 
-autoUpdater.on('update-downloaded', () => {
+autoUpdater.on('update-not-available', () => {
+  console.log('当前已是最新版本')
+  dialog.showMessageBox(mainWindow, {
+    type: 'info',
+    title: '检查更新',
+    message: '当前已是最新版本',
+    buttons: ['确定']
+  })
+})
+
+autoUpdater.on('update-downloaded', (info) => {
+  console.log('更新下载完成:', info.version)
+  dialog.showMessageBox(mainWindow, {
+    type: 'info',
+    title: '更新就绪',
+    message: `新版本 ${info.version} 已下载完成，是否立即安装？`,
+    buttons: ['立即安装', '稍后']
+  }).then((result) => {
+    if (result.response === 0) {
+      autoUpdater.quitAndInstall()
+    }
+  })
   mainWindow.webContents.send('update-downloaded')
 })
 
 autoUpdater.on('error', (error) => {
   console.error('Update error:', error)
+  dialog.showMessageBox(mainWindow, {
+    type: 'error',
+    title: '更新失败',
+    message: `检查更新失败: ${error.message}`,
+    buttons: ['确定']
+  })
+})
+
+autoUpdater.on('download-progress', (progress) => {
+  console.log(`下载进度: ${Math.round(progress.percent)}%`)
 })
 
 ipcMain.handle('install-update', () => {
