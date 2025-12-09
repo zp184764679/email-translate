@@ -656,7 +656,7 @@ git push origin main --tags
 ### 发布流程详情
 
 ```
-触发发布
+触发发布（推送 v* 标签）
     ↓
 GitHub Actions (Windows Runner)
     ↓
@@ -664,29 +664,48 @@ GitHub Actions (Windows Runner)
 ├── 构建前端 (Vite)
 ├── 打包 Electron (electron-builder)
     ↓
-上传到服务器 /var/www/html/email-updates/
+上传到 GitHub Releases
 ├── 供应商邮件翻译系统 Setup x.x.x.exe
-├── 供应商邮件翻译系统 Setup x.x.x.exe.blockmap
 └── latest.yml
     ↓
-用户端自动检测更新 → 提示下载安装
+用户端自动检测更新 → 从 GitHub 下载安装
 ```
 
-### 更新服务器配置
+### 更新托管配置
 
 | 配置项 | 值 |
 |--------|-----|
-| 更新服务器 URL | `https://jzchardware.cn/email-updates` |
-| 文件存放目录 | `/var/www/html/email-updates/` |
-| Nginx 配置 | 由 deploy.yml 自动创建目录 |
+| 托管方式 | GitHub Releases |
+| 仓库 | `zp184764679/email-translate` |
+| electron-updater provider | `github` |
+
+**为什么使用 GitHub Releases 而不是自建服务器：**
+- GitHub Actions 在美国，上传到中国服务器跨国传输很慢（100MB+ 文件需要 20+ 分钟）
+- GitHub CDN 全球分布，用户下载更快
+- 无需维护文件服务器
+- 发布记录自动保存，便于版本管理
 
 ### GitHub Secrets 配置
 
-| Secret 名称 | 说明 |
-|-------------|------|
-| `SERVER_HOST` | 服务器 IP (61.145.212.28) |
-| `SERVER_USER` | SSH 用户名 (root) |
-| `SSH_PRIVATE_KEY` | SSH 私钥 (email_deploy) |
+| Secret 名称 | 说明 | 用途 |
+|-------------|------|------|
+| `SERVER_HOST` | 服务器 IP (61.145.212.28) | 后端部署 |
+| `SERVER_USER` | SSH 用户名 (root) | 后端部署 |
+| `SSH_PRIVATE_KEY` | SSH 私钥 (email_deploy) | 后端部署 |
+| `GITHUB_TOKEN` | 自动提供 | 发布到 GitHub Releases |
+
+### 快速发布命令
+
+```bash
+# 发布新版本（一行命令）
+git tag -a v1.0.5 -m "release: 新功能描述" && git push origin v1.0.5
+
+# 查看所有版本
+git tag -l
+
+# 删除错误的标签（本地+远程）
+git tag -d v1.0.5 && git push origin :refs/tags/v1.0.5
+```
 
 ### 版本号规范
 
