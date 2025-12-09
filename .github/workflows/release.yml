@@ -82,28 +82,36 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 上传更新文件到服务器
+      # 上传更新文件到服务器（使用 PowerShell + SCP）
       - name: Deploy to Update Server
-        uses: appleboy/scp-action@master
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "frontend/dist_electron/*.exe,frontend/dist_electron/*.blockmap,frontend/dist_electron/latest.yml"
-          target: "/var/www/html/email-updates/"
-          strip_components: 2
+        shell: pwsh
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+        run: |
+          # 保存 SSH 密钥
+          $keyPath = "$env:TEMP\deploy_key"
+          $env:SSH_KEY | Out-File -FilePath $keyPath -Encoding ASCII -NoNewline
 
-      # 设置正确的文件权限
-      - name: Set permissions on server
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
-            chmod 644 /var/www/html/email-updates/*
-            echo "Update files deployed:"
-            ls -la /var/www/html/email-updates/
+          # 修复权限（Windows 上需要）
+          icacls $keyPath /inheritance:r /grant:r "${env:USERNAME}:(R)"
+
+          # 创建远程目录
+          ssh -i $keyPath -o StrictHostKeyChecking=no "$env:SERVER_USER@$env:SERVER_HOST" "mkdir -p /var/www/html/email-updates"
+
+          # 上传文件
+          $files = Get-ChildItem -Path "frontend/dist_electron" -Include "*.exe","*.blockmap","latest.yml" -File
+          foreach ($file in $files) {
+            Write-Host "Uploading $($file.Name)..."
+            scp -i $keyPath -o StrictHostKeyChecking=no $file.FullName "$env:SERVER_USER@$env:SERVER_HOST:/var/www/html/email-updates/"
+          }
+
+          # 设置权限
+          ssh -i $keyPath -o StrictHostKeyChecking=no "$env:SERVER_USER@$env:SERVER_HOST" "chmod 644 /var/www/html/email-updates/* && ls -la /var/www/html/email-updates/"
+
+          # 清理密钥
+          Remove-Item $keyPath -Force
 
       # 上传到 GitHub Releases（可选）
       - name: Create GitHub Release
