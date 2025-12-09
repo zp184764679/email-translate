@@ -9,7 +9,7 @@
           <span>原文</span>
           <span class="pane-count">({{ emails.length }})</span>
         </div>
-        <div class="email-list" v-loading="loading" ref="originalListRef" @scroll="handleOriginalScroll">
+        <div class="email-list" v-loading="loading">
           <div
             v-for="email in emails"
             :key="'orig-' + email.id"
@@ -76,7 +76,7 @@
           <span>中文翻译</span>
           <span class="pane-count" style="visibility: hidden;">({{ emails.length }})</span>
         </div>
-        <div class="email-list" ref="translatedListRef" @scroll="handleTranslatedScroll">
+        <div class="email-list">
           <div
             v-for="email in emails"
             :key="'trans-' + email.id"
@@ -162,29 +162,6 @@ const selectedEmails = ref([])
 const activeEmailId = ref(null)
 const activeEmail = ref(null)
 const sortBy = ref('date_desc')
-
-// Split View 滚动同步
-const originalListRef = ref(null)
-const translatedListRef = ref(null)
-let isScrollingSynced = false
-
-function handleOriginalScroll(e) {
-  if (isScrollingSynced) return
-  if (!translatedListRef.value) return
-
-  isScrollingSynced = true
-  translatedListRef.value.scrollTop = e.target.scrollTop
-  setTimeout(() => { isScrollingSynced = false }, 50)
-}
-
-function handleTranslatedScroll(e) {
-  if (isScrollingSynced) return
-  if (!originalListRef.value) return
-
-  isScrollingSynced = true
-  originalListRef.value.scrollTop = e.target.scrollTop
-  setTimeout(() => { isScrollingSynced = false }, 50)
-}
 
 // 初始化
 onMounted(async () => {
@@ -481,8 +458,7 @@ function hasAttachments(email) {
 
 /* 邮件列表 */
 .email-list {
-  flex: 1;
-  overflow-y: auto;
+  /* 不设置 overflow，让父容器统一滚动 */
 }
 
 .email-item {
@@ -657,7 +633,8 @@ function hasAttachments(email) {
   display: flex;
   flex-direction: row;
   flex: 1;
-  overflow: hidden;
+  overflow-y: auto;  /* 整体滚动 */
+  overflow-x: hidden;
 }
 
 .split-pane {
@@ -665,8 +642,8 @@ function hasAttachments(email) {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
   background-color: #fff;
+  /* 不设置 overflow，让内容自然撑开高度 */
 }
 
 .original-pane {
