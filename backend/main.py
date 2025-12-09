@@ -50,10 +50,11 @@ atexit.register(release_single_instance_lock)
 
 
 def check_port_available(port: int) -> bool:
-    """检查端口是否可用"""
+    """检查端口是否可用（允许 TIME_WAIT 状态的端口重用）"""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+            # 允许重用 TIME_WAIT 状态的端口
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind(('127.0.0.1', port))
             return True
     except OSError:
@@ -144,13 +145,22 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS middleware
+# CORS middleware - 使用白名单模式（安全）
+ALLOWED_ORIGINS = [
+    "http://127.0.0.1:4567",      # 开发环境前端
+    "http://localhost:4567",       # 开发环境前端（别名）
+    "http://127.0.0.1:2000",       # 开发环境（同源）
+    "https://jzchardware.cn:8888", # 生产环境
+    "https://jzchardware.cn",      # 生产环境
+    "app://.",                     # Electron 应用
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify exact origins
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept"],
 )
 
 # Include routers

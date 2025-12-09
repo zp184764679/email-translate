@@ -6,7 +6,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
 from email.header import decode_header
-from email.utils import parsedate_to_datetime
+from email.utils import parsedate_to_datetime, getaddresses
 from typing import List, Dict, Optional, Tuple
 import os
 import re
@@ -390,21 +390,22 @@ class EmailService:
                             )
                             msg.attach(part)
 
+            # 构建收件人列表（使用 getaddresses 正确解析包含 <> 格式的邮箱）
+            recipients = [to]
+            if cc:
+                # 正确解析 "Name <email>, Another <email2>" 格式
+                cc_addrs = getaddresses([cc])
+                recipients.extend([addr for name, addr in cc_addrs if addr])
+
             # Send
             if self.use_ssl:
                 with smtplib.SMTP_SSL(self.smtp_server, self.smtp_port) as server:
                     server.login(self.email_address, self.password)
-                    recipients = [to]
-                    if cc:
-                        recipients.extend(cc.split(","))
                     server.sendmail(self.email_address, recipients, msg.as_string())
             else:
                 with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
                     server.starttls()
                     server.login(self.email_address, self.password)
-                    recipients = [to]
-                    if cc:
-                        recipients.extend(cc.split(","))
                     server.sendmail(self.email_address, recipients, msg.as_string())
 
             return True

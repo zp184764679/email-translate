@@ -246,9 +246,66 @@
       :close-on-click-modal="false"
     >
       <div class="reply-dialog-content">
-        <div class="reply-to-info">
-          <span>回复给：</span>
-          <strong>{{ email?.from_name || email?.from_email }}</strong>
+        <!-- 收件人和抄送 - 标签式 -->
+        <div class="reply-recipients-tags">
+          <!-- 收件人 -->
+          <div class="recipient-row">
+            <label>收件人：</label>
+            <div class="tags-container">
+              <el-tag
+                v-for="(addr, index) in toList"
+                :key="'to-' + index"
+                closable
+                size="small"
+                @close="removeToAddress(index)"
+              >
+                {{ addr }}
+              </el-tag>
+              <el-autocomplete
+                v-model="toInput"
+                :fetch-suggestions="queryContacts"
+                placeholder="输入邮箱，回车添加"
+                size="small"
+                class="tag-input"
+                @keyup.enter="addToAddress"
+                @select="handleToSelect"
+                clearable
+              />
+            </div>
+          </div>
+
+          <!-- 抄送 -->
+          <div class="recipient-row">
+            <label>抄送：</label>
+            <div class="tags-container">
+              <el-tag
+                v-for="(addr, index) in ccList"
+                :key="'cc-' + index"
+                closable
+                type="info"
+                size="small"
+                @close="removeCcAddress(index)"
+              >
+                {{ addr }}
+              </el-tag>
+              <el-autocomplete
+                v-model="ccInput"
+                :fetch-suggestions="queryContacts"
+                placeholder="输入邮箱，回车添加"
+                size="small"
+                class="tag-input"
+                @keyup.enter="addCcAddress"
+                @select="handleCcSelect"
+                clearable
+              />
+            </div>
+          </div>
+
+          <!-- 主题 -->
+          <div class="recipient-row subject-row">
+            <label>主题：</label>
+            <el-input v-model="replyForm.subject" placeholder="邮件主题" size="small" />
+          </div>
         </div>
 
         <div class="reply-body-grid">
@@ -336,7 +393,7 @@ import {
   ArrowLeft, Back, ChatLineSquare, Right, Delete, Star,
   Printer, Paperclip, Document, Download, InfoFilled, DocumentCopy, View, ArrowDown
 } from '@element-plus/icons-vue'
-import api from '@/api'
+import api, { getStorageKey } from '@/api'
 import dayjs from 'dayjs'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import DOMPurify from 'dompurify'
@@ -392,11 +449,154 @@ function handleTranslatedScroll(e) {
 }
 
 const replyForm = reactive({
+  to: '',
+  cc: '',
+  subject: '',
   body_chinese: '',
   body_translated: '',
   target_language: 'en',
   signature_id: null
 })
+
+// 标签式邮箱输入
+const toList = ref([])      // 收件人列表
+const ccList = ref([])      // 抄送列表
+const toInput = ref('')     // 收件人输入框
+const ccInput = ref('')     // 抄送输入框
+const contactHistory = ref([])  // 历史联系人
+
+// 加载历史联系人（带缓存和失败降级）
+async function loadContactHistory() {
+  // 先尝试从缓存读取
+  const cacheKey = 'contactHistory'
+  try {
+    const cached = localStorage.getItem(cacheKey)
+    if (cached) {
+      contactHistory.value = JSON.parse(cached)
+    }
+  } catch (e) {
+    // 缓存读取失败，忽略
+  }
+
+  try {
+    const result = await api.getContacts()
+    contactHistory.value = result.contacts || []
+    // 成功后更新缓存
+    try {
+      localStorage.setItem(cacheKey, JSON.stringify(contactHistory.value))
+    } catch (e) {
+      // 缓存写入失败，忽略
+    }
+  } catch (e) {
+    console.error('Failed to load contacts:', e)
+    // 如果没有缓存数据，显示提示
+    if (contactHistory.value.length === 0) {
+      ElMessage.info('联系人加载失败，可手动输入邮箱')
+    }
+  }
+}
+
+// 查询联系人（自动补全）
+function queryContacts(query, cb) {
+  const results = query
+    ? contactHistory.value.filter(c =>
+        c.email.toLowerCase().includes(query.toLowerCase()) ||
+        (c.name && c.name.toLowerCase().includes(query.toLowerCase()))
+      )
+    : contactHistory.value.slice(0, 10)
+
+  cb(results.map(c => ({
+    value: c.email,
+    label: c.name ? `${c.name} <${c.email}>` : c.email
+  })))
+}
+
+// 检查邮箱是否已存在于列表中（不区分大小写）
+function emailExistsIn(email, list) {
+  return list.some(e => e.toLowerCase() === email.toLowerCase())
+}
+
+// 添加收件人
+function addToAddress() {
+  const addr = toInput.value.trim()
+  if (!addr) return
+
+  if (!isValidEmail(addr)) {
+    ElMessage.warning('邮箱格式不正确')
+    return
+  }
+  if (emailExistsIn(addr, toList.value)) {
+    ElMessage.warning('该邮箱已在收件人列表中')
+    return
+  }
+  toList.value.push(addr)
+  toInput.value = ''
+}
+
+// 选择收件人（从自动补全）
+function handleToSelect(item) {
+  if (!item.value) return
+
+  if (emailExistsIn(item.value, toList.value)) {
+    ElMessage.warning('该邮箱已在收件人列表中')
+  } else {
+    toList.value.push(item.value)
+  }
+  toInput.value = ''
+}
+
+// 移除收件人
+function removeToAddress(index) {
+  toList.value.splice(index, 1)
+}
+
+// 添加抄送
+function addCcAddress() {
+  const addr = ccInput.value.trim()
+  if (!addr) return
+
+  if (!isValidEmail(addr)) {
+    ElMessage.warning('邮箱格式不正确')
+    return
+  }
+  // 检查是否已在收件人中
+  if (emailExistsIn(addr, toList.value)) {
+    ElMessage.warning('该邮箱已在收件人列表中')
+    return
+  }
+  if (emailExistsIn(addr, ccList.value)) {
+    ElMessage.warning('该邮箱已在抄送列表中')
+    return
+  }
+  ccList.value.push(addr)
+  ccInput.value = ''
+}
+
+// 选择抄送（从自动补全）
+function handleCcSelect(item) {
+  if (!item.value) return
+
+  if (emailExistsIn(item.value, toList.value)) {
+    ElMessage.warning('该邮箱已在收件人列表中')
+  } else if (emailExistsIn(item.value, ccList.value)) {
+    ElMessage.warning('该邮箱已在抄送列表中')
+  } else {
+    ccList.value.push(item.value)
+  }
+  ccInput.value = ''
+}
+
+// 移除抄送
+function removeCcAddress(index) {
+  ccList.value.splice(index, 1)
+}
+
+// 验证邮箱格式（更严格的RFC 5322兼容验证）
+function isValidEmail(email) {
+  // 要求：本地部分 @ 域名部分，域名至少有一个点且结尾至少2字符
+  const emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/
+  return emailRegex.test(email)
+}
 
 // 选中的签名
 const selectedSignature = computed(() => {
@@ -442,6 +642,7 @@ function previewSignature() {
 onMounted(() => {
   loadEmail()
   loadSignatures()
+  loadContactHistory()
 })
 
 async function loadEmail() {
@@ -468,6 +669,7 @@ async function loadEmail() {
 
     // 如果URL带有reply参数，自动打开回复对话框
     if (route.query.reply === 'true') {
+      initReplyForm(false)
       showReplyDialog.value = true
     }
 
@@ -509,11 +711,91 @@ function getBodyPreview(email) {
 }
 
 function handleReply() {
+  initReplyForm(false)
   showReplyDialog.value = true
 }
 
 function handleReplyAll() {
+  initReplyForm(true)
   showReplyDialog.value = true
+}
+
+// 初始化回复表单
+function initReplyForm(isReplyAll = false) {
+  if (!email.value) return
+
+  const currentUserEmail = localStorage.getItem(getStorageKey('email')) || ''
+
+  // 收件人：原邮件发件人（优先使用 reply_to）
+  const toAddr = email.value.reply_to || email.value.from_email || ''
+  toList.value = toAddr ? [toAddr] : []
+  toInput.value = ''
+
+  // 主题
+  const originalSubject = email.value.subject_original || ''
+  replyForm.subject = originalSubject.startsWith('Re:') ? originalSubject : `Re: ${originalSubject}`
+
+  if (isReplyAll) {
+    // 全部回复：抄送包含原邮件的其他收件人和原抄送人（排除自己和发件人）
+    const ccAddrs = []
+
+    // 添加原邮件的其他收件人（排除自己）
+    if (email.value.to_email) {
+      const toAddresses = email.value.to_email.split(',').map(e => e.trim()).filter(e => e)
+      for (const addr of toAddresses) {
+        const emailAddr = extractEmail(addr)
+        if (emailAddr &&
+            emailAddr.toLowerCase() !== currentUserEmail.toLowerCase() &&
+            emailAddr.toLowerCase() !== toAddr.toLowerCase()) {
+          ccAddrs.push(emailAddr)
+        }
+      }
+    }
+
+    // 添加原邮件的抄送人（排除自己）
+    if (email.value.cc_email) {
+      const ccAddresses = email.value.cc_email.split(',').map(e => e.trim()).filter(e => e)
+      for (const addr of ccAddresses) {
+        const emailAddr = extractEmail(addr)
+        if (emailAddr &&
+            emailAddr.toLowerCase() !== currentUserEmail.toLowerCase() &&
+            !ccAddrs.some(cc => cc.toLowerCase() === emailAddr.toLowerCase())) {
+          ccAddrs.push(emailAddr)
+        }
+      }
+    }
+
+    ccList.value = ccAddrs
+  } else {
+    // 普通回复：不抄送
+    ccList.value = []
+  }
+  ccInput.value = ''
+
+  // 清空正文
+  replyForm.body_chinese = ''
+  replyForm.body_translated = ''
+}
+
+// 从地址字符串中提取邮箱（支持多种格式）
+// 支持: "Name" <email>, Name <email>, <email>, email
+function extractEmail(addr) {
+  if (!addr) return null
+  const trimmed = addr.trim()
+
+  // 尝试匹配 <email> 格式（包括带引号的名字）
+  const match = trimmed.match(/<([^>]+)>/)
+  if (match) {
+    const email = match[1].trim()
+    return isValidEmail(email) ? email : null
+  }
+
+  // 如果没有 <> 格式，检查是否是纯邮箱
+  if (isValidEmail(trimmed)) {
+    return trimmed
+  }
+
+  return null
 }
 
 function handleForward() {
@@ -659,6 +941,9 @@ async function saveDraft() {
   try {
     await api.createDraft({
       reply_to_email_id: email.value.id,
+      to: toList.value.join(', '),
+      cc: ccList.value.length > 0 ? ccList.value.join(', ') : null,
+      subject: replyForm.subject.trim(),
       body_chinese: getContentWithSignature(replyForm.body_chinese, false),
       body_translated: getContentWithSignature(replyForm.body_translated, true),
       target_language: replyForm.target_language
@@ -672,6 +957,11 @@ async function saveDraft() {
 }
 
 async function submitReply() {
+  if (toList.value.length === 0) {
+    ElMessage.warning('请输入收件人')
+    return
+  }
+
   if (!replyForm.body_chinese.trim()) {
     ElMessage.warning('请输入回复内容')
     return
@@ -686,6 +976,9 @@ async function submitReply() {
   try {
     const draft = await api.createDraft({
       reply_to_email_id: email.value.id,
+      to: toList.value.join(', '),
+      cc: ccList.value.length > 0 ? ccList.value.join(', ') : null,
+      subject: replyForm.subject.trim(),
       body_chinese: getContentWithSignature(replyForm.body_chinese, false),
       body_translated: getContentWithSignature(replyForm.body_translated, true),
       target_language: replyForm.target_language
@@ -1192,10 +1485,76 @@ function sanitizeHtml(html) {
   padding: 0 10px;
 }
 
-.reply-to-info {
+/* 标签式收件人输入 */
+.reply-recipients-tags {
   margin-bottom: 16px;
-  font-size: 14px;
-  color: #606266;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.recipient-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.recipient-row label {
+  width: 55px;
+  flex-shrink: 0;
+  font-size: 13px;
+  color: var(--el-text-color-regular, #606266);
+  text-align: right;
+  padding-top: 5px;
+}
+
+.tags-container {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;
+  min-height: 32px;
+  max-height: 120px;
+  overflow-y: auto;
+  padding: 4px 8px;
+  background-color: var(--el-fill-color-light, #f5f7fa);
+  border: 1px solid var(--el-border-color, #dcdfe6);
+  border-radius: 4px;
+}
+
+.tags-container:focus-within {
+  border-color: #409eff;
+}
+
+.tags-container .el-tag {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tag-input {
+  flex: 1;
+  min-width: 150px;
+}
+
+.tag-input :deep(.el-input__wrapper) {
+  box-shadow: none !important;
+  background: transparent;
+  padding: 0;
+}
+
+.tag-input :deep(.el-input__inner) {
+  height: 24px;
+  line-height: 24px;
+}
+
+.subject-row {
+  align-items: center;
+}
+
+.subject-row .el-input {
+  flex: 1;
 }
 
 .reply-body-grid {
@@ -1339,5 +1698,32 @@ function sanitizeHtml(html) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 响应式设计 - 小屏幕适配 */
+@media (max-width: 600px) {
+  .tag-input {
+    min-width: 100px;
+  }
+
+  .tags-container .el-tag {
+    max-width: 150px;
+  }
+
+  .recipient-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .recipient-row label {
+    width: auto;
+    text-align: left;
+    padding-top: 0;
+    margin-bottom: 4px;
+  }
+
+  .reply-body-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

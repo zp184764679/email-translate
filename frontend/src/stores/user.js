@@ -1,14 +1,14 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import api from '@/api'
+import api, { getStorageKey } from '@/api'
 
 // 自动收件配置
 const AUTO_FETCH_INTERVAL = 5 * 60 * 1000  // 5分钟
 
 export const useUserStore = defineStore('user', () => {
-  const token = ref(localStorage.getItem('token') || '')
-  const email = ref(localStorage.getItem('email') || '')
-  const accountId = ref(localStorage.getItem('accountId') || null)
+  const token = ref(localStorage.getItem(getStorageKey('token')) || '')
+  const email = ref(localStorage.getItem(getStorageKey('email')) || '')
+  const accountId = ref(localStorage.getItem(getStorageKey('accountId')) || null)
   const emailRefreshKey = ref(0)  // 用于触发邮件列表刷新
   const lastFetchTime = ref(null)  // 上次拉取时间
   const autoFetchTimer = ref(null)  // 自动拉取定时器
@@ -25,9 +25,9 @@ export const useUserStore = defineStore('user', () => {
     token.value = response.access_token
     email.value = response.email
     accountId.value = response.account_id
-    localStorage.setItem('token', token.value)
-    localStorage.setItem('email', email.value)
-    localStorage.setItem('accountId', accountId.value)
+    localStorage.setItem(getStorageKey('token'), token.value)
+    localStorage.setItem(getStorageKey('email'), email.value)
+    localStorage.setItem(getStorageKey('accountId'), accountId.value)
     return response
   }
 
@@ -35,9 +35,9 @@ export const useUserStore = defineStore('user', () => {
     token.value = ''
     email.value = ''
     accountId.value = null
-    localStorage.removeItem('token')
-    localStorage.removeItem('email')
-    localStorage.removeItem('accountId')
+    localStorage.removeItem(getStorageKey('token'))
+    localStorage.removeItem(getStorageKey('email'))
+    localStorage.removeItem(getStorageKey('accountId'))
   }
 
   async function fetchAccountInfo() {

@@ -108,6 +108,11 @@ class Draft(Base):
     reply_to_email_id = Column(Integer, ForeignKey("emails.id"))
     author_id = Column(Integer, ForeignKey("email_accounts.id"))
 
+    # 收件人信息（可自定义）
+    to_address = Column(String(500))  # 收件人
+    cc_address = Column(String(500))  # 抄送
+    subject = Column(String(500))     # 主题
+
     body_chinese = Column(Text)
     body_translated = Column(Text)
     target_language = Column(String(10))
