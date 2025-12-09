@@ -200,18 +200,51 @@ OLLAMA_MODEL=qwen3:8b
 SECRET_KEY=your-secret-key
 ```
 
-### 翻译引擎切换
+### 翻译引擎配置
 
-| Provider | 说明 | 切换方式 |
-|----------|------|----------|
-| `ollama` | 本地测试，免费 | `TRANSLATE_PROVIDER=ollama` |
-| `claude` | Claude API，支持 Batch | `TRANSLATE_PROVIDER=claude` |
-| `deepl` | DeepL API | `TRANSLATE_PROVIDER=deepl` |
+| Provider | 说明 | 免费额度 | 用量统计 |
+|----------|------|----------|----------|
+| `tencent` | 腾讯翻译，速度快，格式好 | 500万字符/月 | ✓ 自动记录 |
+| `deepl` | DeepL API，翻译质量高 | 50万字符/月 | ✓ 自动记录 |
+| `ollama` | 本地大模型，免费无限制 | 无限制 | 不统计 |
+| `claude` | Claude API，理解能力最强 | 按量付费 | ✓ 只统计不限制 |
 
-测试流程：
-1. 先用 `ollama` 测试功能
-2. 测试通过后改为 `claude`
-3. 只需修改 `.env` 中的 `TRANSLATE_PROVIDER`
+### 智能路由模式（推荐）
+
+设置 `SMART_ROUTING_ENABLED=true`（默认启用），系统基于邮件复杂度自动选择最优引擎：
+
+```
+邮件进入
+    ↓
+Ollama 快速评估复杂度（规则优先，必要时用LLM）
+    ↓
+┌──────────────┬──────────────┬──────────────┐
+│ 简单(≤30分)  │ 中等(31-70)  │ 复杂(>70)    │
+│ Ollama翻译   │ 腾讯翻译     │ 拆分翻译     │
+│ (免费快速)   │ (速度快)     │ 正文→Claude  │
+│              │              │ 签名→腾讯    │
+└──────────────┴──────────────┴──────────────┘
+    ↓ 失败时自动回退
+腾讯 → DeepL → Ollama → Claude
+```
+
+**复杂度判断标准**：
+- 简单：<500字符，无表格/列表，日常问候确认
+- 中等：一般业务邮件，多个事项
+- 复杂：技术文档、合同条款、表格数据、多层嵌套
+
+**用量保护**：
+- 80% 用量时发出警告
+- 95% 用量时自动禁用（防止超额收费）
+- 每月1日自动重置
+
+### 用量统计 API
+
+| 端点 | 说明 |
+|------|------|
+| GET /api/translate/usage-stats | 获取所有引擎用量 |
+| GET /api/translate/usage-stats/{provider} | 获取指定引擎用量 |
+| POST /api/translate/usage-stats/{provider}/reset | 重新启用被禁用的引擎 |
 
 创建 `frontend/.env`（可选）：
 
@@ -262,6 +295,48 @@ VITE_API_URL=http://localhost:8000/api
 ```bash
 cd backend
 python -m migrations.add_email_flags
+```
+
+## 安全机制
+
+### 登录状态存储
+
+登录状态通过 JWT token 保存在 Electron 的 localStorage 中：
+
+```
+%APPDATA%\supplier-email-translator\
+├── Local Storage/          # localStorage 数据（包含 JWT token）
+├── data/                   # 应用数据
+└── ...
+```
+
+**重要说明**：
+- Token 有效期为 7 天
+- 卸载软件时，用户数据会被自动清理（`deleteAppDataOnUninstall: true`）
+- 用户可通过左下角"退出登录"按钮主动清除登录状态
+
+### 退出登录
+
+点击左侧导航栏底部的"退出登录"按钮：
+1. 清除 localStorage 中的 token、email、accountId
+2. 停止自动拉取邮件定时器
+3. 跳转到登录页面
+
+### 安全建议
+
+| 风险 | 说明 | 缓解措施 |
+|------|------|----------|
+| 本机共享 | 同一台电脑的其他 Windows 用户可能访问 AppData | 使用 Windows 账户隔离 |
+| 设备丢失 | 电脑丢失后无需密码即可访问 | 启用 Windows 登录密码 + 硬盘加密 |
+| 公共电脑 | 在公共电脑上使用后忘记退出 | 使用完毕后点击"退出登录" |
+
+### 相关配置
+
+```json
+// frontend/package.json - NSIS 配置
+"nsis": {
+  "deleteAppDataOnUninstall": true  // 卸载时清理用户数据
+}
 ```
 
 ## 注意事项
@@ -539,3 +614,86 @@ PUT  /api/signatures/{id}       # 更新签名
 DELETE /api/signatures/{id}     # 删除签名
 POST /api/signatures/{id}/set-default  # 设为默认签名
 ```
+
+## CI/CD 自动化部署
+
+项目使用 GitHub Actions 实现自动化部署，包括后端部署和桌面端发布。
+
+### 后端自动部署
+
+推送到 `main` 分支时自动触发：
+
+```
+git push origin main
+    ↓
+GitHub Actions (.github/workflows/deploy.yml)
+    ↓
+SSH 连接服务器 → 拉取代码 → 安装依赖 → 重启 PM2
+```
+
+### 桌面端发布流程
+
+两种方式触发发布：
+
+#### 方式一：打 Tag 发布（推荐）
+
+```bash
+# 1. 修改版本号
+cd frontend
+npm version 1.0.1  # 自动更新 package.json 并创建 git tag
+
+# 2. 推送代码和 tag
+git push origin main --tags
+```
+
+#### 方式二：手动触发
+
+1. 打开 GitHub 仓库 → Actions → "Build and Release Desktop App"
+2. 点击 "Run workflow"
+3. 输入版本号（如 1.0.1）
+4. 点击运行
+
+### 发布流程详情
+
+```
+触发发布
+    ↓
+GitHub Actions (Windows Runner)
+    ↓
+├── 打包后端 (PyInstaller)
+├── 构建前端 (Vite)
+├── 打包 Electron (electron-builder)
+    ↓
+上传到服务器 /var/www/html/email-updates/
+├── 供应商邮件翻译系统 Setup x.x.x.exe
+├── 供应商邮件翻译系统 Setup x.x.x.exe.blockmap
+└── latest.yml
+    ↓
+用户端自动检测更新 → 提示下载安装
+```
+
+### 更新服务器配置
+
+| 配置项 | 值 |
+|--------|-----|
+| 更新服务器 URL | `https://jzchardware.cn/email-updates` |
+| 文件存放目录 | `/var/www/html/email-updates/` |
+| Nginx 配置 | 由 deploy.yml 自动创建目录 |
+
+### GitHub Secrets 配置
+
+| Secret 名称 | 说明 |
+|-------------|------|
+| `SERVER_HOST` | 服务器 IP (61.145.212.28) |
+| `SERVER_USER` | SSH 用户名 (root) |
+| `SSH_PRIVATE_KEY` | SSH 私钥 (email_deploy) |
+
+### 版本号规范
+
+遵循语义化版本：`主版本.次版本.修订号`
+
+| 类型 | 说明 | 示例 |
+|------|------|------|
+| 主版本 | 不兼容的大改动 | 1.0.0 → 2.0.0 |
+| 次版本 | 新增功能（向后兼容） | 1.0.0 → 1.1.0 |
+| 修订号 | Bug 修复 | 1.0.0 → 1.0.1 |

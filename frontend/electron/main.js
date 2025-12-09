@@ -82,14 +82,35 @@ async function createWindow() {
 }
 
 function createTray() {
-  const iconPath = path.join(__dirname, '../public/favicon.ico')
+  // 开发模式和生产模式使用不同的图标路径
+  const iconPath = isDev
+    ? path.join(__dirname, '../public/favicon.ico')
+    : path.join(process.resourcesPath, 'app.asar', 'dist', 'favicon.ico')
+
+  // 备用路径
+  const fallbackPaths = [
+    path.join(__dirname, '../public/favicon.ico'),
+    path.join(__dirname, '../dist/favicon.ico'),
+    path.join(process.resourcesPath || '', 'app.asar', 'dist', 'favicon.ico')
+  ]
+
   const fs = require('fs')
-  if (!fs.existsSync(iconPath)) {
-    console.log('Tray icon not found, skipping tray creation')
-    return
+  let finalIconPath = iconPath
+
+  if (!fs.existsSync(finalIconPath)) {
+    // 尝试备用路径
+    finalIconPath = fallbackPaths.find(p => fs.existsSync(p))
+    if (!finalIconPath) {
+      console.log('Tray icon not found in any path, skipping tray creation')
+      console.log('Tried paths:', fallbackPaths)
+      return
+    }
   }
+
+  console.log('Creating tray with icon:', finalIconPath)
+
   try {
-    tray = new Tray(iconPath)
+    tray = new Tray(finalIconPath)
   } catch (error) {
     console.log('Failed to create tray, skipping:', error.message)
     return

@@ -66,11 +66,12 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "供应商邮件翻译系统"
+      "shortcutName": "供应商邮件翻译系统",
+      "deleteAppDataOnUninstall": true
     },
     "publish": {
       "provider": "generic",
-      "url": "https://your-update-server.com/updates"
+      "url": "https://jzchardware.cn/email-updates"
     }
   }
 }
