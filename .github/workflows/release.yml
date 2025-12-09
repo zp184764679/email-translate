@@ -48,14 +48,24 @@ jobs:
           pyinstaller backend.spec --noconfirm
         shell: bash
 
-      # 构建前端并打包 Electron
-      - name: Build Frontend & Electron
+      # 构建前端
+      - name: Build Frontend
         run: |
           cd frontend
           npm ci
           npm run build
-          npx electron-builder --win --publish never
         shell: bash
+
+      # 打包 Electron（带重试机制）
+      - name: Build Electron
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 30
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: |
+            cd frontend
+            npx electron-builder --win --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
