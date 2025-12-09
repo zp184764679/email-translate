@@ -75,7 +75,8 @@ const api = {
   },
 
   async getEmail(id) {
-    return instance.get(`/emails/${id}`)
+    // 添加时间戳防止浏览器缓存
+    return instance.get(`/emails/${id}`, { params: { _t: Date.now() } })
   },
 
   async getEmailThread(threadId) {

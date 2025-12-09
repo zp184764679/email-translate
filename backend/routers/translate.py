@@ -64,15 +64,42 @@ async def save_to_cache(db: AsyncSession, text: str, translated: str, source_lan
     print(f"[Cache SAVE] text={text[:30]}...")
 
 
-def get_translate_service() -> TranslateService:
+def get_translate_service(for_smart_routing: bool = False) -> TranslateService:
     """Get configured translation service instance
 
-    切换方式：修改 .env 中的 TRANSLATE_PROVIDER
-    - ollama: 本地测试（免费）
-    - claude: Claude API（正式使用）
-    - deepl: DeepL API
+    智能路由模式（smart_routing_enabled=True 或 for_smart_routing=True）：
+    创建包含所有引擎配置的服务，支持自动切换：
+    优先级：腾讯翻译 → DeepL → Ollama → Claude
+
+    单引擎模式：
+    根据 TRANSLATE_PROVIDER 使用单一引擎
     """
-    if settings.translate_provider == "deepl":
+    if for_smart_routing or settings.smart_routing_enabled:
+        # 智能路由模式：配置所有可用的引擎
+        return TranslateService(
+            # 主要配置（决定 translate_text 使用哪个引擎）
+            provider=settings.translate_provider,
+            # 腾讯翻译配置
+            tencent_secret_id=settings.tencent_secret_id,
+            tencent_secret_key=settings.tencent_secret_key,
+            # DeepL 配置
+            api_key=settings.deepl_api_key or settings.claude_api_key,
+            is_free_api=settings.deepl_free_api,
+            # Ollama 配置
+            ollama_base_url=settings.ollama_base_url,
+            ollama_model=settings.ollama_model,
+            # Claude 配置
+            claude_model=settings.claude_model,
+        )
+
+    # 单引擎模式
+    if settings.translate_provider == "tencent":
+        return TranslateService(
+            provider="tencent",
+            tencent_secret_id=settings.tencent_secret_id,
+            tencent_secret_key=settings.tencent_secret_key
+        )
+    elif settings.translate_provider == "deepl":
         return TranslateService(
             api_key=settings.deepl_api_key,
             provider="deepl",
@@ -136,7 +163,11 @@ async def translate_text(
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """Translate text in real-time (with cache)"""
+    """Translate text using smart routing (with cache)
+
+    智能路由优先级：腾讯翻译 → DeepL → Ollama → Claude
+    自动根据额度切换引擎
+    """
     if not settings.translate_enabled:
         return TranslateResponse(translated_text=request.text, source_lang="disabled")
 
@@ -152,17 +183,29 @@ async def translate_text(
 
     try:
         service = get_translate_service()
-        translated = service.translate_text(
-            text=request.text,
-            target_lang=request.target_lang,
-            glossary=glossary,
-            context=request.context
-        )
+
+        # 使用智能路由
+        if settings.smart_routing_enabled:
+            result = service.translate_with_smart_routing(
+                text=request.text,
+                target_lang=request.target_lang,
+                glossary=glossary
+            )
+            translated = result["translated_text"]
+            source_lang = result["provider_used"]
+        else:
+            translated = service.translate_text(
+                text=request.text,
+                target_lang=request.target_lang,
+                glossary=glossary,
+                context=request.context
+            )
+            source_lang = settings.translate_provider
 
         # 保存到缓存
         await save_to_cache(db, request.text, translated, None, request.target_lang)
 
-        return TranslateResponse(translated_text=translated)
+        return TranslateResponse(translated_text=translated, source_lang=source_lang)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"翻译失败: {str(e)}")
 
@@ -173,7 +216,10 @@ async def translate_reply(
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """Translate Chinese reply to target language (with cache)"""
+    """Translate Chinese reply to target language using smart routing (with cache)
+
+    智能路由优先级：腾讯翻译 → DeepL → Ollama → Claude
+    """
     if not settings.translate_enabled:
         return TranslateResponse(translated_text=request.text, source_lang="disabled")
 
@@ -189,17 +235,30 @@ async def translate_reply(
 
     try:
         service = get_translate_service()
-        translated = service.translate_text(
-            text=request.text,
-            target_lang=request.target_lang,
-            glossary=glossary,
-            context=request.context
-        )
+
+        # 使用智能路由
+        if settings.smart_routing_enabled:
+            result = service.translate_with_smart_routing(
+                text=request.text,
+                target_lang=request.target_lang,
+                glossary=glossary,
+                source_lang="zh"
+            )
+            translated = result["translated_text"]
+            source_lang = result["provider_used"]
+        else:
+            translated = service.translate_text(
+                text=request.text,
+                target_lang=request.target_lang,
+                glossary=glossary,
+                context=request.context
+            )
+            source_lang = settings.translate_provider
 
         # 保存到缓存
         await save_to_cache(db, request.text, translated, "zh", request.target_lang)
 
-        return TranslateResponse(translated_text=translated)
+        return TranslateResponse(translated_text=translated, source_lang=source_lang)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"翻译失败: {str(e)}")
 
@@ -360,6 +419,86 @@ async def reset_token_stats(account: EmailAccount = Depends(get_current_account)
     return {"message": "Token 统计已重置"}
 
 
+# ============ 翻译用量统计 (腾讯等) ============
+@router.get("/usage-stats")
+async def get_usage_stats(
+    provider: Optional[str] = None,
+    account: EmailAccount = Depends(get_current_account)
+):
+    """
+    获取翻译 API 用量统计
+
+    参数:
+    - provider: 可选，指定翻译引擎 (tencent, deepl, claude, ollama)
+                不指定则返回所有引擎的用量
+
+    返回:
+    - current_month: 当前统计月份
+    - providers: 各引擎用量列表
+        - provider: 引擎名称
+        - total_chars: 本月累计字符数
+        - total_requests: 请求次数
+        - free_quota: 免费额度
+        - remaining: 剩余额度
+        - usage_percent: 使用百分比
+        - is_disabled: 是否已禁用
+    """
+    from services.usage_service import get_translation_usage_stats
+
+    try:
+        stats = await get_translation_usage_stats(provider)
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取用量统计失败: {str(e)}")
+
+
+@router.get("/usage-stats/{provider}")
+async def get_provider_usage_stats(
+    provider: str,
+    account: EmailAccount = Depends(get_current_account)
+):
+    """
+    获取指定翻译引擎的用量统计
+
+    路径参数:
+    - provider: 翻译引擎名称 (tencent, deepl, claude, ollama)
+    """
+    from services.usage_service import check_translation_quota
+
+    try:
+        quota = await check_translation_quota(provider)
+        return {
+            "provider": provider,
+            **quota
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取用量统计失败: {str(e)}")
+
+
+@router.post("/usage-stats/{provider}/reset")
+async def reset_provider_disabled(
+    provider: str,
+    account: EmailAccount = Depends(get_current_account)
+):
+    """
+    手动重新启用被禁用的翻译引擎
+
+    注意: 这只会重置禁用状态，不会重置用量统计。
+          用量统计会在每月1日自动重置。
+    """
+    from services.usage_service import get_usage_service
+
+    try:
+        service = get_usage_service()
+        success = await service.reset_disabled(provider)
+        if success:
+            return {"message": f"{provider} 翻译已重新启用"}
+        else:
+            raise HTTPException(status_code=500, detail="重置失败")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"重置失败: {str(e)}")
+
+
 # ============ Glossary Routes ============
 @router.get("/glossary/{supplier_id}", response_model=List[GlossaryResponse])
 async def get_glossary(
@@ -457,3 +596,173 @@ async def clear_cache(
     result = await db.execute(delete(TranslationCache))
     await db.commit()
     return {"message": f"已清空 {result.rowcount} 条缓存"}
+
+
+# ============ Claude Batch API 路由 ============
+@router.post("/batch/create")
+async def create_claude_batch(
+    limit: int = 50,
+    account: EmailAccount = Depends(get_current_account)
+):
+    """
+    创建 Claude Batch API 批次
+
+    自动收集未翻译邮件并提交到 Claude Batch API（价格减半）
+
+    参数:
+    - limit: 最多处理邮件数量（默认50）
+
+    返回:
+    - batch_id: Claude 批次 ID
+    - db_batch_id: 数据库批次 ID
+    - total_requests: 请求数量
+    - status: 状态
+    """
+    from services.batch_service import get_batch_service
+
+    try:
+        service = get_batch_service()
+        result = await service.run_batch_translation(limit)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"创建批次失败: {str(e)}")
+
+
+@router.get("/batch/status/{batch_id}")
+async def get_batch_status(
+    batch_id: str,
+    account: EmailAccount = Depends(get_current_account)
+):
+    """
+    查询 Claude Batch 状态
+
+    参数:
+    - batch_id: Claude 批次 ID
+
+    返回:
+    - id: 批次 ID
+    - processing_status: 状态 (in_progress, ended, failed, expired, canceled)
+    - request_counts: 请求统计
+    """
+    from services.batch_service import get_batch_service
+
+    try:
+        service = get_batch_service()
+        result = await service.check_batch_status(batch_id)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询状态失败: {str(e)}")
+
+
+@router.post("/batch/poll")
+async def poll_and_process_batches(
+    account: EmailAccount = Depends(get_current_account)
+):
+    """
+    轮询并处理已完成的批次
+
+    检查所有进行中的批次，处理已完成的结果。
+    建议由定时任务调用，也可手动触发。
+
+    返回:
+    - checked: 检查的批次数
+    - completed: 完成的批次数
+    - results: 处理结果详情
+    """
+    from services.batch_service import get_batch_service
+
+    try:
+        service = get_batch_service()
+        result = await service.poll_and_process_batches()
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"轮询处理失败: {str(e)}")
+
+
+@router.get("/batch/list")
+async def list_batches(
+    status: Optional[str] = None,
+    limit: int = 20,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    获取批次列表
+
+    参数:
+    - status: 可选，筛选状态 (pending, submitted, in_progress, ended, failed)
+    - limit: 返回数量（默认20）
+
+    返回:
+    - batches: 批次列表
+    """
+    from database.models import TranslationBatch
+
+    query = select(TranslationBatch).order_by(TranslationBatch.created_at.desc()).limit(limit)
+
+    if status:
+        query = query.where(TranslationBatch.status == status)
+
+    result = await db.execute(query)
+    batches = result.scalars().all()
+
+    return {
+        "batches": [
+            {
+                "id": b.id,
+                "batch_id": b.batch_id,
+                "status": b.status,
+                "total_requests": b.total_requests,
+                "completed_requests": b.completed_requests,
+                "failed_requests": b.failed_requests,
+                "created_at": b.created_at.isoformat() if b.created_at else None,
+                "submitted_at": b.submitted_at.isoformat() if b.submitted_at else None,
+                "completed_at": b.completed_at.isoformat() if b.completed_at else None,
+            }
+            for b in batches
+        ]
+    }
+
+
+@router.get("/batch/{db_batch_id}/items")
+async def get_batch_items(
+    db_batch_id: int,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    获取批次项详情
+
+    参数:
+    - db_batch_id: 数据库批次 ID
+
+    返回:
+    - items: 批次项列表
+    """
+    from database.models import TranslationBatchItem
+
+    result = await db.execute(
+        select(TranslationBatchItem)
+        .where(TranslationBatchItem.batch_id == db_batch_id)
+        .order_by(TranslationBatchItem.id)
+    )
+    items = result.scalars().all()
+
+    return {
+        "items": [
+            {
+                "id": item.id,
+                "custom_id": item.custom_id,
+                "email_id": item.email_id,
+                "status": item.status,
+                "source_lang": item.source_lang,
+                "target_lang": item.target_lang,
+                "input_tokens": item.input_tokens,
+                "output_tokens": item.output_tokens,
+                "error_message": item.error_message,
+                "created_at": item.created_at.isoformat() if item.created_at else None,
+                "completed_at": item.completed_at.isoformat() if item.completed_at else None,
+            }
+            for item in items
+        ]
+    }

@@ -135,8 +135,14 @@ class EmailService:
         # Parse body
         body_text, body_html = self._get_body(msg)
 
-        # Detect language
-        language = self._detect_language(body_text or subject)
+        # Detect language - 优先使用纯文本，其次使用 HTML 内容，最后使用主题
+        detection_text = body_text
+        if not detection_text and body_html:
+            # 从 HTML 提取文本用于语言检测
+            detection_text = self._clean_text_for_detection(body_html)
+        if not detection_text:
+            detection_text = subject
+        language = self._detect_language(detection_text)
 
         # Get attachments
         attachments = self._get_attachments(msg, message_id)

@@ -1,6 +1,7 @@
 <template>
   <div class="emails-container split-mode">
     <!-- Split View 模式：左边原文，右边译文 -->
+    <div class="split-panes">
       <!-- 左侧原文列表 -->
       <div class="split-pane original-pane">
         <div class="split-pane-header">
@@ -38,6 +39,15 @@
               <div class="email-top-row">
                 <span class="sender-name">{{ email.from_name || extractEmailName(email.from_email) }}</span>
                 <span class="email-time">{{ formatTime(email.received_at) }}</span>
+                <!-- 左侧也保留"未翻译"标签占位符，保持与右侧结构一致 -->
+                <el-tag
+                  v-if="!email.is_translated && email.language_detected !== 'zh'"
+                  size="small"
+                  type="warning"
+                  style="visibility: hidden;"
+                >
+                  未翻译
+                </el-tag>
               </div>
               <div class="email-subject">{{ email.subject_original }}</div>
               <div class="email-preview">{{ getOriginalPreview(email) }}</div>
@@ -64,6 +74,7 @@
         <div class="split-pane-header">
           <el-icon><DocumentCopy /></el-icon>
           <span>中文翻译</span>
+          <span class="pane-count" style="visibility: hidden;">({{ emails.length }})</span>
         </div>
         <div class="email-list" ref="translatedListRef" @scroll="handleTranslatedScroll">
           <div
@@ -77,27 +88,46 @@
             }"
             @click="handleEmailClick(email)"
           >
+            <!-- 与左侧完全镜像的结构 -->
+            <div class="email-actions" style="visibility: hidden;">
+              <el-checkbox :model-value="false" />
+              <el-icon class="star-icon"><Star /></el-icon>
+            </div>
             <div class="email-content">
               <div class="email-top-row">
                 <span class="sender-name">{{ email.from_name || extractEmailName(email.from_email) }}</span>
-                <el-tag v-if="!email.is_translated && email.language_detected !== 'zh'" size="small" type="warning">
+                <span class="email-time" style="visibility: hidden;">{{ formatTime(email.received_at) }}</span>
+                <!-- 右侧显示"未翻译"标签 -->
+                <el-tag
+                  v-if="!email.is_translated && email.language_detected !== 'zh'"
+                  size="small"
+                  type="warning"
+                >
                   未翻译
                 </el-tag>
               </div>
-              <div class="email-subject">
-                {{ email.subject_translated || email.subject_original }}
-              </div>
-              <div class="email-preview">
-                {{ getTranslatedPreview(email) }}
-              </div>
+              <div class="email-subject">{{ email.subject_translated || email.subject_original }}</div>
+              <div class="email-preview">{{ getTranslatedPreview(email) }}</div>
+            </div>
+            <div class="email-tags">
+              <!-- 与左侧一样的语言标签结构，但隐藏 -->
+              <el-tag
+                v-if="email.language_detected && email.language_detected !== 'zh'"
+                size="small"
+                type="info"
+                style="visibility: hidden;"
+              >
+                {{ getLanguageName(email.language_detected) }}
+              </el-tag>
             </div>
           </div>
           <el-empty v-if="!loading && emails.length === 0" description="暂无邮件" />
         </div>
       </div>
+    </div>
 
-      <!-- 分页 -->
-      <div class="split-footer" v-if="total > pageSize">
+    <!-- 分页 -->
+    <div class="split-footer" v-if="total > pageSize">
         <el-pagination
           v-model:current-page="currentPage"
           :page-size="pageSize"
@@ -405,21 +435,8 @@ function hasAttachments(email) {
 .emails-container {
   height: 100%;
   display: flex;
-  overflow: hidden;
-}
-
-.emails-container.split-mode .email-list-pane {
-  width: 380px;
-  flex-shrink: 0;
-  border-right: 1px solid #e0e0e0;
-}
-
-.email-list-pane {
-  flex: 1;
-  display: flex;
   flex-direction: column;
   overflow: hidden;
-  background-color: #fff;
 }
 
 /* 列表头部 */
@@ -636,10 +653,11 @@ function hasAttachments(email) {
 }
 
 /* ========== Split View 模式样式 ========== */
-.emails-container.split-mode {
+.split-panes {
   display: flex;
   flex-direction: row;
-  flex-wrap: wrap;
+  flex: 1;
+  overflow: hidden;
 }
 
 .split-pane {

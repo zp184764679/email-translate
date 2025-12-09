@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     mysql_database: str = "email_translate"
 
     # Translation API
-    translate_provider: str = "ollama"  # "deepl", "claude", or "ollama"
+    translate_provider: str = "tencent"  # "deepl", "claude", "ollama", or "tencent"
     translate_enabled: bool = True
 
     # DeepL API
@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     # Ollama (local LLM) - 本地测试用
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3:8b"
+
+    # Tencent TMT (腾讯翻译) - 速度快，格式好
+    tencent_secret_id: str = ""
+    tencent_secret_key: str = ""
+
+    # 智能路由配置
+    smart_routing_enabled: bool = True  # 是否启用智能路由（根据复杂度选择翻译引擎）
 
     # JWT Auth
     secret_key: str = "email-translate-secret-key-change-in-production"

@@ -13,8 +13,50 @@ from database.models import Email, EmailAccount, Attachment
 from services.email_service import EmailService
 from routers.users import get_current_account
 from config import get_settings
+import re
 
 router = APIRouter(prefix="/api/emails", tags=["emails"])
+
+
+def html_to_text_with_format(html: str) -> str:
+    """从 HTML 提取文本，保留段落格式"""
+    if not html:
+        return ""
+    text = html
+    # 先保留原始换行符
+    text = text.replace('\r\n', '\n')
+    # <br> -> 换行
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+    # </p>, </div>, </li>, </tr>, </h1-6> -> 换行
+    text = re.sub(r'</(?:p|div|li|tr|h[1-6])>', '\n', text, flags=re.IGNORECASE)
+    # 移除其他 HTML 标签（不影响换行）
+    text = re.sub(r'<[^>]+>', '', text)
+    # 处理 HTML 实体
+    text = text.replace('&nbsp;', ' ')
+    text = text.replace('&lt;', '<')
+    text = text.replace('&gt;', '>')
+    text = text.replace('&amp;', '&')
+    text = text.replace('&quot;', '"')
+    text = re.sub(r'&#\d+;', '', text)
+    text = re.sub(r'&[a-z]+;', '', text, flags=re.IGNORECASE)
+    # 清理但保留换行：只压缩水平空白（空格、制表符等）
+    text = re.sub(r'[ \t]+', ' ', text)
+    # 每行首尾空格清理
+    lines = [line.strip() for line in text.split('\n')]
+    # 合并连续空行为1个
+    result = []
+    last_was_empty = False
+    for line in lines:
+        if line == '':
+            if not last_was_empty:
+                result.append(line)
+                last_was_empty = True
+        else:
+            result.append(line)
+            last_was_empty = False
+    return '\n'.join(result).strip()
+
+
 settings = get_settings()
 
 
@@ -265,19 +307,19 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
 
         print(f"[Background] Fetched {len(emails)} emails from IMAP")
 
-        # 创建翻译服务
-        if settings.translate_provider == "deepl":
-            translate_service = TranslateService(
-                api_key=settings.deepl_api_key,
-                provider="deepl",
-                is_free_api=settings.deepl_free_api
-            )
-        else:
-            translate_service = TranslateService(
-                provider="ollama",
-                ollama_base_url=settings.ollama_base_url,
-                ollama_model=settings.ollama_model
-            )
+        # 创建翻译服务（支持智能路由）
+        # 智能路由会根据邮件复杂度自动选择引擎：简单→Ollama，复杂→DeepL/Claude
+        translate_service = TranslateService(
+            api_key=settings.deepl_api_key or settings.claude_api_key,
+            provider=settings.translate_provider,
+            is_free_api=settings.deepl_free_api,
+            ollama_base_url=settings.ollama_base_url,
+            ollama_model=settings.ollama_model,
+            claude_model=getattr(settings, 'claude_model', None)
+        )
+
+        # 是否启用智能路由（可通过配置控制）
+        use_smart_routing = getattr(settings, 'smart_routing_enabled', True)
 
         saved_count = 0
         translated_count = 0
@@ -319,7 +361,7 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                             new_email.is_translated = True
                             print(f"[AutoTranslate] Used shared translation for {email_data['message_id'][:30]}")
                         else:
-                            # 翻译主题
+                            # 翻译主题（主题通常很短，直接用普通翻译）
                             subject_translated = ""
                             if email_data.get("subject_original"):
                                 subject_translated = await translate_with_cache_async(
@@ -327,33 +369,56 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                                     email_data["subject_original"], lang, "zh"
                                 )
 
-                            # 智能翻译正文（检测引用，只翻译新内容）
+                            # 智能翻译正文（检测引用 + 智能路由）
                             body_translated = ""
+                            provider_used = "ollama"
+                            complexity_info = None
+
                             if email_data.get("body_original"):
                                 in_reply_to = email_data.get("in_reply_to")
-                                body_translated = await smart_translate_email_body(
-                                    db, translate_service,
-                                    email_data["body_original"], lang, "zh",
-                                    in_reply_to=in_reply_to
-                                )
+                                if use_smart_routing:
+                                    # 智能路由翻译
+                                    result = translate_service.translate_with_smart_routing(
+                                        text=email_data["body_original"],
+                                        subject=email_data.get("subject_original", ""),
+                                        target_lang="zh",
+                                        source_lang=lang
+                                    )
+                                    body_translated = result["translated_text"]
+                                    provider_used = result["provider_used"]
+                                    complexity_info = result["complexity"]
+                                    print(f"[SmartRouting] Email {email_data['message_id'][:20]}... "
+                                          f"→ {provider_used} (complexity: {complexity_info['level']}, "
+                                          f"score: {complexity_info['score']})")
+                                else:
+                                    # 智能翻译（检测引用，只翻译新内容）
+                                    body_translated = await smart_translate_email_body(
+                                        db, translate_service,
+                                        email_data["body_original"], lang, "zh",
+                                        in_reply_to=in_reply_to
+                                    )
 
                             new_email.subject_translated = subject_translated
                             new_email.body_translated = body_translated
-                            new_email.is_translated = True
+                            # 只有当翻译结果非空时才标记为已翻译
+                            new_email.is_translated = bool(subject_translated or body_translated)
 
-                            # 保存到共享翻译表
-                            shared_entry = SharedEmailTranslation(
-                                message_id=email_data["message_id"],
-                                subject_original=email_data.get("subject_original"),
-                                subject_translated=subject_translated,
-                                body_original=email_data.get("body_original"),
-                                body_translated=body_translated,
-                                source_lang=lang,
-                                target_lang="zh",
-                                translated_by=account.id
-                            )
-                            db.add(shared_entry)
-                            print(f"[AutoTranslate] Translated and saved: {email_data['message_id'][:30]}")
+                            # 保存到共享翻译表（只有翻译成功才保存）
+                            if subject_translated or body_translated:
+                                shared_entry = SharedEmailTranslation(
+                                    message_id=email_data["message_id"],
+                                    subject_original=email_data.get("subject_original"),
+                                    subject_translated=subject_translated,
+                                    body_original=email_data.get("body_original"),
+                                    body_translated=body_translated,
+                                    source_lang=lang,
+                                    target_lang="zh",
+                                    translated_by=account.id
+                                )
+                                db.add(shared_entry)
+                                print(f"[AutoTranslate] Translated ({provider_used}) and saved: {email_data['message_id'][:30]}")
+                            else:
+                                print(f"[AutoTranslate] Skip saving (empty translation): {email_data['message_id'][:30]}")
 
                         translated_count += 1
                     except Exception as te:
@@ -919,7 +984,8 @@ async def translate_email(
     if not email:
         raise HTTPException(status_code=404, detail="邮件不存在")
 
-    if email.is_translated:
+    # 只有当已翻译且翻译内容确实存在时才跳过
+    if email.is_translated and email.body_translated:
         return email
 
     # 1. 先检查共享翻译表（其他用户是否已翻译过这封邮件）
@@ -991,9 +1057,16 @@ async def translate_email(
         email.subject_original, source_lang, "zh"
     ) if email.subject_original else ""
 
+    # 获取要翻译的正文内容：优先纯文本，其次从 HTML 提取
+    body_to_translate = email.body_original
+    if not body_to_translate and email.body_html:
+        # 从 HTML 提取文本用于翻译，保留段落格式
+        body_to_translate = html_to_text_with_format(email.body_html)
+        print(f"[Translate] Extracted {len(body_to_translate)} chars from HTML for email {email.id}")
+
     # 智能翻译正文（检测引用，只翻译新内容）
     body_translated = ""
-    if email.body_original:
+    if body_to_translate:
         # 创建翻译服务用于智能翻译
         if settings.translate_provider == "deepl":
             service = TranslateService(
@@ -1008,7 +1081,7 @@ async def translate_email(
                 ollama_model=settings.ollama_model
             )
         body_translated = await smart_translate_email_body(
-            db, service, email.body_original, source_lang, "zh",
+            db, service, body_to_translate, source_lang, "zh",
             in_reply_to=email.in_reply_to
         )
 
