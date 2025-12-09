@@ -96,9 +96,10 @@ jobs:
         run: |
           SERVER="${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}"
           SSH_OPTS="-i ~/.ssh/deploy_key -o StrictHostKeyChecking=no"
+          SUDO_PASS="${{ secrets.SUDO_PASSWORD }}"
 
-          # 创建远程目录（使用 sudo）
-          ssh $SSH_OPTS $SERVER "sudo mkdir -p /var/www/html/email-updates && sudo chmod 777 /var/www/html/email-updates"
+          # 创建远程目录（使用 sudo -S 从 stdin 读取密码）
+          ssh $SSH_OPTS $SERVER "echo '$SUDO_PASS' | sudo -S mkdir -p /var/www/html/email-updates && echo '$SUDO_PASS' | sudo -S chmod 777 /var/www/html/email-updates"
 
           # 上传文件
           scp $SSH_OPTS \
@@ -108,7 +109,7 @@ jobs:
             $SERVER:/var/www/html/email-updates/
 
           # 设置权限并显示结果
-          ssh $SSH_OPTS $SERVER "sudo chmod 644 /var/www/html/email-updates/* && ls -la /var/www/html/email-updates/"
+          ssh $SSH_OPTS $SERVER "echo '$SUDO_PASS' | sudo -S chmod 644 /var/www/html/email-updates/* && ls -la /var/www/html/email-updates/"
 
       # 上传到 GitHub Releases（可选）
       - name: Create GitHub Release
