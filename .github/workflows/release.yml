@@ -85,44 +85,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 上传更新文件到服务器
-      - name: Setup SSH Key
-        shell: bash
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
-
-      - name: Deploy to Update Server
-        shell: bash
-        timeout-minutes: 15
-        run: |
-          SERVER="${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}"
-          SSH_OPTS="-i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=60"
-
-          echo "=== 测试 SSH 连接 ==="
-          ssh $SSH_OPTS $SERVER "echo 'SSH 连接成功' && whoami"
-
-          echo "=== 创建远程目录 ==="
-          ssh $SSH_OPTS $SERVER "mkdir -p /www/email-translate/updates"
-
-          echo "=== 显示要上传的文件 ==="
-          ls -lh frontend/dist_electron/*.exe frontend/dist_electron/*.blockmap frontend/dist_electron/latest.yml
-
-          echo "=== 上传文件（显示进度）==="
-          scp -v $SSH_OPTS \
-            frontend/dist_electron/*.exe \
-            frontend/dist_electron/*.blockmap \
-            frontend/dist_electron/latest.yml \
-            $SERVER:/www/email-translate/updates/
-
-          echo "=== 设置权限并验证 ==="
-          ssh $SSH_OPTS $SERVER "chmod 644 /www/email-translate/updates/* && ls -la /www/email-translate/updates/"
-
-      # 上传到 GitHub Releases（可选）
+      # 上传到 GitHub Releases（electron-updater 直接从这里下载）
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
           files: |
