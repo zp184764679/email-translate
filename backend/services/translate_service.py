@@ -227,8 +227,12 @@ class TranslateService:
         return "\n".join(lines)
 
     def _build_translation_prompt(self, text: str, target_lang: str, source_lang: str = None,
-                                   glossary: List[Dict] = None) -> str:
-        """构建优化后的翻译 prompt（基于邮件样本分析优化）"""
+                                   glossary: List[Dict] = None, use_think: bool = True) -> str:
+        """构建优化后的翻译 prompt（基于邮件样本分析优化）
+
+        Args:
+            use_think: 是否使用 /think 模式（Ollama 翻译时启用，提高质量）
+        """
         lang_names = {
             "zh": "中文",
             "en": "英文",
@@ -242,8 +246,11 @@ class TranslateService:
         # 术语表（核心术语 + 供应商特定术语）
         glossary_table = self._format_glossary_table(glossary)
 
+        # /think 前缀（仅 Ollama 使用）
+        think_prefix = "/think\n" if use_think else ""
+
         # 优化后的 prompt（基于 202 封邮件样本分析）
-        prompt = f"""你是精密机械行业的商务翻译专家。翻译采购部门与海外供应商的往来邮件。
+        prompt = f"""{think_prefix}你是精密机械行业的商务翻译专家。翻译采购部门与海外供应商的往来邮件。
 
 ## 任务
 将以下{source_name}邮件翻译为{target_name}。**只输出译文，不要输出任何解释或思考过程。**
@@ -940,7 +947,73 @@ Please check the following items:
 
     def _translate_medium(self, text: str, target_lang: str, source_lang: str,
                           glossary: List[Dict], score: int) -> Dict:
-        """中等邮件翻译 - 腾讯翻译优先"""
+        """
+        中等邮件翻译 - 拆分翻译策略
+
+        使用 Ollama + /think 拆分邮件结构：
+        - 正文 → DeepL（翻译质量高）
+        - 签名/地址/问候语 → 腾讯翻译（格式保持好）
+        """
+        from services.email_analyzer import get_email_analyzer
+
+        try:
+            # 使用 Ollama + /think 分析邮件结构
+            analyzer = get_email_analyzer(self.ollama_base_url, self.ollama_model)
+            analysis = analyzer.analyze_email(text, "")  # 中等邮件不需要主题
+
+            # 如果成功拆分出正文
+            if analysis.structure.body:
+                print(f"[SmartRouting] Medium email -> Split: greeting={bool(analysis.structure.greeting)}, signature={bool(analysis.structure.signature)}")
+
+                translated_parts = []
+
+                # 翻译问候语（用腾讯，格式好）
+                if analysis.structure.greeting:
+                    try:
+                        greeting_translated = self._translate_with_tencent_or_fallback(
+                            analysis.structure.greeting, target_lang, source_lang
+                        )
+                        translated_parts.append(greeting_translated)
+                    except:
+                        translated_parts.append(analysis.structure.greeting)
+
+                # 翻译正文（用 DeepL，质量高）
+                try:
+                    body_translated = self._translate_body_with_deepl(
+                        analysis.structure.body, target_lang, source_lang, glossary
+                    )
+                    translated_parts.append(body_translated)
+                    body_provider = "deepl"
+                except Exception as e:
+                    print(f"[SmartRouting] DeepL failed for body: {e}, falling back to tencent")
+                    body_translated = self._translate_with_tencent_or_fallback(
+                        analysis.structure.body, target_lang, source_lang
+                    )
+                    translated_parts.append(body_translated)
+                    body_provider = "tencent"
+
+                # 翻译签名（用腾讯，格式好）
+                if analysis.structure.signature:
+                    try:
+                        sig_translated = self._translate_with_tencent_or_fallback(
+                            analysis.structure.signature, target_lang, source_lang
+                        )
+                        translated_parts.append(sig_translated)
+                    except:
+                        translated_parts.append(analysis.structure.signature)
+
+                return {
+                    "translated_text": "\n\n".join(translated_parts),
+                    "provider_used": f"{body_provider}+tencent",
+                    "complexity": {"level": "medium", "score": score},
+                    "fallback_reason": None,
+                    "split_translation": True
+                }
+
+        except Exception as e:
+            print(f"[SmartRouting] Medium split failed: {e}, using fallback")
+
+        # 拆分失败，使用整体翻译回退
         return self._translate_with_fallback(text, target_lang, source_lang, glossary,
                                               {"level": "medium", "score": score})
 
@@ -1023,9 +1096,35 @@ Please check the following items:
 
         raise Exception("腾讯和DeepL都不可用")
 
+    def _translate_body_with_deepl(self, text: str, target_lang: str,
+                                    source_lang: str, glossary: List[Dict]) -> str:
+        """用 DeepL 翻译正文（中等邮件用）"""
+        deepl_key = self.api_key if self.provider == "deepl" else os.environ.get("DEEPL_API_KEY")
+
+        if deepl_key and self._check_deepl_quota():
+            try:
+                if self.provider == "deepl":
+                    result = self.translate_with_deepl(text, target_lang, source_lang)
+                else:
+                    temp_service = TranslateService(
+                        api_key=deepl_key,
+                        provider="deepl",
+                        is_free_api=os.environ.get("DEEPL_FREE_API", "true").lower() == "true"
+                    )
+                    result = temp_service.translate_with_deepl(text, target_lang, source_lang)
+
+                self._record_deepl_usage(len(text))
+                print(f"[SmartRouting] Body translated with DeepL ({len(text)} chars)")
+                return result
+            except Exception as e:
+                print(f"[SmartRouting] DeepL body translation failed: {e}")
+                raise
+
+        raise Exception("DeepL 不可用或额度不足")
+
     def _translate_body_with_claude(self, text: str, target_lang: str,
                                      source_lang: str, glossary: List[Dict]) -> str:
-        """用 Claude 翻译正文"""
+        """用 Claude 翻译正文（复杂邮件用）"""
         claude_key = self.api_key if self.provider == "claude" else os.environ.get("CLAUDE_API_KEY")
 
         if claude_key:

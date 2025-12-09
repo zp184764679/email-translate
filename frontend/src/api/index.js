@@ -6,6 +6,10 @@ import { ElMessage } from 'element-plus'
 const isDev = import.meta.env.DEV
 const baseURL = isDev ? 'http://127.0.0.1:2000/api' : 'https://jzchardware.cn:8888/email/api'
 
+// 环境隔离的 localStorage key，开发版和生产版各自独立存储
+const ENV_PREFIX = isDev ? 'dev_' : 'prod_'
+export const getStorageKey = (key) => ENV_PREFIX + key
+
 const instance = axios.create({
   baseURL,
   timeout: 30000
@@ -14,7 +18,7 @@ const instance = axios.create({
 // Request interceptor
 instance.interceptors.request.use(
   (config) => {
-    const token = localStorage.getItem('token')
+    const token = localStorage.getItem(getStorageKey('token'))
     if (token) {
       config.headers.Authorization = `Bearer ${token}`
     }
@@ -35,9 +39,9 @@ instance.interceptors.response.use(
       const { status, data } = error.response
 
       if (status === 401) {
-        localStorage.removeItem('token')
-        localStorage.removeItem('email')
-        localStorage.removeItem('accountId')
+        localStorage.removeItem(getStorageKey('token'))
+        localStorage.removeItem(getStorageKey('email'))
+        localStorage.removeItem(getStorageKey('accountId'))
         window.location.href = '/#/login'
         ElMessage.error('登录已过期，请重新登录')
       } else if (status === 403) {
@@ -89,6 +93,11 @@ const api = {
 
   async getEmailStats() {
     return instance.get('/emails/stats/summary')
+  },
+
+  // Contacts - 历史联系人（用于自动补全）
+  async getContacts() {
+    return instance.get('/emails/contacts')
   },
 
   // Translation
@@ -216,7 +225,7 @@ const api = {
 
   // 附件下载
   getAttachmentUrl(emailId, attachmentId) {
-    const token = localStorage.getItem('token')
+    const token = localStorage.getItem(getStorageKey('token'))
     return `${baseURL}/emails/${emailId}/attachment/${attachmentId}?token=${token}`
   },
 

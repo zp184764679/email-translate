@@ -273,6 +273,7 @@ VITE_API_URL=http://localhost:8000/api
 | POST | /api/emails/batch/delete | 批量删除 |
 | GET | /api/emails/stats/summary | 邮件统计 |
 | GET | /api/emails/thread/{thread_id} | 获取邮件线程 |
+| GET | /api/emails/contacts | 获取历史联系人（按频率排序） |
 | POST | /api/translate | 翻译文本 |
 | POST | /api/translate/reverse | 回复翻译（中→外） |
 | GET | /api/drafts | 获取草稿 |
@@ -586,6 +587,8 @@ emails 表（新增字段）
 | 应用自动更新 | electron-updater 实现 |
 | 邮件导出 | 导出为 EML 格式 |
 | 邮件签名 | 自定义签名模板，支持多语言翻译 |
+| 收件人自动补全 | 标签式输入，支持历史联系人搜索 |
+| 邮件回复增强 | 全部回复、收件人/抄送去重、邮箱验证 |
 
 ### 待实现功能
 

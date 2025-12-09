@@ -13,6 +13,7 @@ import time
 from database.database import get_db
 from database.models import EmailAccount
 from config import get_settings
+from utils.crypto import encrypt_password, decrypt_password, mask_email
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 settings = get_settings()
@@ -125,7 +126,7 @@ def verify_email_credentials(email: str, password: str, imap_server: str, imap_p
     try:
         print(f"[IMAP] Connecting to {imap_server}:{imap_port}...")
         imap = imaplib.IMAP4_SSL(imap_server, imap_port)
-        print(f"[IMAP] Connected, attempting login for {email}...")
+        print(f"[IMAP] Connected, attempting login for {mask_email(email)}...")
 
         # 尝试登录
         imap.login(email, password)
@@ -246,14 +247,14 @@ async def login_with_email(
     account = result.scalar_one_or_none()
 
     if account:
-        # 更新密码
-        account.password = password
+        # 更新密码（加密存储）
+        account.password = encrypt_password(password)
         account.is_active = True
     else:
-        # 创建新账户
+        # 创建新账户（密码加密存储）
         account = EmailAccount(
             email=email,
-            password=password,
+            password=encrypt_password(password),
             imap_server=imap_server,
             smtp_server=smtp_server,
             imap_port=imap_port,

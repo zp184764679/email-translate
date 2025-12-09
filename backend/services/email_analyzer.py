@@ -199,8 +199,9 @@ class EmailAnalyzer:
         return structure
 
     def _llm_analysis(self, text: str, subject: str = "") -> AnalysisResult:
-        """使用 Ollama 分析复杂邮件"""
-        prompt = f"""分析以下邮件，返回 JSON 格式结果。
+        """使用 Ollama 分析复杂邮件（使用 /think 模式提高准确性）"""
+        prompt = f"""/think
+分析以下邮件，返回 JSON 格式结果。
 
 邮件主题：{subject}
 邮件内容：
@@ -290,8 +291,9 @@ should_split: 只有 complex 级别且正文>500字符时才为 true"""
         if result:
             return result.complexity, result.score
 
-        # 需要 LLM 判断的情况，用简化 prompt
-        prompt = f"""评估邮件复杂度，只返回一个数字（0-100）：
+        # 需要 LLM 判断的情况，用简化 prompt（使用 /think 模式提高准确性）
+        prompt = f"""/think
+评估邮件复杂度，只返回一个数字（0-100）：
 - 0-30: 简单（短邮件、单一事项）
 - 31-70: 中等（一般业务）
 - 71-100: 复杂（技术文档、表格、合同）

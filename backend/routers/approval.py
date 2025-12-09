@@ -9,6 +9,7 @@ from database.database import get_db
 from database.models import Draft, Email, EmailAccount
 from services.email_service import EmailService
 from routers.users import get_current_account
+from utils.crypto import decrypt_password
 
 router = APIRouter(prefix="/api/drafts", tags=["drafts"])
 
@@ -16,12 +17,18 @@ router = APIRouter(prefix="/api/drafts", tags=["drafts"])
 # ============ Schemas ============
 class DraftCreate(BaseModel):
     reply_to_email_id: int
+    to: Optional[str] = None         # 收件人（可自定义）
+    cc: Optional[str] = None         # 抄送（可选）
+    subject: Optional[str] = None    # 主题（可自定义）
     body_chinese: str
     body_translated: Optional[str] = None
     target_language: str = "en"
 
 
 class DraftUpdate(BaseModel):
+    to: Optional[str] = None
+    cc: Optional[str] = None
+    subject: Optional[str] = None
     body_chinese: Optional[str] = None
     body_translated: Optional[str] = None
 
@@ -29,6 +36,9 @@ class DraftUpdate(BaseModel):
 class DraftResponse(BaseModel):
     id: int
     reply_to_email_id: int
+    to_address: Optional[str] = None
+    cc_address: Optional[str] = None
+    subject: Optional[str] = None
     body_chinese: str
     body_translated: Optional[str]
     target_language: str
@@ -71,9 +81,19 @@ async def create_draft(
     if not email:
         raise HTTPException(status_code=404, detail="邮件不存在")
 
+    # 如果没有提供收件人/主题，使用原邮件的信息
+    to_addr = draft.to or email.from_email
+    subject_text = draft.subject
+    if not subject_text:
+        orig_subject = email.subject_original or ""
+        subject_text = orig_subject if orig_subject.lower().startswith("re:") else f"Re: {orig_subject}"
+
     new_draft = Draft(
         reply_to_email_id=draft.reply_to_email_id,
         author_id=account.id,  # 使用账户ID作为作者
+        to_address=to_addr,
+        cc_address=draft.cc,
+        subject=subject_text,
         body_chinese=draft.body_chinese,
         body_translated=draft.body_translated,
         target_language=draft.target_language,
@@ -107,9 +127,18 @@ async def update_draft(
     if draft.status == "sent":
         raise HTTPException(status_code=400, detail="已发送的邮件无法编辑")
 
-    if draft_update.body_chinese:
+    # 更新收件人、抄送、主题字段
+    if draft_update.to is not None:
+        draft.to_address = draft_update.to
+    if draft_update.cc is not None:
+        draft.cc_address = draft_update.cc
+    if draft_update.subject is not None:
+        draft.subject = draft_update.subject
+
+    # 更新正文字段
+    if draft_update.body_chinese is not None:
         draft.body_chinese = draft_update.body_chinese
-    if draft_update.body_translated:
+    if draft_update.body_translated is not None:
         draft.body_translated = draft_update.body_translated
 
     await db.commit()
@@ -149,16 +178,21 @@ async def send_draft(
             imap_server=account.imap_server,
             smtp_server=account.smtp_server,
             email_address=account.email,
-            password=account.password,
+            password=decrypt_password(account.password),
             smtp_port=account.smtp_port
         )
 
-        subject = original.subject_original
-        if not subject.lower().startswith("re:"):
-            subject = f"Re: {subject}"
+        # 使用草稿中的收件人和主题，如果没有则使用原邮件信息
+        to_addr = draft.to_address or original.from_email
+        subject = draft.subject
+        if not subject:
+            subject = original.subject_original
+            if not subject.lower().startswith("re:"):
+                subject = f"Re: {subject}"
 
         success = service.send_email(
-            to=original.from_email,
+            to=to_addr,
+            cc=draft.cc_address,  # 添加抄送
             subject=subject,
             body=draft.body_translated or draft.body_chinese
         )

@@ -13,6 +13,7 @@ from database.models import Email, EmailAccount, Attachment
 from services.email_service import EmailService
 from routers.users import get_current_account
 from config import get_settings
+from utils.crypto import decrypt_password, mask_email
 import re
 
 router = APIRouter(prefix="/api/emails", tags=["emails"])
@@ -182,6 +183,82 @@ async def get_emails(
     return EmailListResponse(emails=emails, total=total)
 
 
+@router.get("/contacts")
+async def get_contacts(
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """获取历史联系人列表（从邮件中提取，按使用频率排序）"""
+    # 查询所有邮件的发件人和收件人
+    result = await db.execute(
+        select(Email.from_email, Email.from_name, Email.to_email, Email.cc_email)
+        .where(Email.account_id == account.id)
+        .order_by(Email.received_at.desc())
+        .limit(500)  # 限制查询范围
+    )
+    emails = result.all()
+
+    # 提取联系人并统计频率
+    contacts_dict = {}
+
+    def add_contact(email_addr, name=None):
+        if not email_addr:
+            return
+        email_lower = email_addr.lower().strip()
+        if not email_lower:
+            return
+
+        if email_lower in contacts_dict:
+            # 增加频率计数
+            contacts_dict[email_lower]["frequency"] += 1
+            # 如果有更好的名字（非空），更新名字
+            if name and not contacts_dict[email_lower]["name"]:
+                contacts_dict[email_lower]["name"] = name.strip()
+        else:
+            contacts_dict[email_lower] = {
+                "email": email_addr.strip(),
+                "name": name.strip() if name else None,
+                "frequency": 1
+            }
+
+    def extract_email(addr):
+        """从地址字符串中提取邮箱"""
+        if not addr:
+            return None, None
+        match = re.match(r'^(.+?)\s*<([^>]+)>$', addr.strip())
+        if match:
+            return match.group(2).strip(), match.group(1).strip()
+        return addr.strip(), None
+
+    for email in emails:
+        # 发件人
+        add_contact(email.from_email, email.from_name)
+
+        # 收件人
+        if email.to_email:
+            for addr in email.to_email.split(','):
+                email_addr, name = extract_email(addr.strip())
+                add_contact(email_addr, name)
+
+        # 抄送
+        if email.cc_email:
+            for addr in email.cc_email.split(','):
+                email_addr, name = extract_email(addr.strip())
+                add_contact(email_addr, name)
+
+    # 排除自己的邮箱
+    contacts_dict.pop(account.email.lower(), None)
+
+    # 按频率降序排序，取前100个常用联系人
+    sorted_contacts = sorted(
+        contacts_dict.values(),
+        key=lambda c: c.get("frequency", 0),
+        reverse=True
+    )[:100]
+
+    return {"contacts": sorted_contacts}
+
+
 @router.get("/{email_id}", response_model=EmailDetailResponse)
 async def get_email(
     email_id: int,
@@ -267,7 +344,7 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
 
     settings = get_settings()
 
-    print(f"[Background] Starting email fetch for {account.email}")
+    print(f"[Background] Starting email fetch for {mask_email(account.email)}")
 
     # 增量拉取优化：查询数据库中最新邮件的时间
     async with async_session() as db:
@@ -293,7 +370,7 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
             imap_server=account.imap_server,
             smtp_server=account.smtp_server,
             email_address=account.email,
-            password=account.password,
+            password=decrypt_password(account.password),
             imap_port=account.imap_port,
             smtp_port=account.smtp_port
         )
@@ -428,10 +505,10 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
 
         # 在线程池中断开连接
         await loop.run_in_executor(None, service.disconnect_imap)
-        print(f"[Background] Saved {saved_count} emails, auto-translated {translated_count} for {account.email}")
+        print(f"[Background] Saved {saved_count} emails, auto-translated {translated_count} for {mask_email(account.email)}")
 
     except Exception as e:
-        print(f"[Background] Error fetching emails for {account.email}: {e}")
+        print(f"[Background] Error fetching emails for {mask_email(account.email)}: {e}")
         traceback.print_exc()
 
 
@@ -1130,7 +1207,7 @@ async def send_email(
             imap_server=account.imap_server,
             smtp_server=account.smtp_server,
             email_address=account.email,
-            password=account.password,
+            password=decrypt_password(account.password),
             smtp_port=account.smtp_port
         )
 
