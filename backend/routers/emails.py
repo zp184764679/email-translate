@@ -414,7 +414,9 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
             is_free_api=settings.deepl_free_api,
             ollama_base_url=settings.ollama_base_url,
             ollama_model=settings.ollama_model,
-            claude_model=getattr(settings, 'claude_model', None)
+            claude_model=getattr(settings, 'claude_model', None),
+            tencent_secret_id=settings.tencent_secret_id,
+            tencent_secret_key=settings.tencent_secret_key
         )
 
         # 是否启用智能路由（可通过配置控制）
@@ -1176,18 +1178,16 @@ async def translate_email(
             return cached.translated_text
 
         # 调用翻译 API
-        if settings.translate_provider == "deepl":
-            service = TranslateService(
-                api_key=settings.deepl_api_key,
-                provider="deepl",
-                is_free_api=settings.deepl_free_api
-            )
-        else:
-            service = TranslateService(
-                provider="ollama",
-                ollama_base_url=settings.ollama_base_url,
-                ollama_model=settings.ollama_model
-            )
+        service = TranslateService(
+            api_key=settings.deepl_api_key or settings.claude_api_key,
+            provider=settings.translate_provider,
+            is_free_api=settings.deepl_free_api,
+            ollama_base_url=settings.ollama_base_url,
+            ollama_model=settings.ollama_model,
+            claude_model=getattr(settings, 'claude_model', None),
+            tencent_secret_id=settings.tencent_secret_id,
+            tencent_secret_key=settings.tencent_secret_key
+        )
 
         translated = service.translate_text(text=text, target_lang=target_lang)
 
@@ -1225,18 +1225,16 @@ async def translate_email(
     body_translated = ""
     if body_to_translate:
         # 创建翻译服务用于智能翻译
-        if settings.translate_provider == "deepl":
-            service = TranslateService(
-                api_key=settings.deepl_api_key,
-                provider="deepl",
-                is_free_api=settings.deepl_free_api
-            )
-        else:
-            service = TranslateService(
-                provider="ollama",
-                ollama_base_url=settings.ollama_base_url,
-                ollama_model=settings.ollama_model
-            )
+        service = TranslateService(
+            api_key=settings.deepl_api_key or settings.claude_api_key,
+            provider=settings.translate_provider,
+            is_free_api=settings.deepl_free_api,
+            ollama_base_url=settings.ollama_base_url,
+            ollama_model=settings.ollama_model,
+            claude_model=getattr(settings, 'claude_model', None),
+            tencent_secret_id=settings.tencent_secret_id,
+            tencent_secret_key=settings.tencent_secret_key
+        )
         body_translated = await smart_translate_email_body(
             db, service, body_to_translate, source_lang, "zh",
             in_reply_to=email.in_reply_to
