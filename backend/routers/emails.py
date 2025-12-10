@@ -15,6 +15,7 @@ from services.email_service import EmailService
 from routers.users import get_current_account
 from config import get_settings
 from utils.crypto import decrypt_password, mask_email
+from shared.cache_config import cache_get, cache_set
 import re
 
 router = APIRouter(prefix="/api/emails", tags=["emails"])
@@ -604,15 +605,24 @@ def extract_new_content_from_reply(body: str) -> tuple[str, str, int]:
 
 
 async def translate_with_cache_async(db, translate_service, text: str, source_lang: str, target_lang: str) -> str:
-    """带缓存的翻译（异步版本）"""
+    """带缓存的翻译（异步版本，L1 Redis → L2 MySQL）"""
     import hashlib
     from database.models import TranslationCache
 
     if not text:
         return ""
 
-    # 查缓存
+    # 计算缓存键
     cache_key = hashlib.sha256(f"{text}|{source_lang or 'auto'}|{target_lang}".encode()).hexdigest()
+    redis_key = f"trans:{cache_key}"
+
+    # L1: 先查 Redis（毫秒级）
+    redis_result = cache_get(redis_key)
+    if redis_result:
+        print(f"[Redis HIT] text={text[:30]}...")
+        return redis_result
+
+    # L2: Redis 未命中，查 MySQL
     cache_result = await db.execute(
         select(TranslationCache).where(TranslationCache.text_hash == cache_key)
     )
@@ -620,13 +630,18 @@ async def translate_with_cache_async(db, translate_service, text: str, source_la
 
     if cached:
         cached.hit_count += 1
-        print(f"[Cache HIT] hit_count={cached.hit_count}")
+        # 写回 Redis（预热 L1 缓存）
+        cache_set(redis_key, cached.translated_text, ttl=3600)
+        print(f"[MySQL HIT] hit_count={cached.hit_count}")
         return cached.translated_text
 
     # 调用翻译 API
     translated = translate_service.translate_text(text=text, target_lang=target_lang)
 
-    # 保存到缓存
+    # L1: 写入 Redis
+    cache_set(redis_key, translated, ttl=3600)
+
+    # L2: 保存到 MySQL（持久化）
     new_cache = TranslationCache(
         text_hash=cache_key,
         source_text=text,
@@ -635,7 +650,7 @@ async def translate_with_cache_async(db, translate_service, text: str, source_la
         target_lang=target_lang
     )
     db.add(new_cache)
-    print(f"[Cache SAVE] text={text[:30]}...")
+    print(f"[Cache SAVE] Redis + MySQL, text={text[:30]}...")
 
     return translated
 
@@ -1126,20 +1141,31 @@ async def translate_email(
             await db.refresh(email)
             return email
 
-    # 2. 翻译辅助函数（带缓存）
+    # 2. 翻译辅助函数（带缓存，L1 Redis → L2 MySQL）
     async def translate_with_cache(text: str, source_lang: str, target_lang: str) -> str:
         if not text:
             return ""
 
-        # 查缓存
+        # 计算缓存键
         cache_key = hashlib.sha256(f"{text}|{source_lang or 'auto'}|{target_lang}".encode()).hexdigest()
+        redis_key = f"trans:{cache_key}"
+
+        # L1: 先查 Redis（毫秒级）
+        redis_result = cache_get(redis_key)
+        if redis_result:
+            print(f"[Redis HIT] text={text[:30]}...")
+            return redis_result
+
+        # L2: Redis 未命中，查 MySQL
         cache_result = await db.execute(
             select(TranslationCache).where(TranslationCache.text_hash == cache_key)
         )
         cached = cache_result.scalar_one_or_none()
         if cached:
             cached.hit_count += 1
-            print(f"[Cache HIT] hit_count={cached.hit_count}")
+            # 写回 Redis（预热 L1 缓存）
+            cache_set(redis_key, cached.translated_text, ttl=3600)
+            print(f"[MySQL HIT] hit_count={cached.hit_count}")
             return cached.translated_text
 
         # 调用翻译 API
@@ -1158,7 +1184,10 @@ async def translate_email(
 
         translated = service.translate_text(text=text, target_lang=target_lang)
 
-        # 保存到缓存
+        # L1: 写入 Redis
+        cache_set(redis_key, translated, ttl=3600)
+
+        # L2: 保存到 MySQL（持久化）
         new_cache = TranslationCache(
             text_hash=cache_key,
             source_text=text,
@@ -1167,7 +1196,7 @@ async def translate_email(
             target_lang=target_lang
         )
         db.add(new_cache)
-        print(f"[Cache SAVE] text={text[:30]}...")
+        print(f"[Cache SAVE] Redis + MySQL, text={text[:30]}...")
 
         return translated
 
