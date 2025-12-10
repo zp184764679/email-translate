@@ -333,10 +333,14 @@ class EmailService:
 
             detected = lang_map.get(lang_code, lang_code)
 
-            # 对于西方语言，如果置信度不够高且第二选项是英语，倾向于英语
-            # 这是因为 langdetect 对于英德、英法等容易混淆
-            if detected in ["de", "fr", "nl", "es", "it", "pt"] and confidence < 0.8:
-                if len(langs) > 1 and langs[1].lang == "en" and langs[1].prob > 0.2:
+            # 英德/英法等混淆修正（langdetect 常见问题）
+            # 商业邮件场景中英语更常见，适当提高英语优先级
+            if detected in ["de", "fr", "nl", "es", "it", "pt"]:
+                # 方法1：第二选项是英语且有一定概率
+                if len(langs) > 1 and langs[1].lang == "en" and langs[1].prob > 0.15:
+                    detected = "en"
+                # 方法2：检测常见英语单词（即使置信度高也可能误判）
+                elif confidence < 0.9 and self._has_common_english_words(clean_text):
                     detected = "en"
 
             return detected
@@ -357,6 +361,32 @@ class EmailService:
         text = re.sub(r'\s+', ' ', text)
         # 取前 500 字符进行检测（避免签名等噪音影响）
         return text[:500].strip()
+
+    def _has_common_english_words(self, text: str) -> bool:
+        """检测文本中是否包含常见英语单词（用于修正英德混淆）"""
+        # 商业邮件中常见的英语单词（德语中不常用或拼写不同）
+        common_english = {
+            # 商业用语
+            'please', 'thank', 'thanks', 'regards', 'sincerely', 'dear',
+            'order', 'shipping', 'delivery', 'payment', 'invoice', 'price',
+            'quote', 'quotation', 'inquiry', 'request', 'confirm', 'confirmation',
+            'attached', 'attachment', 'following', 'below', 'above',
+            # 常用动词
+            'would', 'could', 'should', 'have', 'will', 'can', 'need',
+            'look', 'forward', 'receive', 'send', 'provide', 'update',
+            # 常用名词
+            'information', 'question', 'issue', 'problem', 'solution',
+            'product', 'item', 'quantity', 'quality', 'sample',
+            # 常用介词/连词
+            'the', 'and', 'for', 'with', 'from', 'your', 'our', 'this',
+        }
+
+        text_lower = text.lower()
+        words = set(text_lower.split())
+
+        # 如果包含 3 个以上常见英语单词，认为是英语
+        matches = words & common_english
+        return len(matches) >= 3
 
     def send_email(self, to: str, subject: str, body: str, cc: str = None,
                    attachments: List[str] = None, is_html: bool = False) -> bool:
