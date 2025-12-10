@@ -496,13 +496,9 @@ autoUpdater.on('checking-for-update', () => {
 
 autoUpdater.on('update-available', (info) => {
   console.log('发现新版本:', info.version)
-  dialog.showMessageBox(mainWindow, {
-    type: 'info',
-    title: '发现新版本',
-    message: `发现新版本 ${info.version}，正在下载...`,
-    buttons: ['确定']
-  })
-  mainWindow.webContents.send('update-available')
+  // 发送到渲染进程显示下载进度
+  mainWindow.webContents.send('update-available', info.version)
+  mainWindow.webContents.send('download-started', info.version)
 })
 
 autoUpdater.on('update-not-available', () => {
@@ -517,6 +513,11 @@ autoUpdater.on('update-not-available', () => {
 
 autoUpdater.on('update-downloaded', (info) => {
   console.log('更新下载完成:', info.version)
+  // 清除任务栏进度条
+  if (mainWindow) {
+    mainWindow.setProgressBar(-1)
+    mainWindow.webContents.send('download-complete', info.version)
+  }
   dialog.showMessageBox(mainWindow, {
     type: 'info',
     title: '更新就绪',
@@ -541,8 +542,29 @@ autoUpdater.on('error', (error) => {
 })
 
 autoUpdater.on('download-progress', (progress) => {
-  console.log(`下载进度: ${Math.round(progress.percent)}%`)
+  const percent = Math.round(progress.percent)
+  console.log(`下载进度: ${percent}% (${formatBytes(progress.transferred)}/${formatBytes(progress.total)})`)
+  // 设置任务栏进度条
+  if (mainWindow) {
+    mainWindow.setProgressBar(progress.percent / 100)
+    // 发送进度到渲染进程
+    mainWindow.webContents.send('download-progress', {
+      percent: percent,
+      transferred: progress.transferred,
+      total: progress.total,
+      bytesPerSecond: progress.bytesPerSecond
+    })
+  }
 })
+
+// 格式化字节数
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+}
 
 ipcMain.handle('install-update', () => {
   autoUpdater.quitAndInstall()
