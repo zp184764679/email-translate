@@ -11,6 +11,7 @@ from database.models import EmailAccount, Glossary, TranslationCache
 from services.translate_service import TranslateService
 from routers.users import get_current_account
 from config import get_settings
+from shared.cache_config import cache_get, cache_set
 
 router = APIRouter(prefix="/api/translate", tags=["translate"])
 settings = get_settings()
@@ -24,8 +25,17 @@ def compute_cache_key(text: str, source_lang: str, target_lang: str) -> str:
 
 
 async def get_cached_translation(db: AsyncSession, text: str, source_lang: str, target_lang: str) -> Optional[str]:
-    """从缓存获取翻译结果"""
+    """从缓存获取翻译结果（L1 Redis → L2 MySQL）"""
     cache_key = compute_cache_key(text, source_lang, target_lang)
+    redis_key = f"trans:{cache_key}"
+
+    # L1: 先查 Redis（毫秒级）
+    redis_result = cache_get(redis_key)
+    if redis_result:
+        print(f"[Redis HIT] text={text[:30]}...")
+        return redis_result
+
+    # L2: Redis 未命中，查 MySQL
     result = await db.execute(
         select(TranslationCache).where(TranslationCache.text_hash == cache_key)
     )
@@ -35,21 +45,29 @@ async def get_cached_translation(db: AsyncSession, text: str, source_lang: str, 
         # 更新命中次数
         cached.hit_count += 1
         await db.commit()
-        print(f"[Cache HIT] hit_count={cached.hit_count}, text={text[:30]}...")
+        # 写回 Redis（预热 L1 缓存）
+        cache_set(redis_key, cached.translated_text, ttl=3600)
+        print(f"[MySQL HIT] hit_count={cached.hit_count}, text={text[:30]}...")
         return cached.translated_text
 
     return None
 
 
 async def save_to_cache(db: AsyncSession, text: str, translated: str, source_lang: str, target_lang: str):
-    """保存翻译结果到缓存"""
+    """保存翻译结果到缓存（L1 Redis + L2 MySQL）"""
     cache_key = compute_cache_key(text, source_lang, target_lang)
+    redis_key = f"trans:{cache_key}"
 
+    # L1: 写入 Redis（热点缓存，1小时过期）
+    cache_set(redis_key, translated, ttl=3600)
+
+    # L2: 写入 MySQL（持久化）
     # 检查是否已存在（避免重复插入）
     result = await db.execute(
         select(TranslationCache).where(TranslationCache.text_hash == cache_key)
     )
     if result.scalar_one_or_none():
+        print(f"[Cache SAVE] Redis only (MySQL exists), text={text[:30]}...")
         return
 
     cache_entry = TranslationCache(
@@ -61,7 +79,7 @@ async def save_to_cache(db: AsyncSession, text: str, translated: str, source_lan
     )
     db.add(cache_entry)
     await db.commit()
-    print(f"[Cache SAVE] text={text[:30]}...")
+    print(f"[Cache SAVE] Redis + MySQL, text={text[:30]}...")
 
 
 def get_translate_service(for_smart_routing: bool = False) -> TranslateService:
