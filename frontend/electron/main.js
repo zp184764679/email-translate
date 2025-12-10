@@ -2,8 +2,14 @@ const { app, BrowserWindow, ipcMain, Notification, Menu, Tray, dialog } = requir
 const path = require('path')
 const { autoUpdater } = require('electron-updater')
 const https = require('https')
+const http = require('http')
+const { spawn } = require('child_process')
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
+
+// 开发模式下的子进程管理
+let backendProcess = null
+let viteProcess = null
 
 // 单实例锁定 - 开发版和生产版使用不同的锁，可以同时运行
 // 开发版使用 'email-translate-dev'，生产版使用默认锁
@@ -37,6 +43,165 @@ function checkBackendHealth() {
   })
 }
 
+/**
+ * 检查本地开发后端是否可用
+ */
+function checkLocalBackendHealth() {
+  return new Promise((resolve) => {
+    const req = http.get('http://127.0.0.1:2000/health', (res) => {
+      resolve(res.statusCode === 200)
+    })
+    req.on('error', () => resolve(false))
+    req.setTimeout(3000, () => {
+      req.destroy()
+      resolve(false)
+    })
+  })
+}
+
+/**
+ * 检查 Vite 开发服务器是否可用
+ */
+function checkViteHealth() {
+  return new Promise((resolve) => {
+    const req = http.get('http://127.0.0.1:4567', (res) => {
+      resolve(res.statusCode === 200 || res.statusCode === 304)
+    })
+    req.on('error', () => resolve(false))
+    req.setTimeout(3000, () => {
+      req.destroy()
+      resolve(false)
+    })
+  })
+}
+
+/**
+ * 启动后端进程（开发模式）
+ */
+function startBackend() {
+  return new Promise((resolve, reject) => {
+    const backendDir = path.join(__dirname, '../../backend')
+    console.log('[Dev] Starting backend in:', backendDir)
+
+    // Windows 下使用 cmd 启动 Python
+    backendProcess = spawn('cmd', ['/c', 'python', '-m', 'uvicorn', 'main:app', '--reload', '--port', '2000'], {
+      cwd: backendDir,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false
+    })
+
+    backendProcess.stdout.on('data', (data) => {
+      const output = data.toString()
+      console.log('[Backend]', output.trim())
+      // 检测启动成功
+      if (output.includes('Uvicorn running') || output.includes('Application startup complete')) {
+        resolve()
+      }
+    })
+
+    backendProcess.stderr.on('data', (data) => {
+      console.log('[Backend]', data.toString().trim())
+    })
+
+    backendProcess.on('error', (err) => {
+      console.error('[Backend] Failed to start:', err)
+      reject(err)
+    })
+
+    backendProcess.on('close', (code) => {
+      console.log('[Backend] Process exited with code:', code)
+      backendProcess = null
+    })
+
+    // 超时检测
+    setTimeout(async () => {
+      const isRunning = await checkLocalBackendHealth()
+      if (isRunning) {
+        resolve()
+      } else {
+        reject(new Error('Backend startup timeout'))
+      }
+    }, 15000)
+  })
+}
+
+/**
+ * 启动 Vite 开发服务器（开发模式）
+ */
+function startVite() {
+  return new Promise((resolve, reject) => {
+    const frontendDir = path.join(__dirname, '..')
+    console.log('[Dev] Starting Vite in:', frontendDir)
+
+    viteProcess = spawn('cmd', ['/c', 'npm', 'run', 'vite:dev'], {
+      cwd: frontendDir,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false
+    })
+
+    viteProcess.stdout.on('data', (data) => {
+      const output = data.toString()
+      console.log('[Vite]', output.trim())
+      // 检测启动成功
+      if (output.includes('Local:') || output.includes('ready in')) {
+        resolve()
+      }
+    })
+
+    viteProcess.stderr.on('data', (data) => {
+      console.log('[Vite]', data.toString().trim())
+    })
+
+    viteProcess.on('error', (err) => {
+      console.error('[Vite] Failed to start:', err)
+      reject(err)
+    })
+
+    viteProcess.on('close', (code) => {
+      console.log('[Vite] Process exited with code:', code)
+      viteProcess = null
+    })
+
+    // 超时检测
+    setTimeout(async () => {
+      const isRunning = await checkViteHealth()
+      if (isRunning) {
+        resolve()
+      } else {
+        reject(new Error('Vite startup timeout'))
+      }
+    }, 30000)
+  })
+}
+
+/**
+ * 终止所有子进程（开发模式）
+ */
+function killDevProcesses() {
+  console.log('[Dev] Killing child processes...')
+
+  if (backendProcess) {
+    try {
+      // Windows 下需要使用 taskkill 来终止进程树
+      spawn('taskkill', ['/PID', backendProcess.pid.toString(), '/T', '/F'], { stdio: 'ignore' })
+      console.log('[Dev] Backend process killed')
+    } catch (e) {
+      console.log('[Dev] Error killing backend:', e.message)
+    }
+    backendProcess = null
+  }
+
+  if (viteProcess) {
+    try {
+      spawn('taskkill', ['/PID', viteProcess.pid.toString(), '/T', '/F'], { stdio: 'ignore' })
+      console.log('[Dev] Vite process killed')
+    } catch (e) {
+      console.log('[Dev] Error killing vite:', e.message)
+    }
+    viteProcess = null
+  }
+}
+
 async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -52,6 +217,11 @@ async function createWindow() {
     title: '供应商邮件翻译系统',
     show: false  // 先隐藏，等加载完成后显示
   })
+
+  // 生产版隐藏菜单栏
+  if (!isDev) {
+    Menu.setApplicationMenu(null)
+  }
 
   // Load the app
   if (isDev) {
@@ -225,15 +395,42 @@ app.on('second-instance', () => {
 // App events
 app.whenReady().then(async () => {
   // 显示启动画面
-  if (!isDev) {
-    createSplash()
-  }
+  createSplash()
 
   try {
-    // 检查服务器后端是否可用
-    const backendOk = await checkBackendHealth()
-    if (!backendOk) {
-      console.warn('服务器后端暂时不可用，但仍继续启动应用')
+    if (isDev) {
+      // 开发模式：启动本地前后端服务
+      console.log('[Dev] Starting development servers...')
+
+      // 先检查是否已经在运行
+      const backendAlreadyRunning = await checkLocalBackendHealth()
+      const viteAlreadyRunning = await checkViteHealth()
+
+      if (!backendAlreadyRunning) {
+        console.log('[Dev] Starting backend...')
+        await startBackend()
+        console.log('[Dev] Backend started successfully')
+      } else {
+        console.log('[Dev] Backend already running')
+      }
+
+      if (!viteAlreadyRunning) {
+        console.log('[Dev] Starting Vite...')
+        await startVite()
+        console.log('[Dev] Vite started successfully')
+      } else {
+        console.log('[Dev] Vite already running')
+      }
+
+      // 等待服务完全就绪
+      await new Promise(resolve => setTimeout(resolve, 1000))
+
+    } else {
+      // 生产模式：检查服务器后端是否可用
+      const backendOk = await checkBackendHealth()
+      if (!backendOk) {
+        console.warn('服务器后端暂时不可用，但仍继续启动应用')
+      }
     }
 
     // 创建主窗口
@@ -246,13 +443,14 @@ app.whenReady().then(async () => {
   } catch (error) {
     console.error('启动失败:', error)
     closeSplash()
+    killDevProcesses()
 
     // 显示错误对话框
     const { dialog } = require('electron')
     await dialog.showMessageBox({
       type: 'error',
       title: '启动失败',
-      message: '应用启动失败，请检查网络连接',
+      message: isDev ? '开发服务启动失败' : '应用启动失败，请检查网络连接',
       detail: error.message
     })
 
@@ -274,6 +472,10 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   app.isQuitting = true
+  // 开发模式下终止子进程
+  if (isDev) {
+    killDevProcesses()
+  }
 })
 
 // IPC handlers

@@ -281,14 +281,41 @@ VITE_API_URL=http://localhost:8000/api
 | POST | /api/drafts/{id}/send | 发送草稿 |
 | GET | /api/suppliers | 供应商列表 |
 | GET | /api/translate/glossary/{id} | 术语表 |
+| GET | /api/labels | 获取标签列表 |
+| POST | /api/labels | 创建标签 |
+| PUT | /api/labels/{id} | 更新标签 |
+| DELETE | /api/labels/{id} | 删除标签 |
+| POST | /api/labels/emails/{email_id} | 为邮件添加标签 |
+| DELETE | /api/labels/emails/{email_id} | 移除邮件标签 |
+| GET | /api/folders | 获取文件夹树 |
+| POST | /api/folders | 创建文件夹 |
+| PUT | /api/folders/{id} | 更新文件夹 |
+| DELETE | /api/folders/{id} | 删除文件夹 |
+| POST | /api/folders/{id}/emails | 添加邮件到文件夹 |
+| DELETE | /api/folders/{id}/emails/{email_id} | 从文件夹移除邮件 |
+| GET | /api/folders/{id}/emails | 获取文件夹中的邮件 |
+| GET | /api/calendar/events | 获取日历事件（支持 start/end 时间过滤） |
+| POST | /api/calendar/events | 创建日历事件 |
+| GET | /api/calendar/events/{id} | 获取单个事件详情 |
+| PUT | /api/calendar/events/{id} | 更新日历事件 |
+| DELETE | /api/calendar/events/{id} | 删除日历事件 |
+| POST | /api/calendar/events/from-email/{email_id} | 从邮件创建事件 |
+| GET | /api/calendar/events/by-email/{email_id} | 获取邮件关联的事件 |
+| POST | /api/ai/extract/{email_id} | AI 提取邮件信息（force=true 强制重新提取） |
+| GET | /api/ai/extract/{email_id} | 获取已提取的信息 |
+| DELETE | /api/ai/extract/{email_id} | 删除提取结果 |
 
 ## 数据模型
 
 - **EmailAccount** - 邮箱账户（IMAP/SMTP配置，登录后自动创建）
-- **Email** - 邮件（原文、译文、语言检测、is_read、is_flagged）
+- **Email** - 邮件（原文、译文、语言检测、is_read、is_flagged、labels、folders）
 - **Supplier** - 供应商（域名、联系邮箱）
 - **Glossary** - 术语表（原文→译文）
 - **Draft** - 回复草稿（中文、译文、状态）
+- **EmailLabel** - 邮件标签（name、color、account_id）
+- **EmailFolder** - 自定义文件夹（支持嵌套，parent_id）
+- **CalendarEvent** - 日历事件（title、start_time、end_time、可关联邮件）
+- **EmailExtraction** - AI 提取结果（summary、dates、amounts、contacts、action_items）
 
 ### 数据库迁移
 
@@ -296,6 +323,9 @@ VITE_API_URL=http://localhost:8000/api
 ```bash
 cd backend
 python -m migrations.add_email_flags
+python -m migrations.add_email_labels
+python -m migrations.add_email_folders
+python -m migrations.add_calendar_events
 ```
 
 ## 安全机制

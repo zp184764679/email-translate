@@ -1,7 +1,9 @@
 <template>
-  <div class="emails-container split-mode">
-    <!-- Split View 模式：左边原文，右边译文 -->
-    <div class="split-panes">
+  <div class="emails-container" :class="layoutClass">
+    <!-- 主要内容区 -->
+    <div class="emails-main">
+      <!-- Split View 模式：左边原文，右边译文 -->
+      <div class="split-panes">
       <!-- 左侧原文列表 -->
       <div class="split-pane original-pane">
         <div class="split-pane-header">
@@ -11,15 +13,16 @@
         </div>
         <div class="email-list" v-loading="loading">
           <div
-            v-for="email in emails"
+            v-for="(email, index) in emails"
             :key="'orig-' + email.id"
             class="email-item compact"
             :class="{
               'unread': !email.is_read,
               'selected': selectedEmails.includes(email.id),
-              'active': activeEmailId === email.id
+              'active': activeEmailId === email.id,
+              'focused': focusedIndex === index
             }"
-            @click="handleEmailClick(email)"
+            @click="handleEmailClick(email, index)"
           >
             <div class="email-actions">
               <el-checkbox
@@ -53,6 +56,26 @@
               <div class="email-preview">{{ getOriginalPreview(email) }}</div>
             </div>
             <div class="email-tags">
+              <!-- 邮件标签 -->
+              <el-tag
+                v-for="label in (email.labels || []).slice(0, 2)"
+                :key="label.id"
+                :color="label.color"
+                :style="{ color: getTextColor(label.color) }"
+                size="small"
+                class="label-tag"
+              >
+                {{ label.name }}
+              </el-tag>
+              <el-tag
+                v-if="email.labels && email.labels.length > 2"
+                size="small"
+                type="info"
+                class="more-labels"
+              >
+                +{{ email.labels.length - 2 }}
+              </el-tag>
+              <!-- 语言标签 -->
               <el-tag
                 v-if="email.language_detected && email.language_detected !== 'zh'"
                 size="small"
@@ -78,15 +101,16 @@
         </div>
         <div class="email-list">
           <div
-            v-for="email in emails"
+            v-for="(email, index) in emails"
             :key="'trans-' + email.id"
             class="email-item compact"
             :class="{
               'unread': !email.is_read,
               'selected': selectedEmails.includes(email.id),
-              'active': activeEmailId === email.id
+              'active': activeEmailId === email.id,
+              'focused': focusedIndex === index
             }"
-            @click="handleEmailClick(email)"
+            @click="handleEmailClick(email, index)"
           >
             <!-- 与左侧完全镜像的结构 -->
             <div class="email-actions" style="visibility: hidden;">
@@ -126,8 +150,8 @@
       </div>
     </div>
 
-    <!-- 分页 -->
-    <div class="split-footer" v-if="total > pageSize">
+      <!-- 分页 -->
+      <div class="split-footer" v-if="total > pageSize">
         <el-pagination
           v-model:current-page="currentPage"
           :page-size="pageSize"
@@ -137,16 +161,41 @@
           @current-change="loadEmails"
         />
       </div>
+    </div>
+
+    <!-- 预览窗格（非列表模式时显示） -->
+    <div class="preview-pane" v-if="userStore.layoutMode !== 'list'">
+      <EmailPreview
+        :email-id="previewEmailId"
+        @reply="handlePreviewReply"
+        @forward="handlePreviewForward"
+        @delete="handlePreviewDelete"
+        @open="handlePreviewOpen"
+        @update="handlePreviewUpdate"
+      />
+    </div>
+
+    <!-- 标签选择器 -->
+    <LabelSelector
+      v-model="showLabelSelector"
+      :email-id="labelSelectorEmailId"
+      :current-labels="labelSelectorCurrentLabels"
+      @saved="handleLabelsSaved"
+    />
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue'
+import { ref, onMounted, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import { Star, StarFilled, Sort, Paperclip, Message, Document, DocumentCopy } from '@element-plus/icons-vue'
 import api from '@/api'
 import dayjs from 'dayjs'
+import { ElMessage } from 'element-plus'
+import { useKeyboardShortcuts } from '@/composables/useKeyboardShortcuts'
+import EmailPreview from '@/components/EmailPreview.vue'
+import LabelSelector from '@/components/LabelSelector.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -162,6 +211,156 @@ const selectedEmails = ref([])
 const activeEmailId = ref(null)
 const activeEmail = ref(null)
 const sortBy = ref('date_desc')
+const focusedIndex = ref(-1)  // 当前聚焦的邮件索引
+const previewEmailId = ref(null)  // 预览的邮件 ID
+const showLabelSelector = ref(false)  // 标签选择器可见性
+const labelSelectorEmailId = ref(null)  // 当前操作标签的邮件ID
+const labelSelectorCurrentLabels = ref([])  // 当前邮件的标签
+
+// 布局模式类名
+const layoutClass = computed(() => {
+  const mode = userStore.layoutMode
+  return {
+    'split-mode': true,
+    'layout-list': mode === 'list',
+    'layout-right': mode === 'right',
+    'layout-bottom': mode === 'bottom'
+  }
+})
+
+// 当前聚焦的邮件
+const focusedEmail = computed(() => {
+  if (focusedIndex.value >= 0 && focusedIndex.value < emails.value.length) {
+    return emails.value[focusedIndex.value]
+  }
+  return null
+})
+
+// 当聚焦索引变化时，更新预览邮件
+watch(focusedIndex, (newIndex) => {
+  if (userStore.layoutMode !== 'list' && newIndex >= 0 && newIndex < emails.value.length) {
+    previewEmailId.value = emails.value[newIndex].id
+  }
+})
+
+// 邮件列表快捷键
+useKeyboardShortcuts([
+  {
+    key: 'j',
+    handler: () => {
+      // 下一封
+      if (emails.value.length > 0) {
+        focusedIndex.value = Math.min(focusedIndex.value + 1, emails.value.length - 1)
+        scrollToFocused()
+      }
+    }
+  },
+  {
+    key: 'k',
+    handler: () => {
+      // 上一封
+      if (emails.value.length > 0) {
+        focusedIndex.value = Math.max(focusedIndex.value - 1, 0)
+        scrollToFocused()
+      }
+    }
+  },
+  {
+    key: 'Enter',
+    handler: () => {
+      // 打开邮件
+      if (focusedEmail.value) {
+        router.push(`/emails/${focusedEmail.value.id}`)
+      }
+    }
+  },
+  {
+    key: 'x',
+    handler: () => {
+      // 选择/取消选择
+      if (focusedEmail.value) {
+        toggleSelect(focusedEmail.value.id)
+      }
+    }
+  },
+  {
+    key: 's',
+    handler: () => {
+      // 切换星标
+      if (focusedEmail.value) {
+        toggleFlag(focusedEmail.value)
+      }
+    }
+  },
+  {
+    key: 'd',
+    handler: async () => {
+      // 删除选中或聚焦的邮件
+      const idsToDelete = selectedEmails.value.length > 0
+        ? [...selectedEmails.value]
+        : (focusedEmail.value ? [focusedEmail.value.id] : [])
+
+      if (idsToDelete.length > 0) {
+        try {
+          await api.batchDelete(idsToDelete)
+          ElMessage.success(`已删除 ${idsToDelete.length} 封邮件`)
+          selectedEmails.value = []
+          loadEmails()
+        } catch (e) {
+          ElMessage.error('删除失败')
+        }
+      }
+    }
+  },
+  {
+    key: 'u',
+    handler: async () => {
+      // 标记未读
+      const ids = selectedEmails.value.length > 0
+        ? [...selectedEmails.value]
+        : (focusedEmail.value ? [focusedEmail.value.id] : [])
+
+      if (ids.length > 0) {
+        try {
+          await api.batchMarkAsUnread(ids)
+          ElMessage.success(`已将 ${ids.length} 封邮件标记为未读`)
+          loadEmails()
+        } catch (e) {
+          ElMessage.error('操作失败')
+        }
+      }
+    }
+  },
+  {
+    key: 'a',
+    ctrl: true,
+    handler: () => {
+      // 全选
+      if (selectedEmails.value.length === emails.value.length) {
+        selectedEmails.value = []
+      } else {
+        selectedEmails.value = emails.value.map(e => e.id)
+      }
+    }
+  },
+  {
+    key: 'l',
+    handler: async () => {
+      // 打开标签选择器
+      if (focusedEmail.value) {
+        openLabelSelector(focusedEmail.value)
+      }
+    }
+  }
+])
+
+// 滚动到聚焦的邮件
+function scrollToFocused() {
+  const items = document.querySelectorAll('.original-pane .email-item')
+  if (items[focusedIndex.value]) {
+    items[focusedIndex.value].scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }
+}
 
 // 初始化
 onMounted(async () => {
@@ -197,6 +396,14 @@ async function loadEmails() {
       sort_by: sortBy.value
     }
 
+    // 如果是文件夹视图，调用文件夹API
+    if (route.query.folder_id) {
+      const result = await api.getFolderEmails(route.query.folder_id, params)
+      emails.value = result.emails
+      total.value = result.total
+      return
+    }
+
     // 默认显示收件箱（inbound），除非明确指定了其他方向
     if (route.query.direction) {
       params.direction = route.query.direction
@@ -223,9 +430,92 @@ async function loadEmails() {
   }
 }
 
-function handleEmailClick(email) {
-  // 点击邮件跳转到详情页
+function handleEmailClick(email, index) {
+  // 更新聚焦索引
+  if (typeof index === 'number') {
+    focusedIndex.value = index
+  }
+
+  // 预览模式：更新预览邮件，不跳转
+  if (userStore.layoutMode !== 'list') {
+    previewEmailId.value = email.id
+    return
+  }
+
+  // 列表模式：跳转到详情页
   router.push(`/emails/${email.id}`)
+}
+
+// 预览窗格事件处理
+function handlePreviewReply() {
+  if (previewEmailId.value) {
+    router.push(`/emails/${previewEmailId.value}?reply=true`)
+  }
+}
+
+function handlePreviewForward() {
+  ElMessage.info('转发功能开发中')
+}
+
+async function handlePreviewDelete() {
+  if (!previewEmailId.value) return
+
+  try {
+    await api.deleteEmail(previewEmailId.value)
+    ElMessage.success('邮件已删除')
+
+    // 从列表中移除
+    const index = emails.value.findIndex(e => e.id === previewEmailId.value)
+    if (index > -1) {
+      emails.value.splice(index, 1)
+    }
+
+    // 选中下一封
+    if (emails.value.length > 0) {
+      const nextIndex = Math.min(index, emails.value.length - 1)
+      focusedIndex.value = nextIndex
+      previewEmailId.value = emails.value[nextIndex].id
+    } else {
+      previewEmailId.value = null
+      focusedIndex.value = -1
+    }
+  } catch (e) {
+    ElMessage.error('删除失败')
+  }
+}
+
+function handlePreviewOpen() {
+  if (previewEmailId.value) {
+    router.push(`/emails/${previewEmailId.value}`)
+  }
+}
+
+function handlePreviewUpdate(updatedEmail) {
+  // 更新列表中的邮件状态
+  const emailInList = emails.value.find(e => e.id === updatedEmail.id)
+  if (emailInList) {
+    Object.assign(emailInList, updatedEmail)
+  }
+}
+
+// 标签选择器相关
+async function openLabelSelector(email) {
+  labelSelectorEmailId.value = email.id
+  // 获取邮件当前的标签
+  try {
+    labelSelectorCurrentLabels.value = await api.getEmailLabels(email.id)
+  } catch (e) {
+    labelSelectorCurrentLabels.value = []
+  }
+  showLabelSelector.value = true
+}
+
+function handleLabelsSaved(labels) {
+  // 更新列表中邮件的标签
+  const emailInList = emails.value.find(e => e.id === labelSelectorEmailId.value)
+  if (emailInList) {
+    emailInList.labels = labels
+  }
 }
 
 async function loadEmailDetail(id) {
@@ -406,6 +696,17 @@ function getAvatarColor(email) {
 function hasAttachments(email) {
   return email.attachments && email.attachments.length > 0
 }
+
+// 根据背景色计算文字颜色
+function getTextColor(bgColor) {
+  if (!bgColor) return '#333'
+  const hex = bgColor.replace('#', '')
+  const r = parseInt(hex.substr(0, 2), 16)
+  const g = parseInt(hex.substr(2, 2), 16)
+  const b = parseInt(hex.substr(4, 2), 16)
+  const brightness = (r * 299 + g * 587 + b * 114) / 1000
+  return brightness > 128 ? '#333' : '#fff'
+}
 </script>
 
 <style scoped>
@@ -482,6 +783,12 @@ function hasAttachments(email) {
   background-color: #e1efff;
   border-left: 3px solid #0078d4;
   padding-left: 13px;
+}
+
+.email-item.focused {
+  background-color: #f0f7ff;
+  outline: 2px solid #409eff;
+  outline-offset: -2px;
 }
 
 .email-item.unread {
@@ -761,5 +1068,63 @@ function hasAttachments(email) {
   display: flex;
   justify-content: center;
   background-color: #fafafa;
+}
+
+/* ========== 布局模式样式 ========== */
+
+/* 列表模式（默认） */
+.emails-container.layout-list {
+  flex-direction: column;
+}
+
+.emails-container.layout-list .emails-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 右侧预览模式 */
+.emails-container.layout-right {
+  flex-direction: row;
+}
+
+.emails-container.layout-right .emails-main {
+  width: 45%;
+  min-width: 400px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid #e8e8e8;
+}
+
+.emails-container.layout-right .preview-pane {
+  flex: 1;
+  overflow: hidden;
+}
+
+/* 底部预览模式 */
+.emails-container.layout-bottom {
+  flex-direction: column;
+}
+
+.emails-container.layout-bottom .emails-main {
+  height: 50%;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-bottom: 1px solid #e8e8e8;
+}
+
+.emails-container.layout-bottom .preview-pane {
+  flex: 1;
+  overflow: hidden;
+}
+
+/* 预览窗格通用样式 */
+.preview-pane {
+  background-color: #fff;
 }
 </style>
