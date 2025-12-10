@@ -3,6 +3,7 @@ from fastapi.responses import FileResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
+from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime, timedelta
@@ -437,8 +438,14 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                 email_data["supplier_id"] = supplier.id
                 attachments = email_data.pop("attachments", [])
 
-                new_email = await crud.create_email(db, email_data)
-                saved_count += 1
+                try:
+                    new_email = await crud.create_email(db, email_data)
+                    saved_count += 1
+                except IntegrityError:
+                    # 处理并发请求导致的重复插入
+                    await db.rollback()
+                    print(f"[EmailSync] Skipped duplicate: {email_data.get('message_id', 'unknown')[:50]}")
+                    continue
 
                 # 自动翻译非中文邮件
                 lang = email_data.get("language_detected", "")
