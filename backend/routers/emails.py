@@ -1221,10 +1221,11 @@ async def translate_email(
         body_to_translate = html_to_text_with_format(email.body_html)
         print(f"[Translate] Extracted {len(body_to_translate)} chars from HTML for email {email.id}")
 
-    # 智能翻译正文（检测引用，只翻译新内容）
+    # 智能翻译正文（检测引用，支持智能路由）
     body_translated = ""
+    provider_used = "unknown"
     if body_to_translate:
-        # 创建翻译服务用于智能翻译
+        # 创建翻译服务
         service = TranslateService(
             api_key=settings.deepl_api_key or settings.claude_api_key,
             provider=settings.translate_provider,
@@ -1235,10 +1236,31 @@ async def translate_email(
             tencent_secret_id=settings.tencent_secret_id,
             tencent_secret_key=settings.tencent_secret_key
         )
-        body_translated = await smart_translate_email_body(
-            db, service, body_to_translate, source_lang, "zh",
-            in_reply_to=email.in_reply_to
-        )
+
+        # 检查是否启用智能路由（与新邮件自动翻译保持一致）
+        use_smart_routing = getattr(settings, 'smart_routing_enabled', True)
+
+        if use_smart_routing:
+            # 智能路由翻译（根据复杂度自动选择引擎）
+            result = service.translate_with_smart_routing(
+                text=body_to_translate,
+                subject=email.subject_original or "",
+                target_lang="zh",
+                source_lang=source_lang
+            )
+            body_translated = result["translated_text"]
+            provider_used = result["provider_used"]
+            complexity_info = result["complexity"]
+            print(f"[ManualTranslate SmartRouting] Email {email.id} "
+                  f"→ {provider_used} (complexity: {complexity_info['level']}, "
+                  f"score: {complexity_info['score']})")
+        else:
+            # 普通智能翻译（检测引用，只翻译新内容）
+            body_translated = await smart_translate_email_body(
+                db, service, body_to_translate, source_lang, "zh",
+                in_reply_to=email.in_reply_to
+            )
+            provider_used = settings.translate_provider
 
     # 4. 更新邮件记录
     email.subject_translated = subject_translated
