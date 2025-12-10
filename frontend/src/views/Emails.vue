@@ -639,14 +639,16 @@ function formatTime(date) {
 
 function getLanguageName(lang) {
   const names = {
-    en: '英',
-    ja: '日',
-    ko: '韩',
-    de: '德',
-    fr: '法',
-    es: '西',
-    pt: '葡',
-    ru: '俄'
+    en: '🇬🇧 英',
+    ja: '🇯🇵 日',
+    ko: '🇰🇷 韩',
+    de: '🇩🇪 德',
+    fr: '🇫🇷 法',
+    es: '🇪🇸 西',
+    pt: '🇵🇹 葡',
+    ru: '🇷🇺 俄',
+    it: '🇮🇹 意',
+    nl: '🇳🇱 荷'
   }
   return names[lang] || lang
 }

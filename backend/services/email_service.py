@@ -337,10 +337,12 @@ class EmailService:
             # 商业邮件场景中英语更常见，适当提高英语优先级
             if detected in ["de", "fr", "nl", "es", "it", "pt"]:
                 # 方法1：第二选项是英语且有一定概率
-                if len(langs) > 1 and langs[1].lang == "en" and langs[1].prob > 0.15:
+                if len(langs) > 1 and langs[1].lang == "en" and langs[1].prob > 0.1:
+                    print(f"[LangDetect] Corrected {detected} -> en (2nd option prob={langs[1].prob:.2f})")
                     detected = "en"
-                # 方法2：检测常见英语单词（即使置信度高也可能误判）
-                elif confidence < 0.9 and self._has_common_english_words(clean_text):
+                # 方法2：检测常见英语单词（移除置信度限制，因为即使高置信度也可能误判）
+                elif self._has_common_english_words(clean_text):
+                    print(f"[LangDetect] Corrected {detected} -> en (common English words found)")
                     detected = "en"
 
             return detected
