@@ -42,15 +42,6 @@
               <div class="email-top-row">
                 <span class="sender-name">{{ email.from_name || extractEmailName(email.from_email) }}</span>
                 <span class="email-time">{{ formatTime(email.received_at) }}</span>
-                <!-- 左侧也保留"未翻译"标签占位符，保持与右侧结构一致 -->
-                <el-tag
-                  v-if="!email.is_translated && email.language_detected !== 'zh'"
-                  size="small"
-                  type="warning"
-                  style="visibility: hidden;"
-                >
-                  未翻译
-                </el-tag>
               </div>
               <div class="email-subject">{{ email.subject_original }}</div>
               <div class="email-preview">{{ getOriginalPreview(email) }}</div>
@@ -120,29 +111,18 @@
             <div class="email-content">
               <div class="email-top-row">
                 <span class="sender-name">{{ email.from_name || extractEmailName(email.from_email) }}</span>
-                <span class="email-time" style="visibility: hidden;">{{ formatTime(email.received_at) }}</span>
                 <!-- 右侧显示"未翻译"标签 -->
                 <el-tag
                   v-if="!email.is_translated && email.language_detected !== 'zh'"
                   size="small"
                   type="warning"
+                  class="untranslated-tag"
                 >
                   未翻译
                 </el-tag>
               </div>
               <div class="email-subject">{{ email.subject_translated || email.subject_original }}</div>
               <div class="email-preview">{{ getTranslatedPreview(email) }}</div>
-            </div>
-            <div class="email-tags">
-              <!-- 与左侧一样的语言标签结构，但隐藏 -->
-              <el-tag
-                v-if="email.language_detected && email.language_detected !== 'zh'"
-                size="small"
-                type="info"
-                style="visibility: hidden;"
-              >
-                {{ getLanguageName(email.language_detected) }}
-              </el-tag>
             </div>
           </div>
           <el-empty v-if="!loading && emails.length === 0" description="暂无邮件" />
@@ -870,7 +850,12 @@ function getTextColor(bgColor) {
   font-size: 12px;
   color: #909399;
   flex-shrink: 0;
-  margin-left: 8px;
+  margin-left: auto;  /* 始终靠右对齐 */
+  padding-left: 8px;
+}
+
+.untranslated-tag {
+  margin-left: auto;  /* 靠右对齐 */
 }
 
 .email-subject {
