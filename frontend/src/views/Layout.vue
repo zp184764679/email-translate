@@ -61,6 +61,30 @@
 
         <div class="folder-divider"></div>
 
+        <!-- 自定义文件夹 -->
+        <div class="custom-folders-section">
+          <div class="section-header">
+            <span>文件夹</span>
+            <el-button text size="small" @click="showFolderDialog = true">
+              <el-icon><Plus /></el-icon>
+            </el-button>
+          </div>
+          <div
+            v-for="folder in customFolders"
+            :key="folder.id"
+            class="folder-item custom-folder"
+            :class="{ active: currentFolder === `folder-${folder.id}` }"
+            @click="navigateTo(`/emails?folder_id=${folder.id}`, `folder-${folder.id}`)"
+            @contextmenu.prevent="showFolderContextMenu($event, folder)"
+          >
+            <el-icon :style="{ color: folder.color }"><Folder /></el-icon>
+            <span class="folder-name">{{ folder.name }}</span>
+            <el-badge v-if="folder.email_count > 0" :value="folder.email_count" class="folder-badge" type="info" />
+          </div>
+        </div>
+
+        <div class="folder-divider"></div>
+
         <div
           class="folder-item"
           :class="{ active: currentFolder === 'suppliers' }"
@@ -77,6 +101,15 @@
         >
           <el-icon><Checked /></el-icon>
           <span class="folder-name">审批</span>
+        </div>
+
+        <div
+          class="folder-item"
+          :class="{ active: currentFolder === 'calendar' }"
+          @click="navigateTo('/calendar', 'calendar')"
+        >
+          <el-icon><Calendar /></el-icon>
+          <span class="folder-name">日历</span>
         </div>
 
         <div class="folder-divider"></div>
@@ -151,6 +184,31 @@
         </div>
 
         <div class="toolbar-right">
+          <!-- 布局切换 -->
+          <el-dropdown @command="handleLayoutChange" v-if="isEmailView">
+            <el-button>
+              <el-icon><Grid /></el-icon>
+              布局
+              <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="list" :class="{ 'is-active': userStore.layoutMode === 'list' }">
+                  <el-icon><List /></el-icon>
+                  列表模式
+                </el-dropdown-item>
+                <el-dropdown-item command="right" :class="{ 'is-active': userStore.layoutMode === 'right' }">
+                  <el-icon><Operation /></el-icon>
+                  右侧预览
+                </el-dropdown-item>
+                <el-dropdown-item command="bottom" :class="{ 'is-active': userStore.layoutMode === 'bottom' }">
+                  <el-icon><Histogram /></el-icon>
+                  底部预览
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+
           <!-- 双语对比模式提示 -->
           <span class="view-mode-hint">
             <el-icon><Reading /></el-icon>
@@ -179,6 +237,47 @@
         @cancel="showComposeDialog = false"
       />
     </el-dialog>
+
+    <!-- 快捷键帮助弹窗 -->
+    <KeyboardShortcutsHelp ref="shortcutsHelpRef" />
+
+    <!-- 文件夹创建/编辑对话框 -->
+    <el-dialog
+      v-model="showFolderDialog"
+      :title="editingFolder ? '编辑文件夹' : '新建文件夹'"
+      width="400px"
+    >
+      <el-form :model="folderForm" label-width="80px">
+        <el-form-item label="名称" required>
+          <el-input v-model="folderForm.name" placeholder="请输入文件夹名称" />
+        </el-form-item>
+        <el-form-item label="颜色">
+          <el-color-picker v-model="folderForm.color" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showFolderDialog = false">取消</el-button>
+        <el-button type="primary" @click="saveFolder" :loading="savingFolder">
+          保存
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 文件夹右键菜单 -->
+    <div
+      v-show="folderContextMenu.visible"
+      class="context-menu"
+      :style="{ left: folderContextMenu.x + 'px', top: folderContextMenu.y + 'px' }"
+    >
+      <div class="context-menu-item" @click="editFolder">
+        <el-icon><Edit /></el-icon>
+        <span>编辑</span>
+      </div>
+      <div class="context-menu-item danger" @click="deleteFolderConfirm">
+        <el-icon><Delete /></el-icon>
+        <span>删除</span>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -189,11 +288,14 @@ import { useUserStore } from '@/stores/user'
 import {
   Refresh, RefreshRight, Message, EditPen, Document, Delete,
   OfficeBuilding, Setting, Promotion, Star, ChatDotSquare,
-  SwitchButton, Checked, Reading, DocumentCopy
+  SwitchButton, Checked, Reading, DocumentCopy, Grid, List,
+  Operation, Histogram, ArrowDown, Plus, Folder, Edit, Calendar
 } from '@element-plus/icons-vue'
 import api from '@/api'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import ComposeEmail from '@/components/ComposeEmail.vue'
+import KeyboardShortcutsHelp from '@/components/KeyboardShortcutsHelp.vue'
+import { useKeyboardShortcuts } from '@/composables/useKeyboardShortcuts'
 
 const route = useRoute()
 const router = useRouter()
@@ -208,6 +310,44 @@ const showComposeDialog = ref(false)
 const unreadCount = ref(0)
 const draftCount = ref(0)
 
+// 文件夹管理
+const customFolders = ref([])
+const showFolderDialog = ref(false)
+const editingFolder = ref(null)
+const savingFolder = ref(false)
+const folderForm = ref({
+  name: '',
+  color: '#409EFF'
+})
+const folderContextMenu = ref({
+  visible: false,
+  x: 0,
+  y: 0,
+  folder: null
+})
+
+// 组件 refs
+const shortcutsHelpRef = ref(null)
+const searchInputRef = ref(null)
+
+// 全局快捷键
+useKeyboardShortcuts([
+  {
+    key: 'n',
+    handler: () => {
+      showComposeDialog.value = true
+    }
+  },
+  {
+    key: '/',
+    handler: () => {
+      // 聚焦搜索框
+      const searchEl = document.querySelector('.search-input input')
+      if (searchEl) searchEl.focus()
+    }
+  }
+])
+
 // 计算属性
 const displayName = computed(() => {
   const email = userStore.email || ''
@@ -221,6 +361,7 @@ const isEmailView = computed(() => {
 // 初始化
 onMounted(() => {
   loadCounts()
+  loadFolders()
   updateCurrentFolder()
 
   // 请求通知权限
@@ -230,12 +371,17 @@ onMounted(() => {
 
   // 启动自动收件
   userStore.startAutoFetch()
+
+  // 点击其他区域关闭右键菜单
+  document.addEventListener('click', closeFolderContextMenu)
 })
 
-// 组件卸载时停止自动收件
+// 组件卸载时清理
 onUnmounted(() => {
   userStore.stopAutoFetch()
+  document.removeEventListener('click', closeFolderContextMenu)
 })
+
 
 // 监听路由变化
 watch(() => route.path, () => {
@@ -247,6 +393,8 @@ function updateCurrentFolder() {
   if (path.startsWith('/emails')) {
     if (route.query.direction === 'outbound') {
       currentFolder.value = 'sent'
+    } else if (route.query.folder_id) {
+      currentFolder.value = `folder-${route.query.folder_id}`
     } else {
       currentFolder.value = 'inbox'
     }
@@ -258,6 +406,8 @@ function updateCurrentFolder() {
     currentFolder.value = 'suppliers'
   } else if (path.startsWith('/approvals')) {
     currentFolder.value = 'approvals'
+  } else if (path.startsWith('/calendar')) {
+    currentFolder.value = 'calendar'
   } else if (path.startsWith('/settings')) {
     currentFolder.value = 'settings'
   }
@@ -326,6 +476,10 @@ function handleSearch() {
   if (searchQuery.value.trim()) {
     router.push(`/emails?search=${encodeURIComponent(searchQuery.value)}`)
   }
+}
+
+function handleLayoutChange(mode) {
+  userStore.setLayoutMode(mode)
 }
 
 async function markAsRead() {
@@ -404,6 +558,116 @@ function onEmailSent() {
 function handleLogout() {
   userStore.logout()
   router.push('/login')
+}
+
+// ============ 文件夹管理函数 ============
+async function loadFolders() {
+  try {
+    customFolders.value = await api.getFolders()
+  } catch (e) {
+    console.error('Failed to load folders:', e)
+  }
+}
+
+async function saveFolder() {
+  if (!folderForm.value.name.trim()) {
+    ElMessage.warning('请输入文件夹名称')
+    return
+  }
+
+  savingFolder.value = true
+  try {
+    if (editingFolder.value) {
+      // 更新文件夹
+      await api.updateFolder(editingFolder.value.id, {
+        name: folderForm.value.name,
+        color: folderForm.value.color
+      })
+      ElMessage.success('文件夹已更新')
+    } else {
+      // 创建文件夹
+      await api.createFolder({
+        name: folderForm.value.name,
+        color: folderForm.value.color
+      })
+      ElMessage.success('文件夹已创建')
+    }
+
+    showFolderDialog.value = false
+    editingFolder.value = null
+    folderForm.value = { name: '', color: '#409EFF' }
+    loadFolders()
+  } catch (e) {
+    console.error('Failed to save folder:', e)
+    ElMessage.error(e.response?.data?.detail || '保存失败')
+  } finally {
+    savingFolder.value = false
+  }
+}
+
+function showFolderContextMenu(event, folder) {
+  event.preventDefault()
+  folderContextMenu.value = {
+    visible: true,
+    x: event.clientX,
+    y: event.clientY,
+    folder: folder
+  }
+}
+
+function closeFolderContextMenu() {
+  folderContextMenu.value.visible = false
+}
+
+function editFolder() {
+  const folder = folderContextMenu.value.folder
+  if (folder) {
+    editingFolder.value = folder
+    folderForm.value = {
+      name: folder.name,
+      color: folder.color
+    }
+    showFolderDialog.value = true
+  }
+  closeFolderContextMenu()
+}
+
+async function deleteFolderConfirm() {
+  const folder = folderContextMenu.value.folder
+  closeFolderContextMenu()
+
+  if (!folder) return
+
+  if (folder.is_system) {
+    ElMessage.warning('系统文件夹不可删除')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除文件夹"${folder.name}"吗？文件夹中的邮件不会被删除。`,
+      '删除文件夹',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+
+    await api.deleteFolder(folder.id)
+    ElMessage.success('文件夹已删除')
+    loadFolders()
+
+    // 如果当前在该文件夹，跳转到收件箱
+    if (currentFolder.value === `folder-${folder.id}`) {
+      navigateTo('/emails', 'inbox')
+    }
+  } catch (e) {
+    if (e !== 'cancel') {
+      console.error('Failed to delete folder:', e)
+      ElMessage.error('删除失败')
+    }
+  }
 }
 </script>
 
@@ -508,6 +772,65 @@ function handleLogout() {
   height: 1px;
   background-color: #e0e0e0;
   margin: 8px 16px;
+}
+
+/* 自定义文件夹区域 */
+.custom-folders-section {
+  margin: 4px 0;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 16px;
+  font-size: 12px;
+  color: #909399;
+  font-weight: 500;
+}
+
+.section-header .el-button {
+  padding: 2px;
+  height: auto;
+}
+
+.custom-folder {
+  padding-left: 24px;
+}
+
+/* 右键菜单 */
+.context-menu {
+  position: fixed;
+  z-index: 3000;
+  background: #fff;
+  border: 1px solid #e4e7ed;
+  border-radius: 4px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+  padding: 4px 0;
+  min-width: 120px;
+}
+
+.context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  font-size: 14px;
+  color: #303133;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.context-menu-item:hover {
+  background-color: #f5f7fa;
+}
+
+.context-menu-item.danger {
+  color: #f56c6c;
+}
+
+.context-menu-item.danger:hover {
+  background-color: #fef0f0;
 }
 
 .folder-footer {

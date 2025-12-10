@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
+from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime, timedelta
@@ -9,7 +10,7 @@ import os
 
 from database.database import get_db
 from database import crud
-from database.models import Email, EmailAccount, Attachment
+from database.models import Email, EmailAccount, Attachment, EmailLabel
 from services.email_service import EmailService
 from routers.users import get_current_account
 from config import get_settings
@@ -62,6 +63,16 @@ settings = get_settings()
 
 
 # ============ Schemas ============
+class LabelBriefResponse(BaseModel):
+    """标签简要信息（用于邮件列表）"""
+    id: int
+    name: str
+    color: str
+
+    class Config:
+        from_attributes = True
+
+
 class EmailResponse(BaseModel):
     """邮件响应模型 (符合 RFC 5322 标准)"""
     id: int
@@ -97,6 +108,9 @@ class EmailResponse(BaseModel):
     thread_id: Optional[str]
     in_reply_to: Optional[str]
 
+    # 标签
+    labels: List[LabelBriefResponse] = []
+
     class Config:
         from_attributes = True
 
@@ -117,8 +131,9 @@ class EmailListResponse(BaseModel):
 
 
 class EmailDetailResponse(EmailResponse):
-    """邮件详情响应（包含附件）"""
+    """邮件详情响应（包含附件和标签）"""
     attachments: List[AttachmentResponse] = []
+    labels: List[LabelBriefResponse] = []
 
 
 class FetchEmailsRequest(BaseModel):
@@ -163,8 +178,11 @@ async def get_emails(
     total_result = await db.execute(count_query)
     total = total_result.scalar()
 
-    # 构建数据查询
-    query = select(Email).where(*base_conditions)
+    # 构建数据查询（包含标签和文件夹）
+    query = select(Email).where(*base_conditions).options(
+        selectinload(Email.labels),
+        selectinload(Email.folders)
+    )
 
     # 排序
     if sort_by == "date_asc":
@@ -265,12 +283,14 @@ async def get_email(
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """获取单封邮件详情（包含附件）"""
-    from sqlalchemy.orm import selectinload
-
+    """获取单封邮件详情（包含附件、标签和文件夹）"""
     result = await db.execute(
         select(Email)
-        .options(selectinload(Email.attachments))
+        .options(
+            selectinload(Email.attachments),
+            selectinload(Email.labels),
+            selectinload(Email.folders)
+        )
         .where(Email.id == email_id, Email.account_id == account.id)
     )
     email = result.scalar_one_or_none()
@@ -858,8 +878,14 @@ async def mark_email_as_read(
 
     email.is_read = True
     await db.commit()
-    await db.refresh(email)
-    return email
+
+    # 重新查询以加载关系字段（避免 MissingGreenlet 错误）
+    result = await db.execute(
+        select(Email)
+        .options(selectinload(Email.labels), selectinload(Email.folders))
+        .where(Email.id == email_id)
+    )
+    return result.scalar_one()
 
 
 @router.patch("/{email_id}/unread", response_model=EmailResponse)
@@ -879,8 +905,14 @@ async def mark_email_as_unread(
 
     email.is_read = False
     await db.commit()
-    await db.refresh(email)
-    return email
+
+    # 重新查询以加载关系字段（避免 MissingGreenlet 错误）
+    result = await db.execute(
+        select(Email)
+        .options(selectinload(Email.labels), selectinload(Email.folders))
+        .where(Email.id == email_id)
+    )
+    return result.scalar_one()
 
 
 @router.patch("/{email_id}/flag", response_model=EmailResponse)
@@ -900,8 +932,14 @@ async def flag_email(
 
     email.is_flagged = True
     await db.commit()
-    await db.refresh(email)
-    return email
+
+    # 重新查询以加载关系字段（避免 MissingGreenlet 错误）
+    result = await db.execute(
+        select(Email)
+        .options(selectinload(Email.labels), selectinload(Email.folders))
+        .where(Email.id == email_id)
+    )
+    return result.scalar_one()
 
 
 @router.patch("/{email_id}/unflag", response_model=EmailResponse)
@@ -921,8 +959,14 @@ async def unflag_email(
 
     email.is_flagged = False
     await db.commit()
-    await db.refresh(email)
-    return email
+
+    # 重新查询以加载关系字段（避免 MissingGreenlet 错误）
+    result = await db.execute(
+        select(Email)
+        .options(selectinload(Email.labels), selectinload(Email.folders))
+        .where(Email.id == email_id)
+    )
+    return result.scalar_one()
 
 
 @router.delete("/{email_id}")

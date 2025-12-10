@@ -310,6 +310,114 @@ const api = {
 
   async setDefaultSignature(id) {
     return instance.post(`/signatures/${id}/set-default`)
+  },
+
+  // Labels - 邮件标签
+  async getLabels() {
+    return instance.get('/labels')
+  },
+
+  async getLabel(id) {
+    return instance.get(`/labels/${id}`)
+  },
+
+  async createLabel(data) {
+    return instance.post('/labels', data)
+  },
+
+  async updateLabel(id, data) {
+    return instance.put(`/labels/${id}`, data)
+  },
+
+  async deleteLabel(id) {
+    return instance.delete(`/labels/${id}`)
+  },
+
+  async addLabelsToEmail(emailId, labelIds) {
+    return instance.post(`/labels/emails/${emailId}`, { label_ids: labelIds })
+  },
+
+  async removeLabelFromEmail(emailId, labelId) {
+    return instance.delete(`/labels/emails/${emailId}/${labelId}`)
+  },
+
+  async getEmailLabels(emailId) {
+    return instance.get(`/labels/emails/${emailId}`)
+  },
+
+  // Folders - 文件夹
+  async getFolders() {
+    return instance.get('/folders')
+  },
+
+  async getFolder(id) {
+    return instance.get(`/folders/${id}`)
+  },
+
+  async createFolder(data) {
+    return instance.post('/folders', data)
+  },
+
+  async updateFolder(id, data) {
+    return instance.put(`/folders/${id}`, data)
+  },
+
+  async deleteFolder(id) {
+    return instance.delete(`/folders/${id}`)
+  },
+
+  async addEmailsToFolder(folderId, emailIds) {
+    return instance.post(`/folders/${folderId}/emails`, { email_ids: emailIds })
+  },
+
+  async removeEmailFromFolder(folderId, emailId) {
+    return instance.delete(`/folders/${folderId}/emails/${emailId}`)
+  },
+
+  async getFolderEmails(folderId, params = {}) {
+    return instance.get(`/folders/${folderId}/emails`, { params })
+  },
+
+  // Calendar - 日历事件
+  async getCalendarEvents(params = {}) {
+    return instance.get('/calendar/events', { params })
+  },
+
+  async getCalendarEvent(id) {
+    return instance.get(`/calendar/events/${id}`)
+  },
+
+  async createCalendarEvent(data) {
+    return instance.post('/calendar/events', data)
+  },
+
+  async updateCalendarEvent(id, data) {
+    return instance.put(`/calendar/events/${id}`, data)
+  },
+
+  async deleteCalendarEvent(id) {
+    return instance.delete(`/calendar/events/${id}`)
+  },
+
+  async createEventFromEmail(emailId, data) {
+    return instance.post(`/calendar/events/from-email/${emailId}`, data)
+  },
+
+  async getEventsByEmail(emailId) {
+    return instance.get(`/calendar/events/by-email/${emailId}`)
+  },
+
+  // AI Extract - AI 邮件信息提取
+  async extractEmail(emailId, force = false) {
+    return instance.post(`/ai/extract/${emailId}`, null, { params: { force } })
+  },
+
+  async getExtraction(emailId) {
+    return instance.get(`/ai/extract/${emailId}`)
+  },
+
+  async deleteExtraction(emailId) {
+    return instance.delete(`/ai/extract/${emailId}`)
   }
 }
 

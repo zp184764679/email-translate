@@ -16,6 +16,7 @@
           <el-button :icon="Star" @click="handleFlag">
             {{ email?.is_flagged ? '取消标记' : '标记' }}
           </el-button>
+          <el-button :icon="CollectionTag" @click="openLabelSelector">标签</el-button>
         </el-button-group>
       </div>
       <div class="toolbar-right">
@@ -47,6 +48,18 @@
             size="small"
           >
             {{ email.is_translated ? '已翻译' : getLanguageName(email.language_detected) }}
+          </el-tag>
+          <!-- 自定义标签 -->
+          <el-tag
+            v-for="label in (email.labels || [])"
+            :key="label.id"
+            :color="label.color"
+            :style="{ color: getTextColor(label.color) }"
+            size="small"
+            closable
+            @close="removeLabel(label.id)"
+          >
+            {{ label.name }}
           </el-tag>
         </div>
       </div>
@@ -195,6 +208,13 @@
         <div class="body-html" v-html="sanitizeHtml(email.body_html)"></div>
       </el-dialog>
 
+      <!-- AI 智能提取面板 -->
+      <ExtractionPanel
+        v-if="email.id"
+        :email-id="email.id"
+        @event-created="handleEventCreated"
+      />
+
       <!-- 邮件线程区域 -->
       <div class="thread-section" v-if="threadEmails.length > 1">
         <div class="section-header">
@@ -335,7 +355,7 @@
                 clearable
                 style="width: 150px;"
               >
-                <el-option label="不使用签名" :value="null" />
+                <el-option label="不使用签名" value="" />
                 <el-option
                   v-for="sig in signatures"
                   :key="sig.id"
@@ -383,6 +403,14 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- 标签选择器 -->
+    <LabelSelector
+      v-model="showLabelSelector"
+      :email-id="email?.id"
+      :current-labels="email?.labels || []"
+      @saved="handleLabelsSaved"
+    />
   </div>
 </template>
 
@@ -391,13 +419,16 @@ import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeft, Back, ChatLineSquare, Right, Delete, Star,
-  Printer, Paperclip, Document, Download, InfoFilled, DocumentCopy, View, ArrowDown
+  Printer, Paperclip, Document, Download, InfoFilled, DocumentCopy, View, ArrowDown, CollectionTag
 } from '@element-plus/icons-vue'
+import LabelSelector from '@/components/LabelSelector.vue'
+import ExtractionPanel from '@/components/ExtractionPanel.vue'
 import api, { getStorageKey } from '@/api'
 import dayjs from 'dayjs'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import DOMPurify from 'dompurify'
 import { useUserStore } from '@/stores/user'
+import { useKeyboardShortcuts } from '@/composables/useKeyboardShortcuts'
 
 const route = useRoute()
 const router = useRouter()
@@ -412,6 +443,125 @@ const submitting = ref(false)
 const downloadingAttachments = ref({})  // 跟踪每个附件的下载状态
 const threadEmails = ref([])  // 邮件线程
 const signatures = ref([])  // 签名列表
+const showLabelSelector = ref(false)  // 标签选择器可见性
+
+// 邮件详情快捷键
+const { setEnabled: setShortcutsEnabled } = useKeyboardShortcuts([
+  {
+    key: 'r',
+    handler: () => {
+      if (!showReplyDialog.value) {
+        handleReply()
+      }
+    }
+  },
+  {
+    key: 'a',
+    handler: () => {
+      if (!showReplyDialog.value) {
+        handleReplyAll()
+      }
+    }
+  },
+  {
+    key: 'f',
+    handler: () => {
+      if (!showReplyDialog.value) {
+        handleForward()
+      }
+    }
+  },
+  {
+    key: 's',
+    handler: () => {
+      if (!showReplyDialog.value) {
+        handleFlag()
+      }
+    }
+  },
+  {
+    key: 'd',
+    handler: () => {
+      if (!showReplyDialog.value) {
+        handleDelete()
+      }
+    }
+  },
+  {
+    key: 'u',
+    handler: async () => {
+      if (!showReplyDialog.value && email.value) {
+        try {
+          await api.markAsUnread(email.value.id)
+          email.value.is_read = false
+          ElMessage.success('已标记为未读')
+        } catch (e) {
+          ElMessage.error('操作失败')
+        }
+      }
+    }
+  },
+  {
+    key: 'Escape',
+    handler: () => {
+      if (showReplyDialog.value) {
+        showReplyDialog.value = false
+      } else if (showHtmlDialog.value) {
+        showHtmlDialog.value = false
+      } else {
+        router.push('/emails')
+      }
+    }
+  },
+  {
+    key: 'j',
+    handler: () => {
+      // 下一封（线程中）
+      if (!showReplyDialog.value && threadEmails.value.length > 1) {
+        const currentIndex = threadEmails.value.findIndex(e => e.id === email.value?.id)
+        if (currentIndex < threadEmails.value.length - 1) {
+          navigateToEmail(threadEmails.value[currentIndex + 1].id)
+        }
+      }
+    }
+  },
+  {
+    key: 'k',
+    handler: () => {
+      // 上一封（线程中）
+      if (!showReplyDialog.value && threadEmails.value.length > 1) {
+        const currentIndex = threadEmails.value.findIndex(e => e.id === email.value?.id)
+        if (currentIndex > 0) {
+          navigateToEmail(threadEmails.value[currentIndex - 1].id)
+        }
+      }
+    }
+  },
+  {
+    key: 'Enter',
+    ctrl: true,
+    handler: () => {
+      // Ctrl+Enter 发送回复
+      if (showReplyDialog.value && !submitting.value) {
+        submitReply()
+      }
+    }
+  },
+  {
+    key: 'l',
+    handler: () => {
+      // 打开标签选择器
+      if (!showReplyDialog.value && email.value) {
+        openLabelSelector()
+      }
+    }
+  }
+])
+
+// 对话框打开时禁用部分快捷键
+watch(showReplyDialog, (val) => {
+  // 不完全禁用，只是在 handler 中检查状态
+})
 
 // Split View 滚动同步
 const originalPane = ref(null)
@@ -455,7 +605,7 @@ const replyForm = reactive({
   body_chinese: '',
   body_translated: '',
   target_language: 'en',
-  signature_id: null
+  signature_id: ''
 })
 
 // 标签式邮箱输入
@@ -802,6 +952,11 @@ function handleForward() {
   ElMessage.info('转发功能开发中')
 }
 
+// AI 提取 - 日程创建成功回调
+function handleEventCreated() {
+  ElMessage.success('日程已创建，可在日历中查看')
+}
+
 async function handleDelete() {
   try {
     await ElMessageBox.confirm('确定要删除这封邮件吗？', '删除确认', {
@@ -840,6 +995,40 @@ async function handleFlag() {
     console.error('Failed to toggle flag:', e)
     ElMessage.error('操作失败')
   }
+}
+
+// 标签相关函数
+function openLabelSelector() {
+  showLabelSelector.value = true
+}
+
+function handleLabelsSaved(labels) {
+  if (email.value) {
+    email.value.labels = labels
+  }
+}
+
+async function removeLabel(labelId) {
+  if (!email.value) return
+
+  try {
+    await api.removeLabelFromEmail(email.value.id, labelId)
+    email.value.labels = (email.value.labels || []).filter(l => l.id !== labelId)
+    ElMessage.success('标签已移除')
+  } catch (e) {
+    ElMessage.error('移除标签失败')
+  }
+}
+
+// 根据背景色计算文字颜色
+function getTextColor(bgColor) {
+  if (!bgColor) return '#333'
+  const hex = bgColor.replace('#', '')
+  const r = parseInt(hex.substr(0, 2), 16)
+  const g = parseInt(hex.substr(2, 2), 16)
+  const b = parseInt(hex.substr(4, 2), 16)
+  const brightness = (r * 299 + g * 587 + b * 114) / 1000
+  return brightness > 128 ? '#333' : '#fff'
 }
 
 function handlePrint() {

@@ -14,6 +14,14 @@ export const useUserStore = defineStore('user', () => {
   const autoFetchTimer = ref(null)  // 自动拉取定时器
   const isFetching = ref(false)  // 是否正在拉取
 
+  // 布局设置：list（列表）, right（右侧预览）, bottom（底部预览）
+  const layoutMode = ref(localStorage.getItem(getStorageKey('layoutMode')) || 'list')
+
+  function setLayoutMode(mode) {
+    layoutMode.value = mode
+    localStorage.setItem(getStorageKey('layoutMode'), mode)
+  }
+
   const isLoggedIn = computed(() => !!token.value)
 
   function triggerEmailRefresh() {
@@ -130,10 +138,12 @@ export const useUserStore = defineStore('user', () => {
     lastFetchTime,
     isFetching,
     isLoggedIn,
+    layoutMode,
     login,
     logout,
     fetchAccountInfo,
     triggerEmailRefresh,
+    setLayoutMode,
     autoFetchEmails,
     startAutoFetch,
     stopAutoFetch,

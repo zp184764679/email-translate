@@ -1,8 +1,26 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey, JSON, Float
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey, JSON, Float, Table
 from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.orm import relationship
 from .database import Base
+
+
+# 邮件-标签 多对多关联表
+email_label_mappings = Table(
+    'email_label_mappings',
+    Base.metadata,
+    Column('email_id', Integer, ForeignKey('emails.id', ondelete='CASCADE'), primary_key=True),
+    Column('label_id', Integer, ForeignKey('email_labels.id', ondelete='CASCADE'), primary_key=True)
+)
+
+# 邮件-文件夹 多对多关联表
+email_folder_mappings = Table(
+    'email_folder_mappings',
+    Base.metadata,
+    Column('email_id', Integer, ForeignKey('emails.id', ondelete='CASCADE'), primary_key=True),
+    Column('folder_id', Integer, ForeignKey('email_folders.id', ondelete='CASCADE'), primary_key=True),
+    Column('added_at', DateTime, default=datetime.utcnow)
+)
 
 
 class EmailAccount(Base):
@@ -75,6 +93,8 @@ class Email(Base):
     account = relationship("EmailAccount", back_populates="emails")
     supplier = relationship("Supplier", back_populates="emails")
     attachments = relationship("Attachment", back_populates="email")
+    labels = relationship("EmailLabel", secondary=email_label_mappings, back_populates="emails")
+    folders = relationship("EmailFolder", secondary=email_folder_mappings, back_populates="emails")
 
 
 class Attachment(Base):
@@ -292,6 +312,102 @@ class TranslationUsage(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # 复合唯一索引
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
+
+
+class EmailLabel(Base):
+    """邮件标签表 - 用户自定义标签"""
+    __tablename__ = "email_labels"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("email_accounts.id"), nullable=False)
+    name = Column(String(50), nullable=False)
+    color = Column(String(20), default="#409EFF")  # 标签颜色
+    description = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # 关系
+    emails = relationship("Email", secondary=email_label_mappings, back_populates="labels")
+
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
+
+
+class EmailFolder(Base):
+    """邮件文件夹表 - 用户自定义文件夹"""
+    __tablename__ = "email_folders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("email_accounts.id"), nullable=False)
+    name = Column(String(100), nullable=False)
+    parent_id = Column(Integer, ForeignKey("email_folders.id"), nullable=True)  # 支持嵌套文件夹
+    color = Column(String(20), default="#409EFF")
+    icon = Column(String(50), default="folder")
+    sort_order = Column(Integer, default=0)
+    is_system = Column(Boolean, default=False)  # 系统文件夹不可删除
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # 关系
+    emails = relationship("Email", secondary=email_folder_mappings, back_populates="folders")
+    children = relationship("EmailFolder", backref="parent", remote_side=[id], foreign_keys=[parent_id])
+
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
+
+
+class CalendarEvent(Base):
+    """日历事件表 - 支持从邮件创建日程"""
+    __tablename__ = "calendar_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("email_accounts.id"), nullable=False)
+    email_id = Column(Integer, ForeignKey("emails.id"), nullable=True)  # 关联的邮件（可选）
+
+    title = Column(String(200), nullable=False)
+    description = Column(Text)
+    location = Column(String(200))
+
+    start_time = Column(DateTime, nullable=False)
+    end_time = Column(DateTime, nullable=False)
+    all_day = Column(Boolean, default=False)
+
+    color = Column(String(20), default="#409EFF")
+    reminder_minutes = Column(Integer, default=15)  # 提前提醒分钟数
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # 关系
+    email = relationship("Email")
+
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
+
+
+class EmailExtraction(Base):
+    """AI 邮件信息提取表 - 存储 Ollama 提取的结构化信息"""
+    __tablename__ = "email_extractions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email_id = Column(Integer, ForeignKey("emails.id"), unique=True, nullable=False)
+
+    summary = Column(Text)  # AI 生成的摘要
+    dates = Column(JSON)  # 提取的日期列表 [{"date": "2024-12-15", "context": "交货日期"}]
+    amounts = Column(JSON)  # 提取的金额列表 [{"amount": 1000, "currency": "USD", "context": "订单总额"}]
+    contacts = Column(JSON)  # 提取的联系人 [{"name": "张三", "email": "...", "phone": "..."}]
+    action_items = Column(JSON)  # 待办事项 [{"task": "确认订单", "priority": "high"}]
+    key_points = Column(JSON)  # 关键信息点
+
+    extracted_at = Column(DateTime, default=datetime.utcnow)
+
+    # 关系
+    email = relationship("Email")
+
     __table_args__ = (
         {'mysql_engine': 'InnoDB'},
     )
