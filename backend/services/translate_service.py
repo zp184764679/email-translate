@@ -3,19 +3,16 @@ from typing import List, Dict, Optional, Tuple
 import json
 import re
 import os
-import hmac
-import hashlib
 from datetime import datetime, timezone
 
 
 class TranslateService:
-    """Translation service supporting DeepL, Claude API, Ollama, and Tencent TMT
+    """Translation service supporting DeepL, Claude API, and Ollama
 
     统一 API 模式：
-    - ollama: 本地测试用
-    - claude: 正式 API（支持实时和 Batch）
-    - deepl: DeepL API
-    - tencent: 腾讯翻译 API（机器翻译，速度快，格式保持好）
+    - ollama: 本地 LLM 翻译（免费，质量好，主力引擎）
+    - claude: Claude API（复杂邮件用）
+    - deepl: DeepL API（备用）
 
     切换方式：修改 .env 中的 TRANSLATE_PROVIDER
     """
@@ -201,22 +198,20 @@ class TranslateService:
         "단가": "单价",
     }
 
-    def __init__(self, api_key: str = None, provider: str = "deepl", proxy_url: str = None,
+    def __init__(self, api_key: str = None, provider: str = "ollama", proxy_url: str = None,
                  is_free_api: bool = True, ollama_base_url: str = None, ollama_model: str = None,
-                 claude_model: str = None, tencent_secret_id: str = None, tencent_secret_key: str = None):
+                 claude_model: str = None, **kwargs):
         """
         Initialize translate service
 
         Args:
             api_key: API key (DeepL or Claude)
-            provider: "deepl", "claude", "ollama", or "tencent"
+            provider: "ollama", "claude", or "deepl"
             proxy_url: Proxy URL (e.g., "http://127.0.0.1:7890")
             is_free_api: For DeepL, whether using free API (default True)
             ollama_base_url: Ollama API base URL (e.g., "http://localhost:11434")
             ollama_model: Ollama model name (e.g., "qwen3:8b")
             claude_model: Claude model name (e.g., "claude-sonnet-4-20250514")
-            tencent_secret_id: Tencent Cloud SecretId
-            tencent_secret_key: Tencent Cloud SecretKey
         """
         self.api_key = api_key
         self.provider = provider
@@ -224,8 +219,6 @@ class TranslateService:
         self.ollama_base_url = ollama_base_url or "http://localhost:11434"
         self.ollama_model = ollama_model or "qwen3:8b"
         self.claude_model = claude_model or "claude-sonnet-4-20250514"
-        self.tencent_secret_id = tencent_secret_id
-        self.tencent_secret_key = tencent_secret_key
 
         # Get proxy from parameter or env var
         proxy = proxy_url or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
@@ -793,246 +786,6 @@ Please check the following items:
             print(f"Claude translation error: {e}")
             raise
 
-    # ============ Tencent TMT Translation ============
-    def _get_tencent_auth_headers(self, payload: str) -> Dict:
-        """生成腾讯云 API 签名 V3"""
-        service = "tmt"
-        host = "tmt.tencentcloudapi.com"
-        algorithm = "TC3-HMAC-SHA256"
-
-        # 获取当前时间
-        now = datetime.now(timezone.utc)
-        timestamp = int(now.timestamp())
-        date = now.strftime("%Y-%m-%d")
-
-        # 步骤1: 拼接规范请求串
-        http_request_method = "POST"
-        canonical_uri = "/"
-        canonical_querystring = ""
-        ct = "application/json; charset=utf-8"
-        canonical_headers = f"content-type:{ct}\nhost:{host}\nx-tc-action:texttranslate\n"
-        signed_headers = "content-type;host;x-tc-action"
-        hashed_request_payload = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-        canonical_request = (http_request_method + "\n" + canonical_uri + "\n" +
-                           canonical_querystring + "\n" + canonical_headers + "\n" +
-                           signed_headers + "\n" + hashed_request_payload)
-
-        # 步骤2: 拼接待签名字符串
-        credential_scope = date + "/" + service + "/tc3_request"
-        hashed_canonical_request = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
-        string_to_sign = (algorithm + "\n" + str(timestamp) + "\n" +
-                         credential_scope + "\n" + hashed_canonical_request)
-
-        # 步骤3: 计算签名
-        def sign(key, msg):
-            return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
-
-        secret_date = sign(("TC3" + self.tencent_secret_key).encode("utf-8"), date)
-        secret_service = sign(secret_date, service)
-        secret_signing = sign(secret_service, "tc3_request")
-        signature = hmac.new(secret_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
-
-        # 步骤4: 拼接 Authorization
-        authorization = (algorithm + " " +
-                        "Credential=" + self.tencent_secret_id + "/" + credential_scope + ", " +
-                        "SignedHeaders=" + signed_headers + ", " +
-                        "Signature=" + signature)
-
-        return {
-            "Authorization": authorization,
-            "Content-Type": ct,
-            "Host": host,
-            "X-TC-Action": "TextTranslate",
-            "X-TC-Timestamp": str(timestamp),
-            "X-TC-Version": "2018-03-21",
-            "X-TC-Region": "ap-guangzhou",  # 广州区域
-        }
-
-    def translate_with_tencent(self, text: str, target_lang: str = "zh",
-                                source_lang: str = None) -> str:
-        """
-        使用腾讯翻译 API 翻译文本
-
-        优点：速度快，格式保持好，价格便宜
-        文档：https://cloud.tencent.com/document/api/551/15619
-
-        注意：腾讯翻译单次请求限制 6000 字符，超长文本会自动分段翻译
-        """
-        # 先检查额度是否可用
-        if not self._check_tencent_quota():
-            raise Exception("腾讯翻译本月免费额度已用完，请等待下月重置或使用其他翻译引擎")
-
-        # 腾讯翻译单次限制 5000 字符（留一些余量）
-        MAX_LENGTH = 5000
-
-        # 如果文本超长，分段翻译
-        if len(text) > MAX_LENGTH:
-            return self._translate_long_text_tencent(text, target_lang, source_lang)
-
-        return self._translate_single_tencent(text, target_lang, source_lang)
-
-    def _check_tencent_quota(self) -> bool:
-        """检查腾讯翻译额度是否可用"""
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # 在异步上下文中，无法同步等待结果，默认允许
-                return True
-            else:
-                return loop.run_until_complete(self._check_tencent_quota_async())
-        except RuntimeError:
-            return asyncio.run(self._check_tencent_quota_async())
-
-    async def _check_tencent_quota_async(self) -> bool:
-        """异步检查腾讯翻译额度"""
-        try:
-            from services.usage_service import check_translation_quota
-            result = await check_translation_quota("tencent")
-            if not result.get('available', True):
-                print(f"[UsageService] 腾讯翻译不可用: 已使用 {result.get('usage_percent', 0)*100:.1f}%")
-                return False
-            return True
-        except Exception as e:
-            print(f"[UsageService] 额度检查失败: {e}，默认允许翻译")
-            return True
-
-    def _translate_long_text_tencent(self, text: str, target_lang: str, source_lang: str) -> str:
-        """分段翻译长文本（按段落分割，保持格式）"""
-        MAX_LENGTH = 5000
-
-        # 按双换行分段（段落）
-        paragraphs = text.split('\n\n')
-        translated_parts = []
-        current_chunk = ""
-
-        for para in paragraphs:
-            # 如果当前块加上这段不超限，就合并
-            if len(current_chunk) + len(para) + 2 < MAX_LENGTH:
-                if current_chunk:
-                    current_chunk += '\n\n' + para
-                else:
-                    current_chunk = para
-            else:
-                # 当前块已满，先翻译它
-                if current_chunk:
-                    translated_parts.append(self._translate_single_tencent(current_chunk, target_lang, source_lang))
-                # 如果单段就超长，需要按行分割
-                if len(para) > MAX_LENGTH:
-                    lines = para.split('\n')
-                    line_chunk = ""
-                    for line in lines:
-                        if len(line_chunk) + len(line) + 1 < MAX_LENGTH:
-                            if line_chunk:
-                                line_chunk += '\n' + line
-                            else:
-                                line_chunk = line
-                        else:
-                            if line_chunk:
-                                translated_parts.append(self._translate_single_tencent(line_chunk, target_lang, source_lang))
-                            line_chunk = line
-                    if line_chunk:
-                        current_chunk = line_chunk
-                    else:
-                        current_chunk = ""
-                else:
-                    current_chunk = para
-
-        # 翻译最后一块
-        if current_chunk:
-            translated_parts.append(self._translate_single_tencent(current_chunk, target_lang, source_lang))
-
-        return '\n\n'.join(translated_parts)
-
-    def _translate_single_tencent(self, text: str, target_lang: str, source_lang: str) -> str:
-        """单次腾讯翻译请求"""
-        # 语言代码映射
-        lang_map = {
-            "zh": "zh",
-            "en": "en",
-            "ja": "ja",
-            "ko": "ko",
-            "de": "de",
-            "fr": "fr",
-            "es": "es",
-            "pt": "pt",
-            "ru": "ru",
-        }
-
-        target = lang_map.get(target_lang, target_lang)
-        source = lang_map.get(source_lang, "auto") if source_lang else "auto"
-
-        payload = json.dumps({
-            "SourceText": text,
-            "Source": source,
-            "Target": target,
-            "ProjectId": 0
-        })
-
-        headers = self._get_tencent_auth_headers(payload)
-
-        try:
-            response = self.http_client.post(
-                "https://tmt.tencentcloudapi.com",
-                content=payload,
-                headers=headers
-            )
-            response.raise_for_status()
-
-            result = response.json()
-
-            if "Response" in result and "TargetText" in result["Response"]:
-                translated = result["Response"]["TargetText"]
-                char_count = len(text)
-                print(f"[Tencent TMT] Translated {source} → {target} ({char_count} chars)")
-
-                # 记录用量统计（同步方式）
-                self._record_tencent_usage(char_count)
-
-                return translated
-            elif "Response" in result and "Error" in result["Response"]:
-                error = result["Response"]["Error"]
-                raise Exception(f"Tencent API error: {error.get('Code')} - {error.get('Message')}")
-            else:
-                raise Exception(f"Unexpected response: {result}")
-
-        except httpx.HTTPStatusError as e:
-            print(f"Tencent API HTTP error: {e.response.status_code} - {e.response.text}")
-            raise
-        except Exception as e:
-            print(f"Tencent translation error: {e}")
-            raise
-
-    def _record_tencent_usage(self, char_count: int):
-        """同步记录腾讯翻译用量"""
-        import asyncio
-        try:
-            # 尝试获取当前事件循环
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # 如果在异步上下文中，创建后台任务（忽略结果）
-                task = asyncio.create_task(self._record_tencent_usage_async(char_count))
-                # 添加回调来忽略任务被取消的情况
-                task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
-            else:
-                # 同步执行
-                loop.run_until_complete(self._record_tencent_usage_async(char_count))
-        except RuntimeError:
-            # 没有事件循环，创建新的
-            asyncio.run(self._record_tencent_usage_async(char_count))
-
-    async def _record_tencent_usage_async(self, char_count: int):
-        """异步记录腾讯翻译用量"""
-        try:
-            from services.usage_service import record_translation_usage
-            result = await record_translation_usage("tencent", char_count)
-            if result.get('warning'):
-                print(f"[UsageService] {result['warning']}")
-            if result.get('is_disabled'):
-                print(f"[UsageService] ⚠️ 腾讯翻译已自动禁用，请下月再使用或手动重新启用")
-        except Exception as e:
-            print(f"[UsageService] Failed to record usage: {e}")
-
     def _record_token_usage(self, input_tokens: int, output_tokens: int, text_length: int,
                             cache_creation_tokens: int = 0, cache_read_tokens: int = 0):
         """记录 token 使用情况（含缓存统计）"""
@@ -1144,16 +897,14 @@ Please check the following items:
             context: Previous conversation context (not used for DeepL)
             source_lang: Source language hint
         """
-        if self.provider == "deepl":
-            return self.translate_with_deepl(text, target_lang, source_lang)
-        elif self.provider == "ollama":
+        if self.provider == "ollama":
             return self.translate_with_ollama(text, target_lang, source_lang, glossary)
         elif self.provider == "claude":
             return self.translate_with_claude(text, target_lang, source_lang, glossary)
-        elif self.provider == "tencent":
-            return self.translate_with_tencent(text, target_lang, source_lang)
+        elif self.provider == "deepl":
+            return self.translate_with_deepl(text, target_lang, source_lang)
         else:
-            raise ValueError(f"Unknown provider: {self.provider}")
+            raise ValueError(f"Unknown provider: {self.provider}. Supported: ollama, claude, deepl")
 
     def translate_with_smart_routing(self, text: str, subject: str = "",
                                       target_lang: str = "zh",
@@ -1165,13 +916,8 @@ Please check the following items:
         策略：
         1. Ollama 快速评估复杂度（规则优先，必要时用LLM）
         2. 根据复杂度选择引擎：
-           - 简单(≤30分): Ollama 直接翻译（分析+翻译一起做，省时）
-           - 中等(31-70): 腾讯翻译（速度快，格式好）
-           - 复杂(>70): 拆分翻译（正文用Claude，签名用腾讯省钱）
-
-        额度保护：
-        - 腾讯/DeepL 额度用完时自动降级
-        - Claude 作为最终兜底
+           - 简单/中等(≤50分): Ollama 直接翻译（免费，质量好）
+           - 复杂(>50): Claude（正文）+ Ollama（签名）
 
         Returns:
             {
@@ -1202,8 +948,8 @@ Please check the following items:
             print(f"[SmartRouting] Score {score} <= {OLLAMA_THRESHOLD} -> Ollama")
             return self._translate_simple(text, target_lang, source_lang, glossary, score)
         else:
-            # 中等偏上+复杂邮件：Claude（正文）+ 腾讯（签名）节省 token
-            print(f"[SmartRouting] Score {score} > {OLLAMA_THRESHOLD} -> Claude+Tencent")
+            # 中等偏上+复杂邮件：Claude（正文）+ Ollama（签名）
+            print(f"[SmartRouting] Score {score} > {OLLAMA_THRESHOLD} -> Claude+Ollama")
             return self._translate_complex(text, subject, target_lang, source_lang, glossary, score)
 
     def _translate_simple(self, text: str, target_lang: str, source_lang: str,
@@ -1238,82 +984,10 @@ Please check the following items:
                 "has_quote": has_quote
             }
         except Exception as e:
-            print(f"[SmartRouting] Ollama failed: {e}, falling back to tencent")
-            # 回退到腾讯翻译（_translate_with_fallback 也会处理邮件链）
+            print(f"[SmartRouting] Ollama failed: {e}, falling back to Claude")
+            # 回退到 Claude（_translate_with_fallback 也会处理邮件链）
             return self._translate_with_fallback(text, target_lang, source_lang, glossary,
                                                   {"level": "simple", "score": score})
-
-    def _translate_medium(self, text: str, target_lang: str, source_lang: str,
-                          glossary: List[Dict], score: int) -> Dict:
-        """
-        中等邮件翻译 - 拆分翻译策略
-
-        使用 Ollama + /think 拆分邮件结构：
-        - 正文 → DeepL（翻译质量高）
-        - 签名/地址/问候语 → 腾讯翻译（格式保持好）
-        """
-        from services.email_analyzer import get_email_analyzer
-
-        try:
-            # 使用 Ollama + /think 分析邮件结构
-            analyzer = get_email_analyzer(self.ollama_base_url, self.ollama_model)
-            analysis = analyzer.analyze_email(text, "")  # 中等邮件不需要主题
-
-            # 如果成功拆分出正文
-            if analysis.structure.body:
-                print(f"[SmartRouting] Medium email -> Split: greeting={bool(analysis.structure.greeting)}, signature={bool(analysis.structure.signature)}")
-
-                translated_parts = []
-
-                # 翻译问候语（用腾讯，格式好）
-                if analysis.structure.greeting:
-                    try:
-                        greeting_translated = self._translate_with_tencent_or_fallback(
-                            analysis.structure.greeting, target_lang, source_lang
-                        )
-                        translated_parts.append(greeting_translated)
-                    except:
-                        translated_parts.append(analysis.structure.greeting)
-
-                # 翻译正文（用 DeepL，质量高）
-                try:
-                    body_translated = self._translate_body_with_deepl(
-                        analysis.structure.body, target_lang, source_lang, glossary
-                    )
-                    translated_parts.append(body_translated)
-                    body_provider = "deepl"
-                except Exception as e:
-                    print(f"[SmartRouting] DeepL failed for body: {e}, falling back to tencent")
-                    body_translated = self._translate_with_tencent_or_fallback(
-                        analysis.structure.body, target_lang, source_lang
-                    )
-                    translated_parts.append(body_translated)
-                    body_provider = "tencent"
-
-                # 翻译签名（用腾讯，格式好）
-                if analysis.structure.signature:
-                    try:
-                        sig_translated = self._translate_with_tencent_or_fallback(
-                            analysis.structure.signature, target_lang, source_lang
-                        )
-                        translated_parts.append(sig_translated)
-                    except:
-                        translated_parts.append(analysis.structure.signature)
-
-                return {
-                    "translated_text": "\n\n".join(translated_parts),
-                    "provider_used": f"{body_provider}+tencent",
-                    "complexity": {"level": "medium", "score": score},
-                    "fallback_reason": None,
-                    "split_translation": True
-                }
-
-        except Exception as e:
-            print(f"[SmartRouting] Medium split failed: {e}, using fallback")
-
-        # 拆分失败，使用整体翻译回退
-        return self._translate_with_fallback(text, target_lang, source_lang, glossary,
-                                              {"level": "medium", "score": score})
 
     def _translate_complex(self, text: str, subject: str, target_lang: str,
                            source_lang: str, glossary: List[Dict], score: int) -> Dict:
@@ -1377,7 +1051,7 @@ Please check the following items:
 
     def _translate_with_ollama_or_fallback(self, text: str, target_lang: str,
                                             source_lang: str, glossary: List[Dict] = None) -> str:
-        """Ollama 翻译，失败则用腾讯/DeepL 回退"""
+        """Ollama 翻译，失败则用 DeepL 回退"""
         # 首选 Ollama（免费，质量好）
         if self.ollama_base_url:
             try:
@@ -1385,14 +1059,7 @@ Please check the following items:
             except Exception as e:
                 print(f"[SmartRouting] Ollama failed: {e}")
 
-        # 回退到腾讯
-        if self.tencent_secret_id and self._check_tencent_quota():
-            try:
-                return self.translate_with_tencent(text, target_lang, source_lang)
-            except Exception as e:
-                print(f"[SmartRouting] Tencent failed: {e}")
-
-        # 最后尝试 DeepL
+        # 回退到 DeepL
         if self.api_key and self._check_deepl_quota():
             try:
                 result = self.translate_with_deepl(text, target_lang, source_lang)
@@ -1401,12 +1068,7 @@ Please check the following items:
             except Exception as e:
                 print(f"[SmartRouting] DeepL failed: {e}")
 
-        raise Exception("Ollama、腾讯和DeepL都不可用")
-
-    def _translate_with_tencent_or_fallback(self, text: str, target_lang: str,
-                                             source_lang: str) -> str:
-        """腾讯翻译，失败则用 DeepL（保留兼容性）"""
-        return self._translate_with_ollama_or_fallback(text, target_lang, source_lang)
+        raise Exception("Ollama 和 DeepL 都不可用")
 
     def _translate_body_with_deepl(self, text: str, target_lang: str,
                                     source_lang: str, glossary: List[Dict]) -> str:
