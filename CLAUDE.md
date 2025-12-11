@@ -610,6 +610,110 @@ emails 表（新增字段）
 
 **当前测试**：先用本地 Ollama 模型测试定时任务流程，确认无误后再切换到 Claude Batch API
 
+## Celery 异步任务系统
+
+使用 Celery + Redis 实现后台异步任务，提升用户体验。
+
+### 架构
+
+```
+用户操作 → FastAPI（立即返回任务ID）→ 前端显示"处理中"
+                    ↓
+            Redis（消息队列）
+                    ↓
+            Celery Worker（后台执行）
+                    ↓
+            完成 → 更新数据库 → WebSocket 推送前端刷新
+```
+
+### 核心文件
+
+| 文件 | 说明 |
+|------|------|
+| `backend/celery_app.py` | Celery 配置和实例 |
+| `backend/tasks/translate_tasks.py` | 翻译任务（单个、批量、Batch轮询） |
+| `backend/tasks/email_tasks.py` | 邮件任务（拉取、发送、导出） |
+| `backend/tasks/ai_tasks.py` | AI 提取任务 |
+| `backend/tasks/maintenance_tasks.py` | 定时维护任务 |
+| `backend/websocket.py` | WebSocket 连接管理 |
+| `backend/services/notification_service.py` | 推送通知服务 |
+| `frontend/src/utils/websocket.js` | WebSocket 客户端 |
+
+### 任务列表
+
+| 任务 | 说明 | 原耗时 | 优化后 |
+|------|------|--------|--------|
+| `translate_email_task` | 翻译单封邮件 | 3-10s | 100ms响应 |
+| `batch_translate_task` | 批量翻译 | 400-500s | 30s响应 |
+| `fetch_emails_task` | 拉取邮件 | 50-100s | 15s响应 |
+| `send_email_task` | 发送邮件 | 2-7s | 100ms响应 |
+| `export_emails_task` | 导出邮件 | 5-15s | 100ms响应 |
+| `extract_email_info_task` | AI 提取 | 5-20s | 100ms响应 |
+
+### 定时任务
+
+| 任务 | 周期 | 说明 |
+|------|------|------|
+| `warm_translation_cache` | 每小时 | 预热高频翻译到 Redis |
+| `cleanup_old_translations` | 每天2点 | 清理30天未用缓存 |
+| `cleanup_temp_files` | 每天3点 | 清理临时导出文件 |
+| `rebuild_contacts_index` | 每天4点 | 重建联系人缓存 |
+| `poll_batch_status` | 每30秒 | 轮询 Batch API 状态 |
+
+### WebSocket 事件
+
+| 事件 | 说明 |
+|------|------|
+| `translation_complete` | 翻译完成 |
+| `translation_failed` | 翻译失败 |
+| `email_sent` | 邮件发送成功 |
+| `fetch_progress` | 拉取进度更新 |
+| `fetch_complete` | 拉取完成 |
+| `extraction_complete` | AI 提取完成 |
+| `export_ready` | 导出完成，可下载 |
+| `batch_translation_complete` | 批量翻译完成 |
+
+### 部署命令
+
+```bash
+# 1. 安装依赖
+pip install celery[redis] redis flower pymysql
+
+# 2. 启动 Celery Worker
+celery -A celery_app worker -l info
+
+# 3. 启动 Celery Beat（定时任务）
+celery -A celery_app beat -l info
+
+# 4. 启动 Flower 监控（可选）
+celery -A celery_app flower --port=5555
+
+# PM2 配置
+pm2 start "celery -A celery_app worker -l info" --name celery-worker
+pm2 start "celery -A celery_app beat -l info" --name celery-beat
+```
+
+### 环境变量
+
+```bash
+# .env 添加
+CELERY_BROKER_URL=redis://localhost:6379/1
+CELERY_RESULT_BACKEND=redis://localhost:6379/2
+```
+
+### 任务状态 API
+
+| 端点 | 说明 |
+|------|------|
+| `GET /api/tasks/{task_id}` | 查询任务状态 |
+| `DELETE /api/tasks/{task_id}` | 取消任务 |
+| `POST /api/tasks/translate/email/{id}` | 提交翻译任务 |
+| `POST /api/tasks/translate/batch` | 提交批量翻译 |
+| `POST /api/tasks/fetch` | 提交拉取任务 |
+| `POST /api/tasks/send/{draft_id}` | 提交发送任务 |
+| `POST /api/tasks/extract/{email_id}` | 提交提取任务 |
+| `POST /api/tasks/export` | 提交导出任务 |
+
 ## 功能实现状态
 
 对比标准邮件客户端（Outlook、Gmail），以下是各功能的实现状态：
