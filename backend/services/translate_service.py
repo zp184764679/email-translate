@@ -40,7 +40,7 @@ class TranslateService:
 
     # 核心术语表（优化版 - 仅收录高频+易错术语）
     CORE_GLOSSARY = {
-        # 行业缩写 - 必须明确定义
+        # ========== 行业缩写 ==========
         "NCR": "不合格品报告",
         "SA": "选别申请",
         "5M Application": "5M申请",
@@ -59,7 +59,20 @@ class TranslateService:
         "QA": "品质保证",
         "QC": "品质控制",
         "PO": "采购订单",
-        # 易错术语 - 字面意思与行业含义不同
+        "MOQ": "最小起订量",
+        "RFQ": "询价请求",
+        "BOM": "物料清单",
+        "OEM": "原厂委托制造",
+        "FOB": "离岸价",
+        "CIF": "到岸价",
+        "L/C": "信用证",
+        "T/T": "电汇",
+        "COD": "货到付款",
+        "NCV": "不合格品确认单",
+        "ACP": "异常品处理",
+
+        # ========== 易错术语（字面意思≠行业含义）==========
+        "treatment": "处理方式",  # 不是"治疗"
         "Escapee": "流出原因",
         "Occurrence": "发生原因",
         "Run-out": "跳动量",
@@ -67,7 +80,45 @@ class TranslateService:
         "Trend": "趋势数据",
         "Impex": "进出口部门",
         "Initial Part Qualification": "初物认定",
-        # 日语固定商务表达
+        "For Schedule": "待排期",  # 不是"对于时间表"
+        "Pick up": "提货/取货",
+        "Remarks": "备注",
+
+        # ========== 品质缺陷相关 ==========
+        "Plating peel-off": "电镀脱落",
+        "Collapsed boxes": "箱体塌陷",
+        "Detached strap": "捆扎带脱落",
+        "Defect": "缺陷",
+        "Plating Thickness": "镀层厚度",
+        "Stain Test": "污渍测试",
+        "Bending Test": "弯曲测试",
+        "Dirt": "脏污/异物",
+        "Rust": "锈蚀",
+        "Scratch": "划痕",
+        "Dent": "凹痕",
+        "Burr": "毛刺",
+        "Crack": "裂纹",
+        "Deformation": "变形",
+
+        # ========== 产品/物流相关 ==========
+        "Shaft": "轴类零件",  # 不是简单的"轴"
+        "Pallet": "托盘",
+        "Container": "集装箱",
+        "20ft": "20尺柜",
+        "40ft": "40尺柜",
+        "Blue Ring": "蓝圈（产品型号）",  # 型号保持原样
+        "MM": "MM（产品型号）",  # 型号保持原样，不是"毫米"
+        "Silica Gel": "干燥剂",
+        "Packaging": "包装",
+        "Strap": "捆扎带",
+
+        # ========== 金额/数量相关 ==========
+        "Amt": "金额",
+        "Qty": "数量",
+        "Unit Price": "单价",
+        "Total": "合计",
+
+        # ========== 日语固定商务表达 ==========
         "お世話になっております": "承蒙关照",
         "よろしくお願いします": "请多关照",
         "よろしくお願い致します": "请多关照",
@@ -82,14 +133,6 @@ class TranslateService:
         "当社": "我司",
         "御社": "贵司",
         "貴社": "贵司",
-        # 产品相关专业术语
-        "Shaft": "轴",
-        "Plating Thickness": "镀层厚度",
-        "Stain Test": "污渍测试",
-        "Bending Test": "弯曲测试",
-        "Silica Gel": "干燥剂",
-        "Dirt": "脏污/异物",
-        "Rust": "锈蚀",
     }
 
     def __init__(self, api_key: str = None, provider: str = "deepl", proxy_url: str = None,
@@ -267,22 +310,37 @@ class TranslateService:
         # /think 前缀（仅 Ollama 使用）
         think_prefix = "/think\n" if use_think else ""
 
-        # 优化后的 prompt（基于 202 封邮件样本分析）
-        prompt = f"""{think_prefix}你是精密机械行业的商务翻译专家。翻译采购部门与海外供应商的往来邮件。
+        # 优化后的 prompt（基于采购邮件场景深度优化）
+        prompt = f"""{think_prefix}你是精密机械行业的资深商务翻译专家，专门翻译采购部门与海外供应商的往来邮件。
 
 ## 任务
 将以下{source_name}邮件翻译为{target_name}。**只输出译文，不要输出任何解释或思考过程。**
 
 ## 格式要求（最重要！）
 1. **逐行翻译**：原文每一行对应译文的一行
-2. **保持空行**：原文有空行的地方，译文也要有空行；原文没有空行，译文也不要加空行
-3. **不要合并段落**：即使原文是短句，也不要把多行合并成一行
+2. **保持空行**：原文有空行的地方，译文也要有空行
+3. **表格保持对齐**：如果原文是表格数据，保持列对齐格式
 4. **不要添加内容**：不要添加原文没有的空行、分隔线、编号等
 
-## 保持原样不翻译
-- 人名、公司名、产品型号、邮箱、电话、地址
+## 保持原样不翻译（非常重要！）
+- 人名（如 Karen, Noel, 田中）
+- 公司名（如 ACP, Jingzhicheng）
+- **产品型号**（如 2J1041, 2J1030, Blue Ring, MM）— 这些是型号代码，不是普通单词！
+- 单号/编号（如 ACP-NCV25-011, Part No.）
+- 邮箱、电话、地址
+- 金额保持原格式（如 USD37,098.34）
 
-## 核心术语
+## 采购邮件常见场景翻译
+- "treatment" 在采购语境 = "处理方式"（不是"治疗"）
+- "shaft" 在机械行业 = "轴类零件"
+- "For Schedule" = "待排期/待安排"（不是"对于时间表"）
+- "Pick up" = "提货/取货"
+- "Defect" = "缺陷"
+- "Plating peel-off" = "电镀脱落"
+- "Collapsed boxes" = "箱体塌陷"
+- "Detached strap" = "捆扎带脱落"
+
+## 核心术语表
 {glossary_table}
 
 ---
