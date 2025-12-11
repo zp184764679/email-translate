@@ -1,5 +1,5 @@
 import httpx
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import json
 import re
 import os
@@ -257,6 +257,50 @@ class TranslateService:
             print(f"Translation error: {e}")
             raise
 
+    # ============ 邮件链处理 ============
+    def extract_latest_email(self, body: str) -> Tuple[str, str]:
+        """
+        从邮件链中提取最新一封邮件的内容，分离历史引用
+
+        邮件链特征：包含 "On xxx wrote:" 或 "-----Original Message-----" 等引用标记
+        只翻译最新邮件内容，历史引用部分保持原样（因为之前已翻译过）
+
+        Args:
+            body: 邮件正文原文
+
+        Returns:
+            (latest_content, quoted_content): 最新邮件内容, 引用部分
+        """
+        # 统一换行符
+        body = body.replace('\r\n', '\n').replace('\r', '\n')
+
+        # 常见引用标记模式
+        patterns = [
+            # Gmail: "On Mon, Nov 26, 2025 at 11:26 PM xxx wrote:"（可能跨两行）
+            r'\nOn .+?\n?wrote:\n',
+            # Outlook: "-----Original Message-----"
+            r'\n-{3,}Original Message-{3,}\n',
+            # 中文客户端: "发件人：xxx" 或 "*发件人：*xxx"
+            r'\n\*?发件人[：:]\*?.+\n',
+            # From: 行（英文客户端）
+            r'\nFrom: .+\n',
+        ]
+
+        earliest_pos = len(body)
+
+        for pattern in patterns:
+            match = re.search(pattern, body, re.IGNORECASE)
+            if match and match.start() < earliest_pos:
+                earliest_pos = match.start()
+
+        # 如果找到引用标记，分割内容
+        if earliest_pos < len(body):
+            latest = body[:earliest_pos].strip()
+            quoted = body[earliest_pos:].strip()
+            return latest, quoted
+
+        return body, ""
+
     # ============ 翻译 Prompt 模板 ============
     def _format_glossary_table(self, glossary: List[Dict] = None) -> str:
         """格式化术语表为 Markdown 表格"""
@@ -277,12 +321,13 @@ class TranslateService:
 
     def _build_translation_prompt(self, text: str, target_lang: str, source_lang: str = None,
                                    glossary: List[Dict] = None, use_think: bool = True,
-                                   is_short_text: bool = False) -> str:
+                                   is_short_text: bool = False, is_long_text: bool = False) -> str:
         """构建优化后的翻译 prompt（基于邮件样本分析优化）
 
         Args:
             use_think: 是否使用 /think 模式（Ollama 翻译时启用，提高质量）
             is_short_text: 是否是短文本（如邮件主题），需要更严格的限制
+            is_long_text: 是否是长文本（>8000字符），使用简洁提示防止摘要
         """
         lang_names = {
             "zh": "中文",
@@ -306,6 +351,19 @@ class TranslateService:
 
 原文: {text}
 译文:"""
+
+        # 长文本使用简洁明确的提示词，防止模型做摘要
+        if is_long_text:
+            return f"""你是专业翻译。将下面的{source_name}文本完整翻译为{target_name}。
+
+**关键要求**：
+1. 必须完整翻译每一句话，绝对不能省略或概括
+2. 保持原文的段落和换行格式
+3. 人名、公司名、产品型号、编号保持原样
+4. 只输出译文，不要任何解释或前缀
+
+---
+{text}"""
 
         # 术语表（核心术语 + 供应商特定术语）
         glossary_table = self._format_glossary_table(glossary)
@@ -417,11 +475,24 @@ Container: 40ft Blue Ring
             source_lang: Source language (auto-detect if None)
             glossary: List of term mappings for context
         """
+        text_len = len(text)
         # 短文本（<100字符且无换行）使用简化的严格 prompt，防止 LLM 过度扩展
-        is_short_text = len(text) < 100 and '\n' not in text
+        is_short_text = text_len < 100 and '\n' not in text
+        # 长文本（>8000字符）禁用 think mode，避免模型过度思考导致摘要
+        is_long_text = text_len > 8000
+        use_think = not is_short_text and not is_long_text
+
         prompt = self._build_translation_prompt(text, target_lang, source_lang, glossary,
-                                                 use_think=not is_short_text,
-                                                 is_short_text=is_short_text)
+                                                 use_think=use_think,
+                                                 is_short_text=is_short_text,
+                                                 is_long_text=is_long_text)
+
+        # 动态计算 num_predict：翻译到中文通常输出比英文短（约 0.6-0.8 倍）
+        # 但我们给足够的空间，防止截断
+        # 估算：1 个英文字符约 0.3 token，中文约 0.5 token
+        estimated_tokens = max(4096, int(text_len * 0.8))
+        # 限制最大值防止内存爆炸
+        num_predict = min(estimated_tokens, 16384)
 
         try:
             # 使用专用的 Ollama 客户端（超时更长，支持 think mode）
@@ -434,7 +505,7 @@ Container: 40ft Blue Ring
                     "stream": False,
                     "options": {
                         "temperature": 0.3,
-                        "num_predict": 4096  # 增加到 4096 以支持长文本
+                        "num_predict": num_predict  # 动态设置，支持长文本
                     }
                 }
             )
@@ -1071,19 +1142,38 @@ Please check the following items:
 
     def _translate_simple(self, text: str, target_lang: str, source_lang: str,
                           glossary: List[Dict], score: int) -> Dict:
-        """简单邮件翻译 - Ollama 直接翻译"""
+        """简单邮件翻译 - Ollama 直接翻译
+
+        对于邮件链，只翻译最新内容，历史引用保持原样
+        """
+        # 检查是否是邮件链，提取最新内容
+        latest_content, quoted_content = self.extract_latest_email(text)
+        has_quote = bool(quoted_content)
+
+        if has_quote:
+            print(f"[SmartRouting] 检测到邮件链: 最新内容 {len(latest_content)} 字符, 引用 {len(quoted_content)} 字符")
+            text_to_translate = latest_content
+        else:
+            text_to_translate = text
+
         try:
             print(f"[SmartRouting] Simple email -> Ollama")
-            translated = self.translate_with_ollama(text, target_lang, source_lang, glossary)
+            translated = self.translate_with_ollama(text_to_translate, target_lang, source_lang, glossary)
+
+            # 如果有引用，拼接回去
+            if has_quote:
+                translated = translated + "\n\n---\n[以下为历史邮件引用]\n" + quoted_content
+
             return {
                 "translated_text": translated,
                 "provider_used": "ollama",
                 "complexity": {"level": "simple", "score": score},
-                "fallback_reason": None
+                "fallback_reason": None,
+                "has_quote": has_quote
             }
         except Exception as e:
             print(f"[SmartRouting] Ollama failed: {e}, falling back to tencent")
-            # 回退到腾讯翻译
+            # 回退到腾讯翻译（_translate_with_fallback 也会处理邮件链）
             return self._translate_with_fallback(text, target_lang, source_lang, glossary,
                                                   {"level": "simple", "score": score})
 
@@ -1302,25 +1392,51 @@ Please check the following items:
 
     def _translate_with_fallback(self, text: str, target_lang: str, source_lang: str,
                                   glossary: List[Dict], complexity: Dict) -> Dict:
-        """带回退的翻译（Ollama → Claude，跳过腾讯和DeepL）"""
+        """带回退的翻译（Ollama → Claude，跳过腾讯和DeepL）
+
+        对于邮件链，只翻译最新内容，历史引用保持原样
+        """
         providers_tried = []
+
+        # 检查是否是邮件链，提取最新内容
+        latest_content, quoted_content = self.extract_latest_email(text)
+        has_quote = bool(quoted_content)
+
+        if has_quote:
+            print(f"[SmartRouting] 检测到邮件链: 最新内容 {len(latest_content)} 字符, 引用 {len(quoted_content)} 字符")
+            text_to_translate = latest_content
+        else:
+            text_to_translate = text
 
         # 1. Ollama 优先（免费，质量好）
         if self.ollama_base_url:
             try:
-                translated = self.translate_with_ollama(text, target_lang, source_lang, glossary)
+                translated = self.translate_with_ollama(text_to_translate, target_lang, source_lang, glossary)
+
+                # 如果有引用，拼接回去
+                if has_quote:
+                    translated = translated + "\n\n---\n[以下为历史邮件引用]\n" + quoted_content
+
                 return {
                     "translated_text": translated,
                     "provider_used": "ollama",
                     "complexity": complexity,
-                    "fallback_reason": None
+                    "fallback_reason": None,
+                    "has_quote": has_quote
                 }
             except Exception as e:
                 providers_tried.append(("ollama", str(e)))
                 print(f"[SmartRouting] Ollama failed in fallback: {e}")
 
-        # 2. Claude 兜底
-        return self._translate_with_claude_fallback(text, target_lang, source_lang, glossary, complexity)
+        # 2. Claude 兜底（同样只翻译最新内容）
+        result = self._translate_with_claude_fallback(text_to_translate, target_lang, source_lang, glossary, complexity)
+
+        # 如果有引用，拼接回去
+        if has_quote:
+            result["translated_text"] = result["translated_text"] + "\n\n---\n[以下为历史邮件引用]\n" + quoted_content
+            result["has_quote"] = True
+
+        return result
 
     def _translate_with_claude_fallback(self, text: str, target_lang: str, source_lang: str,
                                          glossary: List[Dict], complexity: Dict) -> Dict:
