@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     mysql_database: str = "email_translate"
 
     # Translation API
-    translate_provider: str = "ollama"  # "ollama", "claude", or "deepl"
+    translate_provider: str = "ollama"  # "ollama" or "claude"
     translate_enabled: bool = True
 
     # Ollama (local LLM) - 主力翻译引擎，免费且质量好
@@ -42,10 +42,6 @@ class Settings(BaseSettings):
     # Claude API (Anthropic) - 复杂邮件用
     claude_api_key: str = ""
     claude_model: str = "claude-sonnet-4-20250514"
-
-    # DeepL API (备用)
-    deepl_api_key: str = ""
-    deepl_free_api: bool = True
 
     # 智能路由配置
     smart_routing_enabled: bool = True  # 是否启用智能路由（根据复杂度选择翻译引擎）

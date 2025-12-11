@@ -3,14 +3,11 @@
 
 支持的翻译引擎：
 - ollama: 本地大模型（主力引擎，无限制，不统计）
-- deepl: DeepL（50万字符/月免费）
 - claude: Claude API（按 token 计费，无免费额度，统计用于成本追踪）
 
 功能：
 - 记录每次翻译的字符数/token数
 - 按月统计用量
-- 接近免费额度时发出警告
-- 超出免费额度时自动禁用
 """
 
 import aiomysql
@@ -25,14 +22,12 @@ class UsageService:
     # 各引擎免费额度配置（字符/月）
     PROVIDER_QUOTAS = {
         'ollama': -1,           # 本地模型：无限制（-1 表示不限制，主力引擎）
-        'deepl': 500_000,       # DeepL Free：50万字符/月
         'claude': 0,            # Claude：无免费额度，按 token 计费
     }
 
     # 各引擎显示名称
     PROVIDER_NAMES = {
         'ollama': '本地模型 (Ollama)',
-        'deepl': 'DeepL',
         'claude': 'Claude API',
     }
 

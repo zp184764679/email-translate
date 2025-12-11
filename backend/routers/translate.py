@@ -87,7 +87,7 @@ def get_translate_service(for_smart_routing: bool = False) -> TranslateService:
 
     智能路由模式（smart_routing_enabled=True 或 for_smart_routing=True）：
     创建包含所有引擎配置的服务，支持自动切换：
-    优先级：Ollama → DeepL → Claude
+    优先级：Ollama → Claude
 
     单引擎模式：
     根据 TRANSLATE_PROVIDER 使用单一引擎
@@ -97,9 +97,8 @@ def get_translate_service(for_smart_routing: bool = False) -> TranslateService:
         return TranslateService(
             # 主要配置（决定 translate_text 使用哪个引擎）
             provider=settings.translate_provider,
-            # DeepL 配置
-            api_key=settings.deepl_api_key or settings.claude_api_key,
-            is_free_api=settings.deepl_free_api,
+            # API key (Claude)
+            api_key=settings.claude_api_key,
             # Ollama 配置
             ollama_base_url=settings.ollama_base_url,
             ollama_model=settings.ollama_model,
@@ -108,13 +107,7 @@ def get_translate_service(for_smart_routing: bool = False) -> TranslateService:
         )
 
     # 单引擎模式
-    if settings.translate_provider == "deepl":
-        return TranslateService(
-            api_key=settings.deepl_api_key,
-            provider="deepl",
-            is_free_api=settings.deepl_free_api
-        )
-    elif settings.translate_provider == "claude":
+    if settings.translate_provider == "claude":
         return TranslateService(
             api_key=settings.claude_api_key,
             provider="claude",
@@ -174,7 +167,7 @@ async def translate_text(
 ):
     """Translate text using smart routing (with cache)
 
-    智能路由优先级：Ollama → DeepL → Claude
+    智能路由优先级：Ollama → Claude
     自动根据复杂度选择引擎
     """
     if not settings.translate_enabled:
@@ -227,7 +220,7 @@ async def translate_reply(
 ):
     """Translate Chinese reply to target language using smart routing (with cache)
 
-    智能路由优先级：Ollama → DeepL → Claude
+    智能路由优先级：Ollama → Claude
     """
     if not settings.translate_enabled:
         return TranslateResponse(translated_text=request.text, source_lang="disabled")
@@ -399,20 +392,6 @@ async def batch_translate_all(
     }
 
 
-@router.get("/usage")
-async def get_translation_usage(account: EmailAccount = Depends(get_current_account)):
-    """Get translation API usage (DeepL only)"""
-    if settings.translate_provider != "deepl":
-        return {"message": "仅DeepL支持用量查询"}
-
-    try:
-        service = get_translate_service()
-        usage = service.get_usage()
-        return usage
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @router.get("/token-stats")
 async def get_token_stats(account: EmailAccount = Depends(get_current_account)):
     """获取 Claude API Token 使用统计"""
@@ -438,7 +417,7 @@ async def get_usage_stats(
     获取翻译 API 用量统计
 
     参数:
-    - provider: 可选，指定翻译引擎 (ollama, deepl, claude)
+    - provider: 可选，指定翻译引擎 (ollama, claude)
                 不指定则返回所有引擎的用量
 
     返回:
@@ -470,7 +449,7 @@ async def get_provider_usage_stats(
     获取指定翻译引擎的用量统计
 
     路径参数:
-    - provider: 翻译引擎名称 (ollama, deepl, claude)
+    - provider: 翻译引擎名称 (ollama, claude)
     """
     from services.usage_service import check_translation_quota
 
