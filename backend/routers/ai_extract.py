@@ -44,6 +44,12 @@ class ActionItem(BaseModel):
     deadline: Optional[str] = None
 
 
+class InternalAttendee(BaseModel):
+    """公司内部参会人员（从 to/cc 提取的 @jingzhicheng.com.cn 邮箱）"""
+    name: Optional[str] = None
+    email: str
+
+
 class ExtractionResponse(BaseModel):
     id: int
     email_id: int
@@ -53,10 +59,55 @@ class ExtractionResponse(BaseModel):
     contacts: List[dict]
     action_items: List[dict]
     key_points: List[str]
+    internal_attendees: List[InternalAttendee] = []  # 公司内部参会人员
     extracted_at: datetime
 
     class Config:
         from_attributes = True
+
+
+# ============ Helper Functions ============
+
+def extract_internal_attendees(to_email: str, cc_email: str) -> List[dict]:
+    """
+    从 to/cc 中提取 @jingzhicheng.com.cn 的公司内部人员
+
+    邮件地址格式可能是：
+    - "张三 <zhangsan@jingzhicheng.com.cn>"
+    - "zhangsan@jingzhicheng.com.cn"
+    - "张三 <zhangsan@jingzhicheng.com.cn>, 李四 <lisi@jingzhicheng.com.cn>"
+    """
+    import re
+    attendees = []
+    seen_emails = set()
+
+    # 合并 to 和 cc
+    all_addresses = f"{to_email or ''}, {cc_email or ''}"
+
+    # 匹配邮箱地址的正则
+    # 格式1: "Name <email@domain.com>"
+    pattern1 = r'"?([^"<>]*)"?\s*<([^<>]+@jingzhicheng\.com\.cn)>'
+    # 格式2: 纯邮箱 email@jingzhicheng.com.cn
+    pattern2 = r'\b([a-zA-Z0-9._%+-]+@jingzhicheng\.com\.cn)\b'
+
+    # 先匹配带名字的格式
+    for match in re.finditer(pattern1, all_addresses, re.IGNORECASE):
+        name = match.group(1).strip() if match.group(1) else None
+        email = match.group(2).lower()
+        if email not in seen_emails:
+            seen_emails.add(email)
+            attendees.append({"name": name, "email": email})
+
+    # 再匹配纯邮箱格式（排除已经匹配的）
+    for match in re.finditer(pattern2, all_addresses, re.IGNORECASE):
+        email = match.group(1).lower()
+        if email not in seen_emails:
+            seen_emails.add(email)
+            # 尝试从邮箱前缀提取名字
+            name = email.split('@')[0]
+            attendees.append({"name": name, "email": email})
+
+    return attendees
 
 
 # ============ API Endpoints ============
@@ -89,6 +140,9 @@ async def extract_email(
     if not email:
         raise HTTPException(status_code=404, detail="邮件不存在")
 
+    # 提取公司内部参会人员（从 to/cc 提取 @jingzhicheng.com.cn）
+    internal_attendees = extract_internal_attendees(email.to_email, email.cc_email)
+
     # 检查是否已有提取结果
     if not force:
         existing_result = await db.execute(
@@ -98,7 +152,19 @@ async def extract_email(
         )
         existing = existing_result.scalar_one_or_none()
         if existing:
-            return existing
+            # 返回时添加 internal_attendees
+            return ExtractionResponse(
+                id=existing.id,
+                email_id=existing.email_id,
+                summary=existing.summary,
+                dates=existing.dates or [],
+                amounts=existing.amounts or [],
+                contacts=existing.contacts or [],
+                action_items=existing.action_items or [],
+                key_points=existing.key_points or [],
+                internal_attendees=internal_attendees,
+                extracted_at=existing.extracted_at
+            )
 
     # 调用 AI 提取服务
     extraction_data = await extract_email_info(
@@ -140,7 +206,19 @@ async def extract_email(
     await db.commit()
     await db.refresh(extraction)
 
-    return extraction
+    # 返回时添加 internal_attendees
+    return ExtractionResponse(
+        id=extraction.id,
+        email_id=extraction.email_id,
+        summary=extraction.summary,
+        dates=extraction.dates or [],
+        amounts=extraction.amounts or [],
+        contacts=extraction.contacts or [],
+        action_items=extraction.action_items or [],
+        key_points=extraction.key_points or [],
+        internal_attendees=internal_attendees,
+        extracted_at=extraction.extracted_at
+    )
 
 
 @router.get("/extract/{email_id}", response_model=Optional[ExtractionResponse])
@@ -159,7 +237,8 @@ async def get_extraction(
             )
         )
     )
-    if not email_result.scalar_one_or_none():
+    email = email_result.scalar_one_or_none()
+    if not email:
         raise HTTPException(status_code=404, detail="邮件不存在")
 
     # 获取提取结果
@@ -170,7 +249,24 @@ async def get_extraction(
     )
     extraction = result.scalar_one_or_none()
 
-    return extraction
+    if not extraction:
+        return None
+
+    # 提取公司内部参会人员
+    internal_attendees = extract_internal_attendees(email.to_email, email.cc_email)
+
+    return ExtractionResponse(
+        id=extraction.id,
+        email_id=extraction.email_id,
+        summary=extraction.summary,
+        dates=extraction.dates or [],
+        amounts=extraction.amounts or [],
+        contacts=extraction.contacts or [],
+        action_items=extraction.action_items or [],
+        key_points=extraction.key_points or [],
+        internal_attendees=internal_attendees,
+        extracted_at=extraction.extracted_at
+    )
 
 
 @router.delete("/extract/{email_id}")
