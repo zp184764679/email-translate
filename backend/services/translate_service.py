@@ -7,19 +7,14 @@ from datetime import datetime, timezone
 
 
 class TranslateService:
-    """Translation service supporting DeepL, Claude API, and Ollama
+    """Translation service supporting Ollama and Claude API
 
     统一 API 模式：
     - ollama: 本地 LLM 翻译（免费，质量好，主力引擎）
     - claude: Claude API（复杂邮件用）
-    - deepl: DeepL API（备用）
 
     切换方式：修改 .env 中的 TRANSLATE_PROVIDER
     """
-
-    # DeepL API endpoints
-    DEEPL_API_FREE = "https://api-free.deepl.com/v2/translate"
-    DEEPL_API_PRO = "https://api.deepl.com/v2/translate"
 
     # Token 统计（类级别，跨实例累计）
     _token_stats = {
@@ -199,23 +194,21 @@ class TranslateService:
     }
 
     def __init__(self, api_key: str = None, provider: str = "ollama", proxy_url: str = None,
-                 is_free_api: bool = True, ollama_base_url: str = None, ollama_model: str = None,
+                 ollama_base_url: str = None, ollama_model: str = None,
                  claude_model: str = None, **kwargs):
         """
         Initialize translate service
 
         Args:
-            api_key: API key (DeepL or Claude)
-            provider: "ollama", "claude", or "deepl"
+            api_key: API key (Claude)
+            provider: "ollama" or "claude"
             proxy_url: Proxy URL (e.g., "http://127.0.0.1:7890")
-            is_free_api: For DeepL, whether using free API (default True)
             ollama_base_url: Ollama API base URL (e.g., "http://localhost:11434")
             ollama_model: Ollama model name (e.g., "qwen3:8b")
             claude_model: Claude model name (e.g., "claude-sonnet-4-20250514")
         """
         self.api_key = api_key
         self.provider = provider
-        self.is_free_api = is_free_api
         self.ollama_base_url = ollama_base_url or "http://localhost:11434"
         self.ollama_model = ollama_model or "qwen3:8b"
         self.claude_model = claude_model or "claude-sonnet-4-20250514"
@@ -235,9 +228,6 @@ class TranslateService:
         # 单独的 Ollama HTTP 客户端（智能路由用，超时更长）
         self.ollama_client = httpx.Client(timeout=600.0)
 
-        # DeepL API URL
-        self.deepl_url = self.DEEPL_API_FREE if is_free_api else self.DEEPL_API_PRO
-
     def _detect_language_type(self, text: str) -> str:
         """
         Detect if text contains Japanese characters
@@ -255,66 +245,6 @@ class TranslateService:
             return 'JA'
 
         return 'EN'
-
-    def _map_lang_code(self, lang: str, for_target: bool = True) -> str:
-        """Map our language codes to DeepL codes"""
-        # DeepL language codes
-        mapping = {
-            "zh": "ZH",
-            "en": "EN",
-            "ja": "JA",
-            "ko": "KO",
-        }
-
-        # For target language, Chinese needs to specify variant
-        if for_target and lang == "zh":
-            return "ZH-HANS"  # Simplified Chinese
-
-        return mapping.get(lang, lang.upper())
-
-    # ============ DeepL Translation ============
-    def translate_with_deepl(self, text: str, target_lang: str = "zh",
-                              source_lang: str = None, glossary_id: str = None) -> str:
-        """
-        Translate text using DeepL API
-
-        Args:
-            text: Text to translate
-            target_lang: Target language (zh, en, ja)
-            source_lang: Source language (auto-detect if None)
-            glossary_id: DeepL glossary ID (optional)
-        """
-        target = self._map_lang_code(target_lang, for_target=True)
-
-        data = {
-            "auth_key": self.api_key,
-            "text": text,
-            "target_lang": target,
-        }
-
-        if source_lang:
-            data["source_lang"] = self._map_lang_code(source_lang, for_target=False)
-
-        if glossary_id:
-            data["glossary_id"] = glossary_id
-
-        try:
-            response = self.http_client.post(self.deepl_url, data=data)
-            response.raise_for_status()
-
-            result = response.json()
-            translated = result["translations"][0]["text"]
-            detected_lang = result["translations"][0].get("detected_source_language", "")
-
-            print(f"[DeepL] Translated from {detected_lang} to {target}")
-            return translated
-
-        except httpx.HTTPStatusError as e:
-            print(f"DeepL API error: {e.response.status_code} - {e.response.text}")
-            raise
-        except Exception as e:
-            print(f"Translation error: {e}")
-            raise
 
     # ============ 邮件链处理 ============
     def extract_latest_email(self, body: str) -> Tuple[str, str]:
@@ -893,18 +823,16 @@ Please check the following items:
         Args:
             text: Text to translate
             target_lang: Target language (zh, en, ja)
-            glossary: List of term mappings (not used for DeepL basic)
-            context: Previous conversation context (not used for DeepL)
+            glossary: List of term mappings
+            context: Previous conversation context
             source_lang: Source language hint
         """
         if self.provider == "ollama":
             return self.translate_with_ollama(text, target_lang, source_lang, glossary)
         elif self.provider == "claude":
             return self.translate_with_claude(text, target_lang, source_lang, glossary)
-        elif self.provider == "deepl":
-            return self.translate_with_deepl(text, target_lang, source_lang)
         else:
-            raise ValueError(f"Unknown provider: {self.provider}. Supported: ollama, claude, deepl")
+            raise ValueError(f"Unknown provider: {self.provider}. Supported: ollama, claude")
 
     def translate_with_smart_routing(self, text: str, subject: str = "",
                                       target_lang: str = "zh",
@@ -1051,7 +979,7 @@ Please check the following items:
 
     def _translate_with_ollama_or_fallback(self, text: str, target_lang: str,
                                             source_lang: str, glossary: List[Dict] = None) -> str:
-        """Ollama 翻译，失败则用 DeepL 回退"""
+        """Ollama 翻译，失败则用 Claude 回退"""
         # 首选 Ollama（免费，质量好）
         if self.ollama_base_url:
             try:
@@ -1059,42 +987,23 @@ Please check the following items:
             except Exception as e:
                 print(f"[SmartRouting] Ollama failed: {e}")
 
-        # 回退到 DeepL
-        if self.api_key and self._check_deepl_quota():
+        # 回退到 Claude
+        claude_key = self.api_key or os.environ.get("CLAUDE_API_KEY")
+        if claude_key:
             try:
-                result = self.translate_with_deepl(text, target_lang, source_lang)
-                self._record_deepl_usage(len(text))
-                return result
-            except Exception as e:
-                print(f"[SmartRouting] DeepL failed: {e}")
-
-        raise Exception("Ollama 和 DeepL 都不可用")
-
-    def _translate_body_with_deepl(self, text: str, target_lang: str,
-                                    source_lang: str, glossary: List[Dict]) -> str:
-        """用 DeepL 翻译正文（中等邮件用）"""
-        deepl_key = self.api_key if self.provider == "deepl" else os.environ.get("DEEPL_API_KEY")
-
-        if deepl_key and self._check_deepl_quota():
-            try:
-                if self.provider == "deepl":
-                    result = self.translate_with_deepl(text, target_lang, source_lang)
+                if self.provider == "claude":
+                    return self.translate_with_claude(text, target_lang, source_lang, glossary)
                 else:
                     temp_service = TranslateService(
-                        api_key=deepl_key,
-                        provider="deepl",
-                        is_free_api=os.environ.get("DEEPL_FREE_API", "true").lower() == "true"
+                        api_key=claude_key,
+                        provider="claude",
+                        claude_model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-20250514")
                     )
-                    result = temp_service.translate_with_deepl(text, target_lang, source_lang)
-
-                self._record_deepl_usage(len(text))
-                print(f"[SmartRouting] Body translated with DeepL ({len(text)} chars)")
-                return result
+                    return temp_service.translate_with_claude(text, target_lang, source_lang, glossary)
             except Exception as e:
-                print(f"[SmartRouting] DeepL body translation failed: {e}")
-                raise
+                print(f"[SmartRouting] Claude failed: {e}")
 
-        raise Exception("DeepL 不可用或额度不足")
+        raise Exception("Ollama 和 Claude 都不可用")
 
     def _translate_body_with_claude(self, text: str, target_lang: str,
                                      source_lang: str, glossary: List[Dict]) -> str:
@@ -1115,8 +1024,8 @@ Please check the following items:
             except Exception as e:
                 print(f"[SmartRouting] Claude failed: {e}")
 
-        # Claude 不可用，回退到其他引擎
-        return self._translate_with_tencent_or_fallback(text, target_lang, source_lang)
+        # Claude 不可用，回退到 Ollama
+        return self._translate_with_ollama_or_fallback(text, target_lang, source_lang, glossary)
 
     def _translate_with_fallback(self, text: str, target_lang: str, source_lang: str,
                                   glossary: List[Dict], complexity: Dict) -> Dict:
@@ -1194,53 +1103,6 @@ Please check the following items:
 
         raise Exception("没有可用的翻译引擎")
 
-    def _check_deepl_quota(self) -> bool:
-        """检查 DeepL 额度是否可用"""
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                return True  # 异步上下文中默认允许
-            else:
-                return loop.run_until_complete(self._check_deepl_quota_async())
-        except RuntimeError:
-            return asyncio.run(self._check_deepl_quota_async())
-
-    async def _check_deepl_quota_async(self) -> bool:
-        """异步检查 DeepL 额度"""
-        try:
-            from services.usage_service import check_translation_quota
-            result = await check_translation_quota("deepl")
-            return result.get('available', True)
-        except Exception as e:
-            print(f"[UsageService] Error checking DeepL quota: {e}")
-            return True  # 出错时默认允许
-
-    def _record_deepl_usage(self, char_count: int):
-        """记录 DeepL 用量"""
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # 如果在异步上下文中，创建后台任务（忽略结果）
-                task = asyncio.create_task(self._record_deepl_usage_async(char_count))
-                # 添加回调来忽略任务被取消的情况
-                task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
-            else:
-                loop.run_until_complete(self._record_deepl_usage_async(char_count))
-        except RuntimeError:
-            asyncio.run(self._record_deepl_usage_async(char_count))
-
-    async def _record_deepl_usage_async(self, char_count: int):
-        """异步记录 DeepL 用量"""
-        try:
-            from services.usage_service import record_translation_usage
-            result = await record_translation_usage("deepl", char_count)
-            if result.get('warning'):
-                print(f"[UsageService] {result['warning']}")
-        except Exception as e:
-            print(f"[UsageService] Failed to record DeepL usage: {e}")
-
     def translate_email_reply(self, chinese_text: str, target_lang: str,
                               conversation_history: List[Dict] = None,
                               glossary: List[Dict] = None) -> str:
@@ -1248,78 +1110,6 @@ Please check the following items:
         Translate Chinese reply to target language
         """
         return self.translate_text(chinese_text, target_lang, glossary, source_lang="zh")
-
-    # ============ Batch Translation ============
-    def translate_batch(self, texts: List[str], target_lang: str = "zh") -> List[str]:
-        """
-        Translate multiple texts (DeepL supports batch)
-        """
-        target = self._map_lang_code(target_lang, for_target=True)
-
-        data = {
-            "auth_key": self.api_key,
-            "text": texts,  # DeepL accepts list of texts
-            "target_lang": target,
-        }
-
-        try:
-            response = self.http_client.post(self.deepl_url, data=data)
-            response.raise_for_status()
-
-            result = response.json()
-            translations = [t["text"] for t in result["translations"]]
-            return translations
-
-        except Exception as e:
-            print(f"Batch translation error: {e}")
-            raise
-
-    def create_batch_translation(self, emails: List[Dict]) -> Dict:
-        """
-        Translate multiple emails
-
-        Args:
-            emails: List of emails [{id, subject, body, target_lang, source_lang}, ...]
-
-        Returns:
-            Dict with results (DeepL is synchronous, so returns immediately)
-        """
-        results = []
-
-        for email in emails:
-            try:
-                target_lang = email.get("target_lang", "zh")
-                source_lang = email.get("source_lang")
-
-                # Translate subject and body separately
-                subject_translated = ""
-                body_translated = ""
-
-                if email.get("subject"):
-                    subject_translated = self.translate_with_deepl(
-                        email["subject"], target_lang, source_lang
-                    )
-
-                if email.get("body"):
-                    body_translated = self.translate_with_deepl(
-                        email["body"], target_lang, source_lang
-                    )
-
-                results.append({
-                    "email_id": email["id"],
-                    "subject_translated": subject_translated,
-                    "body_translated": body_translated,
-                    "success": True
-                })
-
-            except Exception as e:
-                results.append({
-                    "email_id": email["id"],
-                    "success": False,
-                    "error": str(e)
-                })
-
-        return {"results": results, "total": len(emails)}
 
     # ============ Utility Methods ============
     def extract_new_content(self, body: str) -> str:
@@ -1350,18 +1140,6 @@ Please check the following items:
             new_lines.append(line)
 
         return "\n".join(new_lines).strip()
-
-    def get_usage(self) -> Dict:
-        """Get DeepL API usage statistics"""
-        usage_url = self.deepl_url.replace("/translate", "/usage")
-
-        try:
-            response = self.http_client.post(usage_url, data={"auth_key": self.api_key})
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            print(f"Error getting usage: {e}")
-            return {}
 
     def close(self):
         """Close HTTP client"""

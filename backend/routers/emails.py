@@ -407,11 +407,10 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
         print(f"[Background] Fetched {len(emails)} emails from IMAP")
 
         # 创建翻译服务（支持智能路由）
-        # 智能路由会根据邮件复杂度自动选择引擎：简单→Ollama，复杂→DeepL/Claude
+        # 智能路由会根据邮件复杂度自动选择引擎：简单→Ollama，复杂→Claude
         translate_service = TranslateService(
-            api_key=settings.deepl_api_key or settings.claude_api_key,
+            api_key=settings.claude_api_key,
             provider=settings.translate_provider,
-            is_free_api=settings.deepl_free_api,
             ollama_base_url=settings.ollama_base_url,
             ollama_model=settings.ollama_model,
             claude_model=getattr(settings, 'claude_model', None),
@@ -1177,9 +1176,8 @@ async def translate_email(
 
         # 调用翻译 API
         service = TranslateService(
-            api_key=settings.deepl_api_key or settings.claude_api_key,
+            api_key=settings.claude_api_key,
             provider=settings.translate_provider,
-            is_free_api=settings.deepl_free_api,
             ollama_base_url=settings.ollama_base_url,
             ollama_model=settings.ollama_model,
             claude_model=getattr(settings, 'claude_model', None),
@@ -1223,9 +1221,8 @@ async def translate_email(
     if body_to_translate:
         # 创建翻译服务
         service = TranslateService(
-            api_key=settings.deepl_api_key or settings.claude_api_key,
+            api_key=settings.claude_api_key,
             provider=settings.translate_provider,
-            is_free_api=settings.deepl_free_api,
             ollama_base_url=settings.ollama_base_url,
             ollama_model=settings.ollama_model,
             claude_model=getattr(settings, 'claude_model', None),
