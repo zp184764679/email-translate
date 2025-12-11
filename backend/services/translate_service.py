@@ -218,7 +218,10 @@ class TranslateService:
         all_terms = dict(self.CORE_GLOSSARY)
         if glossary:
             for g in glossary:
-                all_terms[g.get('source', '')] = g.get('target', '')
+                # 兼容字典和其他格式
+                if isinstance(g, dict):
+                    all_terms[g.get('source', '')] = g.get('target', '')
+                # 跳过非字典类型（如字符串）
 
         lines = ["| 原文 | 译文 |", "|------|------|"]
         for term, translation in all_terms.items():
@@ -227,11 +230,13 @@ class TranslateService:
         return "\n".join(lines)
 
     def _build_translation_prompt(self, text: str, target_lang: str, source_lang: str = None,
-                                   glossary: List[Dict] = None, use_think: bool = True) -> str:
+                                   glossary: List[Dict] = None, use_think: bool = True,
+                                   is_short_text: bool = False) -> str:
         """构建优化后的翻译 prompt（基于邮件样本分析优化）
 
         Args:
             use_think: 是否使用 /think 模式（Ollama 翻译时启用，提高质量）
+            is_short_text: 是否是短文本（如邮件主题），需要更严格的限制
         """
         lang_names = {
             "zh": "中文",
@@ -242,6 +247,19 @@ class TranslateService:
 
         target_name = lang_names.get(target_lang, target_lang)
         source_name = lang_names.get(source_lang, "原文") if source_lang else "原文"
+
+        # 短文本使用简化的严格 prompt
+        if is_short_text:
+            return f"""将以下文本翻译为{target_name}。
+
+严格要求：
+- 只翻译，不解释
+- 不要添加任何原文没有的内容
+- 译文长度应与原文相当
+- 直接输出译文，不要有任何前缀
+
+原文: {text}
+译文:"""
 
         # 术语表（核心术语 + 供应商特定术语）
         glossary_table = self._format_glossary_table(glossary)
@@ -283,7 +301,11 @@ class TranslateService:
             source_lang: Source language (auto-detect if None)
             glossary: List of term mappings for context
         """
-        prompt = self._build_translation_prompt(text, target_lang, source_lang, glossary)
+        # 短文本（<100字符且无换行）使用简化的严格 prompt，防止 LLM 过度扩展
+        is_short_text = len(text) < 100 and '\n' not in text
+        prompt = self._build_translation_prompt(text, target_lang, source_lang, glossary,
+                                                 use_think=not is_short_text,
+                                                 is_short_text=is_short_text)
 
         try:
             response = self.http_client.post(
