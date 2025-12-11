@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import uvicorn
@@ -10,7 +10,8 @@ import asyncio
 
 from config import get_settings
 from database.database import init_db
-from routers import emails_router, users_router, translate_router, drafts_router, suppliers_router, signatures_router, labels_router, folders_router, calendar_router, ai_extract_router
+from routers import emails_router, users_router, translate_router, drafts_router, suppliers_router, signatures_router, labels_router, folders_router, calendar_router, ai_extract_router, tasks_router
+from websocket import manager as ws_manager, websocket_endpoint
 
 settings = get_settings()
 
@@ -174,6 +175,31 @@ app.include_router(labels_router)
 app.include_router(folders_router)
 app.include_router(calendar_router)
 app.include_router(ai_extract_router)
+app.include_router(tasks_router)
+
+
+# WebSocket 端点
+@app.websocket("/ws/{account_id}")
+async def ws_endpoint(websocket: WebSocket, account_id: int):
+    """
+    WebSocket 连接端点
+
+    用于实时推送任务完成通知
+    """
+    await websocket_endpoint(websocket, account_id)
+
+
+@app.get("/api/ws/stats")
+async def ws_stats():
+    """获取 WebSocket 连接统计"""
+    return {
+        "global_connections": ws_manager.get_connection_count(),
+        "active_accounts": ws_manager.get_all_account_ids(),
+        "account_connections": {
+            aid: ws_manager.get_connection_count(aid)
+            for aid in ws_manager.get_all_account_ids()
+        }
+    }
 
 
 @app.get("/")

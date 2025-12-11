@@ -62,6 +62,15 @@ class Settings(BaseSettings):
     # Email polling
     email_poll_interval: int = 300  # 5 minutes
 
+    # Celery 配置
+    celery_broker_url: str = "redis://localhost:6379/1"
+    celery_result_backend: str = "redis://localhost:6379/2"
+    celery_task_default_queue: str = "email_translate"
+    celery_task_time_limit: int = 300  # 5 minutes max per task
+
+    # WebSocket 配置
+    websocket_enabled: bool = True
+
     class Config:
         env_file = ".env"
         extra = "ignore"  # 忽略 .env 中未定义的字段

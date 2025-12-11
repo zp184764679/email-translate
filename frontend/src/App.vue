@@ -29,8 +29,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { ElMessage, ElNotification } from 'element-plus'
+import wsManager from './utils/websocket'
 
 const showDownloadProgress = ref(false)
 const downloadVersion = ref('')
@@ -83,6 +84,137 @@ onMounted(() => {
       })
     })
   }
+
+  // 初始化 WebSocket 连接
+  initWebSocket()
+})
+
+// WebSocket 清理
+const wsUnsubscribes = []
+
+function initWebSocket() {
+  // 获取账户ID
+  const accountId = localStorage.getItem('accountId')
+  if (!accountId) {
+    console.log('[App] No accountId, WebSocket not connected')
+    return
+  }
+
+  // 连接 WebSocket
+  wsManager.connect(parseInt(accountId))
+
+  // 监听翻译完成事件
+  wsUnsubscribes.push(
+    wsManager.on('translation_complete', (data) => {
+      console.log('[WS] Translation complete:', data)
+      ElNotification.success({
+        title: '翻译完成',
+        message: `邮件 #${data.email_id} 翻译完成`,
+        duration: 3000
+      })
+      // 触发全局事件供其他组件刷新
+      window.dispatchEvent(new CustomEvent('email-translated', { detail: data }))
+    })
+  )
+
+  // 监听翻译失败事件
+  wsUnsubscribes.push(
+    wsManager.on('translation_failed', (data) => {
+      console.log('[WS] Translation failed:', data)
+      ElNotification.error({
+        title: '翻译失败',
+        message: data.error || '翻译过程中发生错误',
+        duration: 5000
+      })
+    })
+  )
+
+  // 监听邮件发送完成
+  wsUnsubscribes.push(
+    wsManager.on('email_sent', (data) => {
+      console.log('[WS] Email sent:', data)
+      ElNotification.success({
+        title: '邮件已发送',
+        message: `发送至 ${data.to}`,
+        duration: 3000
+      })
+      window.dispatchEvent(new CustomEvent('email-sent', { detail: data }))
+    })
+  )
+
+  // 监听邮件拉取进度
+  wsUnsubscribes.push(
+    wsManager.on('fetch_progress', (data) => {
+      console.log('[WS] Fetch progress:', data)
+      // 可以更新全局状态显示进度
+      window.dispatchEvent(new CustomEvent('fetch-progress', { detail: data }))
+    })
+  )
+
+  // 监听邮件拉取完成
+  wsUnsubscribes.push(
+    wsManager.on('fetch_complete', (data) => {
+      console.log('[WS] Fetch complete:', data)
+      if (data.new_count > 0) {
+        ElNotification.success({
+          title: '同步完成',
+          message: `收到 ${data.new_count} 封新邮件`,
+          duration: 3000
+        })
+      } else {
+        ElMessage.info('没有新邮件')
+      }
+      window.dispatchEvent(new CustomEvent('fetch-complete', { detail: data }))
+    })
+  )
+
+  // 监听 AI 提取完成
+  wsUnsubscribes.push(
+    wsManager.on('extraction_complete', (data) => {
+      console.log('[WS] Extraction complete:', data)
+      ElNotification.success({
+        title: 'AI 提取完成',
+        message: `邮件 #${data.email_id} 信息提取完成`,
+        duration: 3000
+      })
+      window.dispatchEvent(new CustomEvent('extraction-complete', { detail: data }))
+    })
+  )
+
+  // 监听导出完成
+  wsUnsubscribes.push(
+    wsManager.on('export_ready', (data) => {
+      console.log('[WS] Export ready:', data)
+      ElNotification.success({
+        title: '导出完成',
+        message: `${data.email_count} 封邮件已准备好下载`,
+        duration: 0,  // 不自动关闭
+        onClick: () => {
+          // 点击通知打开下载链接
+          window.open(data.download_url, '_blank')
+        }
+      })
+    })
+  )
+
+  // 监听批量操作完成
+  wsUnsubscribes.push(
+    wsManager.on('batch_translation_complete', (data) => {
+      console.log('[WS] Batch translation complete:', data)
+      ElNotification.success({
+        title: '批量翻译完成',
+        message: `成功 ${data.completed}/${data.total}`,
+        duration: 5000
+      })
+      window.dispatchEvent(new CustomEvent('batch-complete', { detail: data }))
+    })
+  )
+}
+
+onUnmounted(() => {
+  // 清理 WebSocket 监听器
+  wsUnsubscribes.forEach(unsub => unsub())
+  wsManager.disconnect()
 })
 </script>
 
