@@ -8,9 +8,10 @@
       title="正在下载更新"
       width="400px"
       :close-on-click-modal="false"
-      :close-on-press-escape="false"
-      :show-close="false"
+      :close-on-press-escape="true"
+      :show-close="true"
       center
+      @close="cancelDownload"
     >
       <div class="download-progress">
         <div class="version-info">新版本: {{ downloadVersion }}</div>
@@ -18,12 +19,19 @@
           :percentage="downloadPercent"
           :stroke-width="20"
           :format="() => `${downloadPercent}%`"
+          :status="downloadError ? 'exception' : ''"
         />
         <div class="download-details">
           <span>{{ formatBytes(downloadTransferred) }} / {{ formatBytes(downloadTotal) }}</span>
           <span>{{ formatBytes(downloadSpeed) }}/s</span>
         </div>
+        <div v-if="downloadError" class="download-error">
+          {{ downloadError }}
+        </div>
       </div>
+      <template #footer>
+        <el-button @click="cancelDownload">稍后更新</el-button>
+      </template>
     </el-dialog>
   </div>
 </template>
@@ -39,6 +47,13 @@ const downloadPercent = ref(0)
 const downloadTransferred = ref(0)
 const downloadTotal = ref(0)
 const downloadSpeed = ref(0)
+const downloadError = ref('')
+
+function cancelDownload() {
+  showDownloadProgress.value = false
+  downloadError.value = ''
+  ElMessage.info('已取消更新，下次启动时会再次检查')
+}
 
 function formatBytes(bytes) {
   if (bytes === 0) return '0 B'
@@ -82,6 +97,11 @@ onMounted(() => {
         duration: 0,
         showClose: true
       })
+    })
+
+    window.electronAPI.onUpdateError((error) => {
+      downloadError.value = error || '下载失败，请稍后重试'
+      // 不自动关闭弹窗，让用户看到错误信息后手动关闭
     })
   }
 
@@ -240,6 +260,16 @@ onUnmounted(() => {
   justify-content: space-between;
   margin-top: 15px;
   color: #909399;
+  font-size: 13px;
+}
+
+.download-progress .download-error {
+  margin-top: 15px;
+  padding: 10px;
+  background-color: #fef0f0;
+  border: 1px solid #fbc4c4;
+  border-radius: 4px;
+  color: #f56c6c;
   font-size: 13px;
 }
 </style>

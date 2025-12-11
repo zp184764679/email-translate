@@ -533,6 +533,12 @@ autoUpdater.on('update-downloaded', (info) => {
 
 autoUpdater.on('error', (error) => {
   console.error('Update error:', error)
+  // 清除任务栏进度条
+  if (mainWindow) {
+    mainWindow.setProgressBar(-1)
+    // 发送错误事件到渲染进程
+    mainWindow.webContents.send('update-error', error.message)
+  }
   dialog.showMessageBox(mainWindow, {
     type: 'error',
     title: '更新失败',
