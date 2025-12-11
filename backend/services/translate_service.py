@@ -755,8 +755,10 @@ Please check the following items:
             # 尝试获取当前事件循环
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                # 如果在异步上下文中，创建任务
-                asyncio.create_task(self._record_tencent_usage_async(char_count))
+                # 如果在异步上下文中，创建后台任务（忽略结果）
+                task = asyncio.create_task(self._record_tencent_usage_async(char_count))
+                # 添加回调来忽略任务被取消的情况
+                task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
             else:
                 # 同步执行
                 loop.run_until_complete(self._record_tencent_usage_async(char_count))
@@ -1273,7 +1275,10 @@ Please check the following items:
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                asyncio.create_task(self._record_deepl_usage_async(char_count))
+                # 如果在异步上下文中，创建后台任务（忽略结果）
+                task = asyncio.create_task(self._record_deepl_usage_async(char_count))
+                # 添加回调来忽略任务被取消的情况
+                task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
             else:
                 loop.run_until_complete(self._record_deepl_usage_async(char_count))
         except RuntimeError:
