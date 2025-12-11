@@ -33,6 +33,8 @@
 ├── backend/                 # FastAPI 后端（服务器部署）
 │   ├── main.py             # 应用入口
 │   ├── config.py           # 配置管理
+│   ├── celery_app.py       # Celery 异步任务配置
+│   ├── websocket.py        # WebSocket 连接管理
 │   ├── database/           # 数据库层
 │   │   ├── database.py     # MySQL 异步连接
 │   │   ├── models.py       # SQLAlchemy 数据模型
@@ -42,16 +44,25 @@
 │   │   ├── emails.py       # 邮件管理（含批量操作）
 │   │   ├── translate.py    # 翻译服务
 │   │   ├── approval.py     # 草稿管理
-│   │   └── suppliers.py    # 供应商管理
+│   │   ├── suppliers.py    # 供应商管理
+│   │   └── tasks.py        # 异步任务状态
+│   ├── tasks/              # Celery 任务
+│   │   ├── translate_tasks.py  # 翻译任务
+│   │   ├── email_tasks.py      # 邮件任务
+│   │   ├── ai_tasks.py         # AI 提取任务
+│   │   └── maintenance_tasks.py # 定时维护
 │   └── services/           # 业务服务
-│       ├── email_service.py    # IMAP/SMTP 邮件收发
-│       └── translate_service.py # 翻译引擎
+│       ├── email_service.py        # IMAP/SMTP 邮件收发
+│       ├── translate_service.py    # 翻译引擎
+│       └── notification_service.py # WebSocket 推送
 ├── frontend/               # Vue3 + Electron 前端（桌面客户端）
 │   ├── electron/           # Electron 主进程
 │   ├── src/
 │   │   ├── views/          # 页面组件
 │   │   ├── api/            # API 封装
 │   │   ├── stores/         # Pinia 状态管理
+│   │   ├── utils/          # 工具函数
+│   │   │   └── websocket.js # WebSocket 客户端
 │   │   └── router/         # Vue Router
 │   └── package.json        # 依赖与构建配置
 └── backend/.env            # 后端配置（MySQL、翻译API等）
@@ -63,11 +74,14 @@
 |---|------|
 | 后端 | FastAPI (Python 3.10+) |
 | 数据库 | MySQL (服务器共享) |
+| 缓存 | Redis (L1缓存 + 消息队列) |
 | ORM | SQLAlchemy 2.0 (async) + aiomysql |
+| 异步任务 | Celery + Redis |
+| 实时推送 | WebSocket (FastAPI + 前端) |
 | 认证 | JWT (邮箱IMAP验证) |
 | 前端 | Vue 3 + Vite + Element Plus |
 | 桌面端 | Electron 28 |
-| 翻译 | Claude API / DeepL / Ollama |
+| 翻译 | Claude API / DeepL / Ollama / 腾讯翻译 |
 
 ## 核心功能
 
@@ -310,6 +324,7 @@ VITE_API_URL=http://localhost:8000/api
 | POST | /api/ai/extract/{email_id} | AI 提取邮件信息（force=true 强制重新提取） |
 | GET | /api/ai/extract/{email_id} | 获取已提取的信息 |
 | DELETE | /api/ai/extract/{email_id} | 删除提取结果 |
+| WS | /ws/{account_id} | WebSocket 实时推送连接 |
 
 ## 数据模型
 
