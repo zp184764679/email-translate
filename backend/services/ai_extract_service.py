@@ -14,10 +14,12 @@ settings = get_settings()
 EXTRACT_PROMPT = """分析以下邮件内容，提取关键信息。请以 JSON 格式返回，包含以下字段：
 
 1. summary: 邮件内容的简短摘要（1-2句话）
-2. dates: 提取的日期列表，每个包含 {"date": "YYYY-MM-DD", "context": "上下文说明"}
-3. amounts: 提取的金额列表，每个包含 {"amount": 数字, "currency": "货币", "context": "上下文说明"}
-4. contacts: 提取的联系人，每个包含 {"name": "姓名", "email": "邮箱", "phone": "电话", "role": "角色"}
-5. action_items: 待办事项列表，每个包含 {"task": "任务描述", "priority": "high/medium/low", "deadline": "截止日期或null"}
+2. dates: 提取的日期时间列表，每个包含 {{"date": "YYYY-MM-DD", "time": "HH:MM"或null, "context": "上下文说明", "is_meeting": true/false}}
+   - 重要：如果提到具体时间（如"下午3点"、"15:00"），必须填写 time 字段
+   - is_meeting: 如果是会议/电话会议/视频会议，设为 true
+3. amounts: 提取的金额列表，每个包含 {{"amount": 数字, "currency": "货币", "context": "上下文说明"}}
+4. contacts: 提取的联系人，每个包含 {{"name": "姓名", "email": "邮箱", "phone": "电话", "role": "角色"}}
+5. action_items: 待办事项列表，每个包含 {{"task": "任务描述", "priority": "high/medium/low", "deadline": "截止日期或null"}}
 6. key_points: 关键信息点列表（字符串数组）
 
 如果某个字段没有相关信息，返回空数组 []。
