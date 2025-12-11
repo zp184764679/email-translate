@@ -938,17 +938,17 @@ Please check the following items:
             complexity = ComplexityLevel.MEDIUM
             score = 50
 
-        # 2. 根据复杂度选择策略
-        if complexity == ComplexityLevel.SIMPLE:
-            # 简单邮件：Ollama 直接翻译（已经调用过 Ollama 评估，直接翻译更快）
+        # 2. 根据复杂度选择策略（新策略：≤50用Ollama，>50用Claude+腾讯）
+        # 不再使用 DeepL，因为商务邮件需要上下文理解
+        OLLAMA_THRESHOLD = 50  # 50分以下用 Ollama
+
+        if score <= OLLAMA_THRESHOLD:
+            # 简单+中等偏下邮件：Ollama 直接翻译（免费，有提示词理解上下文）
+            print(f"[SmartRouting] Score {score} <= {OLLAMA_THRESHOLD} -> Ollama")
             return self._translate_simple(text, target_lang, source_lang, glossary, score)
-
-        elif complexity == ComplexityLevel.MEDIUM:
-            # 中等邮件：优先腾讯翻译
-            return self._translate_medium(text, target_lang, source_lang, glossary, score)
-
         else:
-            # 复杂邮件：拆分翻译
+            # 中等偏上+复杂邮件：Claude（正文）+ 腾讯（签名）节省 token
+            print(f"[SmartRouting] Score {score} > {OLLAMA_THRESHOLD} -> Claude+Tencent")
             return self._translate_complex(text, subject, target_lang, source_lang, glossary, score)
 
     def _translate_simple(self, text: str, target_lang: str, source_lang: str,
