@@ -56,15 +56,20 @@
         </div>
       </div>
 
-      <!-- 日期 -->
+      <!-- 日期/会议 -->
       <div v-if="extraction.dates?.length" class="section">
         <div class="section-title">
           <el-icon><Calendar /></el-icon>
-          日期
+          日期/会议
         </div>
         <div class="section-content">
           <div v-for="(date, i) in extraction.dates" :key="i" class="date-item">
-            <el-tag type="info" size="small">{{ date.date }}</el-tag>
+            <el-tag :type="date.is_meeting ? 'danger' : 'info'" size="small">
+              {{ date.date }}{{ date.time ? ' ' + date.time : '' }}
+            </el-tag>
+            <el-tag v-if="date.is_meeting" type="warning" size="small" class="meeting-tag">
+              会议
+            </el-tag>
             <span v-if="date.context" class="context">{{ date.context }}</span>
             <el-button
               text
@@ -75,6 +80,27 @@
               <el-icon><Plus /></el-icon>
               创建日程
             </el-button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 公司内部参会人员 -->
+      <div v-if="extraction.internal_attendees?.length" class="section">
+        <div class="section-title">
+          <el-icon><User /></el-icon>
+          内部参会人员
+        </div>
+        <div class="section-content">
+          <div class="attendees-list">
+            <el-tag
+              v-for="(attendee, i) in extraction.internal_attendees"
+              :key="i"
+              type="success"
+              size="small"
+              class="attendee-tag"
+            >
+              {{ attendee.name || attendee.email.split('@')[0] }}
+            </el-tag>
           </div>
         </div>
       </div>
@@ -299,18 +325,35 @@ function getPriorityLabel(priority) {
 // Create event from date with validation
 function createEventFromDate(dateInfo) {
   try {
-    const parsedDate = new Date(dateInfo.date)
+    // 解析日期和时间
+    let dateString = dateInfo.date
+    if (dateInfo.time) {
+      dateString += 'T' + dateInfo.time + ':00'
+    }
+    const parsedDate = new Date(dateString)
+
     // 验证日期有效性
     if (isNaN(parsedDate.getTime())) {
       ElMessage.warning('日期格式不正确，请手动选择时间')
       eventForm.value = {
         title: dateInfo.context || '日程事件',
-        date: new Date() // 使用当前时间作为默认值
+        date: new Date(), // 使用当前时间作为默认值
+        description: ''
       }
     } else {
+      // 构建描述，包含参会人员
+      let description = ''
+      if (extraction.value?.internal_attendees?.length) {
+        const attendeeNames = extraction.value.internal_attendees
+          .map(a => a.name || a.email.split('@')[0])
+          .join('、')
+        description = `参会人员：${attendeeNames}`
+      }
+
       eventForm.value = {
-        title: dateInfo.context || '日程事件',
-        date: parsedDate
+        title: dateInfo.is_meeting ? `会议: ${dateInfo.context || '待定'}` : (dateInfo.context || '日程事件'),
+        date: parsedDate,
+        description: description
       }
     }
     showEventDialog.value = true
@@ -338,6 +381,7 @@ async function confirmCreateEvent() {
 
     await api.createEventFromEmail(props.emailId, {
       title: eventForm.value.title,
+      description: eventForm.value.description || '',
       start_time: startTime.toISOString(),
       end_time: endTime.toISOString()
     })
@@ -442,6 +486,20 @@ async function confirmCreateEvent() {
 .context {
   color: #909399;
   font-size: 12px;
+}
+
+.meeting-tag {
+  margin-left: -4px;
+}
+
+.attendees-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.attendee-tag {
+  border-radius: 4px;
 }
 
 .contact-item {
