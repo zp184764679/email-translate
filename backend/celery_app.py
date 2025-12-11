@@ -4,6 +4,7 @@ Celery 配置和实例
 使用 Redis 作为消息代理和结果后端
 """
 from celery import Celery
+from celery.schedules import crontab
 from kombu import Queue
 import os
 from dotenv import load_dotenv
@@ -79,26 +80,17 @@ celery_app.conf.update(
         # 清理过期翻译缓存 - 每天凌晨2点
         "cleanup-old-translations": {
             "task": "tasks.maintenance_tasks.cleanup_old_translations",
-            "schedule": {
-                "hour": 2,
-                "minute": 0,
-            },
+            "schedule": crontab(hour=2, minute=0),
         },
         # 清理临时文件 - 每天凌晨3点
         "cleanup-temp-files": {
             "task": "tasks.maintenance_tasks.cleanup_temp_files",
-            "schedule": {
-                "hour": 3,
-                "minute": 0,
-            },
+            "schedule": crontab(hour=3, minute=0),
         },
         # 重建联系人索引 - 每天凌晨4点
         "rebuild-contacts-index": {
             "task": "tasks.maintenance_tasks.rebuild_contacts_index",
-            "schedule": {
-                "hour": 4,
-                "minute": 0,
-            },
+            "schedule": crontab(hour=4, minute=0),
         },
         # Batch API 轮询 - 每30秒
         "poll-batch-status": {

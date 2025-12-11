@@ -118,13 +118,21 @@ jobs:
             cd /www/email-translate/updates || mkdir -p /www/email-translate/updates && cd /www/email-translate/updates
 
             echo '下载 latest.yml...'
-            wget -q -O latest.yml 'https://github.com/zp184764679/email-translate/releases/download/${VERSION}/latest.yml' || curl -sL -o latest.yml 'https://github.com/zp184764679/email-translate/releases/download/${VERSION}/latest.yml'
+            curl -sL -o latest.yml 'https://github.com/zp184764679/email-translate/releases/download/${VERSION}/latest.yml'
 
-            echo '下载 exe 文件...'
-            # 获取 exe 文件名
-            EXE_NAME=\$(grep -oP '(?<=url: ).*\.exe' latest.yml | head -1)
-            if [ -n \"\$EXE_NAME\" ]; then
-              wget -q --show-progress -O \"\$EXE_NAME\" \"https://github.com/zp184764679/email-translate/releases/download/${VERSION}/\$EXE_NAME\" || curl -L -o \"\$EXE_NAME\" \"https://github.com/zp184764679/email-translate/releases/download/${VERSION}/\$EXE_NAME\"
+            echo '获取 exe 文件名...'
+            # 从 latest.yml 获取期望的文件名（中文名）
+            EXPECTED_NAME=\$(grep -oP '(?<=url: ).*\.exe' latest.yml | head -1)
+            echo \"期望的文件名: \$EXPECTED_NAME\"
+
+            # 从 GitHub API 获取实际上传的 exe 文件名
+            ACTUAL_NAME=\$(curl -sL 'https://api.github.com/repos/zp184764679/email-translate/releases/latest' | grep -oP '\"name\": \"[^\"]*\.exe\"' | head -1 | sed 's/\"name\": \"\(.*\)\"/\1/')
+            echo \"GitHub上的实际文件名: \$ACTUAL_NAME\"
+
+            if [ -n \"\$ACTUAL_NAME\" ]; then
+              echo '下载 exe 文件...'
+              curl -L -o \"\$EXPECTED_NAME\" \"https://github.com/zp184764679/email-translate/releases/download/${VERSION}/\$ACTUAL_NAME\"
+              echo \"已下载并保存为: \$EXPECTED_NAME\"
             fi
 
             chmod 644 /www/email-translate/updates/*
