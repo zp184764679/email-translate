@@ -168,10 +168,13 @@ class TranslateService:
             print(f"[TranslateService] Using proxy: {proxy}")
             self.http_client = httpx.Client(proxy=proxy, timeout=120.0)
         elif provider == "ollama":
-            # Ollama 本地模型需要更长的超时时间
-            self.http_client = httpx.Client(timeout=300.0)
+            # Ollama 本地模型需要更长的超时时间（支持 think mode）
+            self.http_client = httpx.Client(timeout=600.0)
         else:
             self.http_client = httpx.Client(timeout=120.0)
+
+        # 单独的 Ollama HTTP 客户端（智能路由用，超时更长）
+        self.ollama_client = httpx.Client(timeout=600.0)
 
         # DeepL API URL
         self.deepl_url = self.DEEPL_API_FREE if is_free_api else self.DEEPL_API_PRO
@@ -421,7 +424,9 @@ Container: 40ft Blue Ring
                                                  is_short_text=is_short_text)
 
         try:
-            response = self.http_client.post(
+            # 使用专用的 Ollama 客户端（超时更长，支持 think mode）
+            client = getattr(self, 'ollama_client', self.http_client)
+            response = client.post(
                 f"{self.ollama_base_url}/api/generate",
                 json={
                     "model": self.ollama_model,
@@ -429,7 +434,7 @@ Container: 40ft Blue Ring
                     "stream": False,
                     "options": {
                         "temperature": 0.3,
-                        "num_predict": 2048
+                        "num_predict": 4096  # 增加到 4096 以支持长文本
                     }
                 }
             )
@@ -1159,7 +1164,7 @@ Please check the following items:
         """
         复杂邮件翻译 - 拆分翻译策略
 
-        正文用 Claude（理解能力强），签名用腾讯（省钱）
+        正文用 Claude（理解能力强），问候语/签名用 Ollama（免费）
         """
         from services.email_analyzer import get_email_analyzer
 
@@ -1173,10 +1178,10 @@ Please check the following items:
 
                 translated_parts = []
 
-                # 翻译问候语（用腾讯）
+                # 翻译问候语（用 Ollama）
                 if analysis.structure.greeting:
                     try:
-                        greeting_translated = self._translate_with_tencent_or_fallback(
+                        greeting_translated = self._translate_with_ollama_or_fallback(
                             analysis.structure.greeting, target_lang, source_lang
                         )
                         translated_parts.append(greeting_translated)
@@ -1189,10 +1194,10 @@ Please check the following items:
                 )
                 translated_parts.append(body_translated)
 
-                # 翻译签名（用腾讯）
+                # 翻译签名（用 Ollama）
                 if analysis.structure.signature:
                     try:
-                        sig_translated = self._translate_with_tencent_or_fallback(
+                        sig_translated = self._translate_with_ollama_or_fallback(
                             analysis.structure.signature, target_lang, source_lang
                         )
                         translated_parts.append(sig_translated)
@@ -1201,7 +1206,7 @@ Please check the following items:
 
                 return {
                     "translated_text": "\n\n".join(translated_parts),
-                    "provider_used": "claude+tencent",
+                    "provider_used": "claude+ollama",
                     "complexity": {"level": "complex", "score": score},
                     "fallback_reason": None,
                     "split_translation": True
@@ -1214,15 +1219,24 @@ Please check the following items:
         return self._translate_with_claude_fallback(text, target_lang, source_lang, glossary,
                                                      {"level": "complex", "score": score})
 
-    def _translate_with_tencent_or_fallback(self, text: str, target_lang: str,
-                                             source_lang: str) -> str:
-        """腾讯翻译，失败则用 DeepL"""
+    def _translate_with_ollama_or_fallback(self, text: str, target_lang: str,
+                                            source_lang: str, glossary: List[Dict] = None) -> str:
+        """Ollama 翻译，失败则用腾讯/DeepL 回退"""
+        # 首选 Ollama（免费，质量好）
+        if self.ollama_base_url:
+            try:
+                return self.translate_with_ollama(text, target_lang, source_lang, glossary)
+            except Exception as e:
+                print(f"[SmartRouting] Ollama failed: {e}")
+
+        # 回退到腾讯
         if self.tencent_secret_id and self._check_tencent_quota():
             try:
                 return self.translate_with_tencent(text, target_lang, source_lang)
             except Exception as e:
                 print(f"[SmartRouting] Tencent failed: {e}")
 
+        # 最后尝试 DeepL
         if self.api_key and self._check_deepl_quota():
             try:
                 result = self.translate_with_deepl(text, target_lang, source_lang)
@@ -1231,7 +1245,12 @@ Please check the following items:
             except Exception as e:
                 print(f"[SmartRouting] DeepL failed: {e}")
 
-        raise Exception("腾讯和DeepL都不可用")
+        raise Exception("Ollama、腾讯和DeepL都不可用")
+
+    def _translate_with_tencent_or_fallback(self, text: str, target_lang: str,
+                                             source_lang: str) -> str:
+        """腾讯翻译，失败则用 DeepL（保留兼容性）"""
+        return self._translate_with_ollama_or_fallback(text, target_lang, source_lang)
 
     def _translate_body_with_deepl(self, text: str, target_lang: str,
                                     source_lang: str, glossary: List[Dict]) -> str:
@@ -1283,40 +1302,10 @@ Please check the following items:
 
     def _translate_with_fallback(self, text: str, target_lang: str, source_lang: str,
                                   glossary: List[Dict], complexity: Dict) -> Dict:
-        """带回退的翻译（腾讯 → DeepL → Ollama → Claude）"""
+        """带回退的翻译（Ollama → Claude，跳过腾讯和DeepL）"""
         providers_tried = []
 
-        # 1. 腾讯翻译
-        if self.tencent_secret_id and self.tencent_secret_key:
-            if self._check_tencent_quota():
-                try:
-                    translated = self.translate_with_tencent(text, target_lang, source_lang)
-                    return {
-                        "translated_text": translated,
-                        "provider_used": "tencent",
-                        "complexity": complexity,
-                        "fallback_reason": None
-                    }
-                except Exception as e:
-                    providers_tried.append(("tencent", str(e)))
-            else:
-                providers_tried.append(("tencent", "额度用完"))
-
-        # 2. DeepL
-        if self.api_key and self._check_deepl_quota():
-            try:
-                translated = self.translate_with_deepl(text, target_lang, source_lang)
-                self._record_deepl_usage(len(text))
-                return {
-                    "translated_text": translated,
-                    "provider_used": "deepl",
-                    "complexity": complexity,
-                    "fallback_reason": f"腾讯不可用: {providers_tried}"
-                }
-            except Exception as e:
-                providers_tried.append(("deepl", str(e)))
-
-        # 3. Ollama
+        # 1. Ollama 优先（免费，质量好）
         if self.ollama_base_url:
             try:
                 translated = self.translate_with_ollama(text, target_lang, source_lang, glossary)
@@ -1324,12 +1313,13 @@ Please check the following items:
                     "translated_text": translated,
                     "provider_used": "ollama",
                     "complexity": complexity,
-                    "fallback_reason": f"前序引擎不可用: {[p[0] for p in providers_tried]}"
+                    "fallback_reason": None
                 }
             except Exception as e:
                 providers_tried.append(("ollama", str(e)))
+                print(f"[SmartRouting] Ollama failed in fallback: {e}")
 
-        # 4. Claude
+        # 2. Claude 兜底
         return self._translate_with_claude_fallback(text, target_lang, source_lang, glossary, complexity)
 
     def _translate_with_claude_fallback(self, text: str, target_lang: str, source_lang: str,
