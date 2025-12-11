@@ -81,13 +81,13 @@
 | 认证 | JWT (邮箱IMAP验证) |
 | 前端 | Vue 3 + Vite + Element Plus |
 | 桌面端 | Electron 28 |
-| 翻译 | Claude API / DeepL / Ollama / 腾讯翻译 |
+| 翻译 | Ollama (本地) / Claude API |
 
 ## 核心功能
 
 1. **邮箱登录** - 使用公司邮箱密码验证IMAP连接
 2. **邮件收取** - IMAP协议拉取邮件，自动检测语言
-3. **智能翻译** - 外语邮件翻译为中文（DeepL/Ollama）
+3. **智能翻译** - 外语邮件翻译为中文（Ollama/Claude）
 4. **回复撰写** - 中文撰写，翻译为目标语言发送
 5. **术语表** - 按供应商维护专业术语翻译
 
@@ -193,22 +193,17 @@ MYSQL_PASSWORD=your-password
 MYSQL_DATABASE=email_translate
 
 # ===== 翻译引擎配置 =====
-# ollama: 本地测试（免费）
-# claude: Claude API（正式使用，半价 Batch）
-# deepl: DeepL API
+# ollama: 本地大模型（主力，免费）
+# claude: Claude API（复杂邮件备用）
 TRANSLATE_PROVIDER=ollama
 
-# Claude API (Anthropic) - 正式使用
-CLAUDE_API_KEY=your-claude-api-key
-CLAUDE_MODEL=claude-sonnet-4-20250514
-
-# DeepL API
-DEEPL_API_KEY=your-deepl-key
-DEEPL_FREE_API=true
-
-# Ollama 本地模型 - 本地测试用
+# Ollama 本地模型 - 主力翻译引擎
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=qwen3:8b
+
+# Claude API (Anthropic) - 复杂邮件备用
+CLAUDE_API_KEY=your-claude-api-key
+CLAUDE_MODEL=claude-sonnet-4-20250514
 
 # JWT 密钥
 SECRET_KEY=your-secret-key
@@ -216,12 +211,10 @@ SECRET_KEY=your-secret-key
 
 ### 翻译引擎配置
 
-| Provider | 说明 | 免费额度 | 用量统计 |
-|----------|------|----------|----------|
-| `tencent` | 腾讯翻译，速度快，格式好 | 500万字符/月 | ✓ 自动记录 |
-| `deepl` | DeepL API，翻译质量高 | 50万字符/月 | ✓ 自动记录 |
-| `ollama` | 本地大模型，免费无限制 | 无限制 | 不统计 |
-| `claude` | Claude API，理解能力最强 | 按量付费 | ✓ 只统计不限制 |
+| Provider | 说明 | 费用 | 用量统计 |
+|----------|------|------|----------|
+| `ollama` | 本地大模型（主力） | 免费 | 不统计 |
+| `claude` | Claude API（复杂邮件备用） | 按量付费 | ✓ 自动记录 |
 
 ### 智能路由模式（推荐）
 
@@ -240,7 +233,7 @@ Ollama 评估复杂度（规则优先，必要时用LLM打分）
 │                 │ └─ 签名 → Ollama     │ └─ 签名 → Ollama    │
 └─────────────────┴─────────────────────┴─────────────────────┘
     ↓ 失败时自动回退
-Ollama → Claude（跳过腾讯/DeepL，减少依赖）
+Ollama → Claude
 ```
 
 **智能拆分翻译**：
@@ -745,7 +738,7 @@ CELERY_RESULT_BACKEND=redis://localhost:6379/2
 | 手动拉取邮件 | 点击"同步"按钮 |
 | 自动定时拉取 | 每5分钟自动检查新邮件（前端定时器实现） |
 | 新邮件桌面通知 | Electron Notification API |
-| 智能翻译 | 支持 Claude/DeepL/Ollama |
+| 智能翻译 | 支持 Ollama/Claude |
 | 翻译缓存 | 相同文本只翻译一次 |
 | 邮件翻译共享 | 同一封邮件跨用户只翻译一次 |
 | 邮件标记 | 星标、已读/未读 |
