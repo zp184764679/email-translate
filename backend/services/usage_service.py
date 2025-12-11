@@ -2,10 +2,9 @@
 翻译 API 用量统计服务
 
 支持的翻译引擎：
-- tencent: 腾讯翻译（500万字符/月免费）
+- ollama: 本地大模型（主力引擎，无限制，不统计）
 - deepl: DeepL（50万字符/月免费）
 - claude: Claude API（按 token 计费，无免费额度，统计用于成本追踪）
-- ollama: 本地大模型（无限制，不统计）
 
 功能：
 - 记录每次翻译的字符数/token数
@@ -25,18 +24,16 @@ class UsageService:
 
     # 各引擎免费额度配置（字符/月）
     PROVIDER_QUOTAS = {
-        'tencent': 5_000_000,   # 腾讯翻译：500万字符/月免费
+        'ollama': -1,           # 本地模型：无限制（-1 表示不限制，主力引擎）
         'deepl': 500_000,       # DeepL Free：50万字符/月
         'claude': 0,            # Claude：无免费额度，按 token 计费
-        'ollama': -1,           # 本地模型：无限制（-1 表示不限制）
     }
 
     # 各引擎显示名称
     PROVIDER_NAMES = {
-        'tencent': '腾讯翻译',
+        'ollama': '本地模型 (Ollama)',
         'deepl': 'DeepL',
         'claude': 'Claude API',
-        'ollama': '本地模型 (Ollama)',
     }
 
     # 警告阈值：使用超过 80% 时警告

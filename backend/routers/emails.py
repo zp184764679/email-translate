@@ -415,8 +415,6 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
             ollama_base_url=settings.ollama_base_url,
             ollama_model=settings.ollama_model,
             claude_model=getattr(settings, 'claude_model', None),
-            tencent_secret_id=settings.tencent_secret_id,
-            tencent_secret_key=settings.tencent_secret_key
         )
 
         # 是否启用智能路由（可通过配置控制）
@@ -1185,8 +1183,6 @@ async def translate_email(
             ollama_base_url=settings.ollama_base_url,
             ollama_model=settings.ollama_model,
             claude_model=getattr(settings, 'claude_model', None),
-            tencent_secret_id=settings.tencent_secret_id,
-            tencent_secret_key=settings.tencent_secret_key
         )
 
         translated = service.translate_text(text=text, target_lang=target_lang)
@@ -1233,8 +1229,6 @@ async def translate_email(
             ollama_base_url=settings.ollama_base_url,
             ollama_model=settings.ollama_model,
             claude_model=getattr(settings, 'claude_model', None),
-            tencent_secret_id=settings.tencent_secret_id,
-            tencent_secret_key=settings.tencent_secret_key
         )
 
         # 检查是否启用智能路由（与新邮件自动翻译保持一致）

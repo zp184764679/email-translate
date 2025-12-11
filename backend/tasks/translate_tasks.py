@@ -74,14 +74,11 @@ def translate_email_task(self, email_id: int, account_id: int, force: bool = Fal
         # 创建翻译服务
         service = TranslateService(
             provider=settings.translate_provider,
-            deepl_api_key=settings.deepl_api_key,
-            deepl_free_api=settings.deepl_free_api,
-            claude_api_key=settings.claude_api_key,
-            claude_model=settings.claude_model,
+            api_key=settings.claude_api_key or settings.deepl_api_key,
             ollama_base_url=settings.ollama_base_url,
             ollama_model=settings.ollama_model,
-            tencent_secret_id=settings.tencent_secret_id,
-            tencent_secret_key=settings.tencent_secret_key,
+            claude_model=settings.claude_model,
+            is_free_api=settings.deepl_free_api,
         )
 
         # 执行翻译

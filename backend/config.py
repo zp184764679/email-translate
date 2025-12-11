@@ -32,24 +32,20 @@ class Settings(BaseSettings):
     mysql_database: str = "email_translate"
 
     # Translation API
-    translate_provider: str = "tencent"  # "deepl", "claude", "ollama", or "tencent"
+    translate_provider: str = "ollama"  # "ollama", "claude", or "deepl"
     translate_enabled: bool = True
 
-    # DeepL API
-    deepl_api_key: str = ""
-    deepl_free_api: bool = True
-
-    # Claude API (Anthropic)
-    claude_api_key: str = ""
-    claude_model: str = "claude-sonnet-4-20250514"
-
-    # Ollama (local LLM) - 本地测试用
+    # Ollama (local LLM) - 主力翻译引擎，免费且质量好
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3:8b"
 
-    # Tencent TMT (腾讯翻译) - 速度快，格式好
-    tencent_secret_id: str = ""
-    tencent_secret_key: str = ""
+    # Claude API (Anthropic) - 复杂邮件用
+    claude_api_key: str = ""
+    claude_model: str = "claude-sonnet-4-20250514"
+
+    # DeepL API (备用)
+    deepl_api_key: str = ""
+    deepl_free_api: bool = True
 
     # 智能路由配置
     smart_routing_enabled: bool = True  # 是否启用智能路由（根据复杂度选择翻译引擎）

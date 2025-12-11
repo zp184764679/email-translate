@@ -87,7 +87,7 @@ def get_translate_service(for_smart_routing: bool = False) -> TranslateService:
 
     智能路由模式（smart_routing_enabled=True 或 for_smart_routing=True）：
     创建包含所有引擎配置的服务，支持自动切换：
-    优先级：腾讯翻译 → DeepL → Ollama → Claude
+    优先级：Ollama → DeepL → Claude
 
     单引擎模式：
     根据 TRANSLATE_PROVIDER 使用单一引擎
@@ -97,9 +97,6 @@ def get_translate_service(for_smart_routing: bool = False) -> TranslateService:
         return TranslateService(
             # 主要配置（决定 translate_text 使用哪个引擎）
             provider=settings.translate_provider,
-            # 腾讯翻译配置
-            tencent_secret_id=settings.tencent_secret_id,
-            tencent_secret_key=settings.tencent_secret_key,
             # DeepL 配置
             api_key=settings.deepl_api_key or settings.claude_api_key,
             is_free_api=settings.deepl_free_api,
@@ -111,13 +108,7 @@ def get_translate_service(for_smart_routing: bool = False) -> TranslateService:
         )
 
     # 单引擎模式
-    if settings.translate_provider == "tencent":
-        return TranslateService(
-            provider="tencent",
-            tencent_secret_id=settings.tencent_secret_id,
-            tencent_secret_key=settings.tencent_secret_key
-        )
-    elif settings.translate_provider == "deepl":
+    if settings.translate_provider == "deepl":
         return TranslateService(
             api_key=settings.deepl_api_key,
             provider="deepl",
@@ -183,8 +174,8 @@ async def translate_text(
 ):
     """Translate text using smart routing (with cache)
 
-    智能路由优先级：腾讯翻译 → DeepL → Ollama → Claude
-    自动根据额度切换引擎
+    智能路由优先级：Ollama → DeepL → Claude
+    自动根据复杂度选择引擎
     """
     if not settings.translate_enabled:
         return TranslateResponse(translated_text=request.text, source_lang="disabled")
@@ -236,7 +227,7 @@ async def translate_reply(
 ):
     """Translate Chinese reply to target language using smart routing (with cache)
 
-    智能路由优先级：腾讯翻译 → DeepL → Ollama → Claude
+    智能路由优先级：Ollama → DeepL → Claude
     """
     if not settings.translate_enabled:
         return TranslateResponse(translated_text=request.text, source_lang="disabled")
@@ -437,7 +428,7 @@ async def reset_token_stats(account: EmailAccount = Depends(get_current_account)
     return {"message": "Token 统计已重置"}
 
 
-# ============ 翻译用量统计 (腾讯等) ============
+# ============ 翻译用量统计 ============
 @router.get("/usage-stats")
 async def get_usage_stats(
     provider: Optional[str] = None,
@@ -447,7 +438,7 @@ async def get_usage_stats(
     获取翻译 API 用量统计
 
     参数:
-    - provider: 可选，指定翻译引擎 (tencent, deepl, claude, ollama)
+    - provider: 可选，指定翻译引擎 (ollama, deepl, claude)
                 不指定则返回所有引擎的用量
 
     返回:
@@ -479,7 +470,7 @@ async def get_provider_usage_stats(
     获取指定翻译引擎的用量统计
 
     路径参数:
-    - provider: 翻译引擎名称 (tencent, deepl, claude, ollama)
+    - provider: 翻译引擎名称 (ollama, deepl, claude)
     """
     from services.usage_service import check_translation_quota
 
