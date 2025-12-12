@@ -183,16 +183,12 @@ const emit = defineEmits(['reply', 'replyAll', 'forward', 'delete', 'flag', 'ref
 const quickReply = ref('')
 const translating = ref(false)
 const showHtmlDialog = ref(false)
-let translateAbortController = null  // 用于取消翻译请求
 let isUnmounted = false  // 组件卸载状态标志
 
-// 组件卸载时取消进行中的翻译请求
+// 组件卸载时标记状态，让翻译请求在后台继续运行
 onUnmounted(() => {
   isUnmounted = true  // 标记已卸载，防止异步回调修改状态
-  if (translateAbortController) {
-    translateAbortController.abort()
-    translateAbortController = null
-  }
+  // 注意：不取消翻译请求，让它在后台继续运行
 })
 
 // 计算属性：显示原文（优先纯文本，其次从 HTML 提取）
@@ -369,23 +365,20 @@ function handleFlag() {
 }
 
 async function handleTranslate() {
-  // 创建 AbortController 用于取消请求
-  translateAbortController = new AbortController()
   translating.value = true
   try {
-    await api.translateEmail(props.email.id, translateAbortController.signal)
-    // 组件卸载后不更新状态
-    if (isUnmounted) return
+    // 不使用 AbortController，让请求在后台继续运行
+    await api.translateEmail(props.email.id)
+    // 组件卸载后不更新状态，但翻译已保存到后端
+    if (isUnmounted) {
+      console.log('Translation completed in background')
+      return
+    }
     ElMessage.success('翻译完成')
     emit('refresh')
     // 触发全局邮件列表刷新
     userStore.triggerEmailRefresh()
   } catch (e) {
-    // 如果是用户主动取消，不显示错误
-    if (e.name === 'CanceledError' || e.name === 'AbortError') {
-      console.log('Translation request cancelled')
-      return
-    }
     // 组件卸载后不显示错误
     if (isUnmounted) return
     console.error('Translation failed:', e)
@@ -395,7 +388,6 @@ async function handleTranslate() {
     if (!isUnmounted) {
       translating.value = false
     }
-    translateAbortController = null
   }
 }
 
