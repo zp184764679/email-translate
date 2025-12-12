@@ -570,14 +570,14 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                             # 只有当翻译结果非空时才标记为已翻译
                             new_email.is_translated = bool(subject_translated or pure_body_translated)
 
-                            # 保存到共享翻译表（只保存纯翻译，不含历史引用，避免递归叠加）
-                            if subject_translated or pure_body_translated:
+                            # 保存到共享翻译表（保存完整翻译，含历史引用，供后续邮件复用）
+                            if subject_translated or display_body_translated:
                                 shared_entry = SharedEmailTranslation(
                                     message_id=email_data["message_id"],
                                     subject_original=email_data.get("subject_original"),
                                     subject_translated=subject_translated,
                                     body_original=email_data.get("body_original"),
-                                    body_translated=pure_body_translated,  # 纯翻译，不含历史
+                                    body_translated=display_body_translated,  # 完整翻译，含历史
                                     source_lang=lang,
                                     target_lang="zh",
                                     translated_by=account.id
@@ -1356,20 +1356,20 @@ async def translate_email(
     email.body_translated = display_body_translated  # 显示用（含历史引用）
     email.is_translated = True
 
-    # 5. 保存到共享翻译表（供其他用户复用）
+    # 5. 保存到共享翻译表（保存完整翻译，含历史引用，供后续邮件复用）
     if email.message_id:
         shared_entry = SharedEmailTranslation(
             message_id=email.message_id,
             subject_original=email.subject_original,
             subject_translated=subject_translated,
             body_original=email.body_original,
-            body_translated=pure_body_translated,  # 纯翻译，不含历史引用，避免递归叠加
+            body_translated=display_body_translated,  # 完整翻译，含历史
             source_lang=source_lang,
             target_lang="zh",
             translated_by=account.id
         )
         db.add(shared_entry)
-        print(f"[SharedTranslation SAVE] message_id={email.message_id} (pure translation, no history)")
+        print(f"[SharedTranslation SAVE] message_id={email.message_id} (full translation with history)")
 
     await db.commit()
     await db.refresh(email)
