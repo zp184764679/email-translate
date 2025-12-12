@@ -161,16 +161,43 @@ const api = {
     return instance.put(`/drafts/${id}`, data)
   },
 
-  async sendDraft(id) {
-    return instance.post(`/drafts/${id}/send`)
+  async sendDraft(id, approverId, saveAsDefault = false) {
+    return instance.post(`/drafts/${id}/send`, {
+      approver_id: approverId,
+      save_as_default: saveAsDefault
+    })
   },
 
-  async submitDraft(id) {
-    return instance.post(`/drafts/${id}/send`)
+  async submitDraft(id, approverId, saveAsDefault = false) {
+    return instance.post(`/drafts/${id}/send`, {
+      approver_id: approverId,
+      save_as_default: saveAsDefault
+    })
   },
 
   async deleteDraft(id) {
     return instance.delete(`/drafts/${id}`)
+  },
+
+  // 审批相关
+  async getApprovers() {
+    return instance.get('/users/approvers')
+  },
+
+  async getPendingDrafts() {
+    return instance.get('/drafts/pending')
+  },
+
+  async approveDraft(id) {
+    return instance.post(`/drafts/${id}/approve`)
+  },
+
+  async rejectDraft(id, reason) {
+    return instance.post(`/drafts/${id}/reject`, { reason })
+  },
+
+  async setDefaultApprover(approverId) {
+    return instance.put('/users/me/default-approver', { approver_id: approverId })
   },
 
   // Email Actions

@@ -6,7 +6,7 @@
       </template>
 
       <el-table :data="drafts" v-loading="loading" stripe>
-        <el-table-column label="作者" prop="author_id" width="120" />
+        <el-table-column label="提交人" prop="author_email" width="200" />
         <el-table-column label="原邮件主题" min-width="200">
           <template #default="{ row }">
             {{ row.reply_to_email?.subject_original || '-' }}
@@ -38,7 +38,7 @@
     <el-dialog v-model="viewDialogVisible" title="审批详情" width="70%">
       <div v-if="currentDraft">
         <el-descriptions :column="2" border>
-          <el-descriptions-item label="提交人">{{ currentDraft.author_id }}</el-descriptions-item>
+          <el-descriptions-item label="提交人">{{ currentDraft.author_email }}</el-descriptions-item>
           <el-descriptions-item label="目标语言">{{ currentDraft.target_language }}</el-descriptions-item>
           <el-descriptions-item label="提交时间" :span="2">{{ formatDate(currentDraft.submitted_at) }}</el-descriptions-item>
         </el-descriptions>
@@ -106,7 +106,7 @@ onMounted(() => {
 async function loadDrafts() {
   loading.value = true
   try {
-    drafts.value = await api.getPendingApprovals()
+    drafts.value = await api.getPendingDrafts()
   } catch (e) {
     console.error('Failed to load drafts:', e)
   } finally {
@@ -171,12 +171,18 @@ async function modifyAndApprove() {
   }
 
   try {
-    await api.modifyAndApprove(currentDraft.value.id, editableTranslation.value)
+    // 先更新草稿翻译内容
+    await api.updateDraft(currentDraft.value.id, {
+      body_translated: editableTranslation.value
+    })
+    // 再审批通过
+    await api.approveDraft(currentDraft.value.id)
     ElMessage.success('已修改并发送')
     viewDialogVisible.value = false
     loadDrafts()
   } catch (e) {
     console.error('Failed to modify and approve:', e)
+    ElMessage.error('操作失败')
   }
 }
 
