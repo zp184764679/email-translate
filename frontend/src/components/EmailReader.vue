@@ -65,17 +65,18 @@
       </div>
     </div>
 
-    <!-- 邮件正文 - 段落配对视图 -->
-    <div class="reader-body split-view" v-if="email.language_detected && email.language_detected !== 'zh'">
+    <!-- 邮件正文 - 段落配对视图（所有邮件统一双栏显示）-->
+    <div class="reader-body split-view">
       <!-- Split View 头部 -->
       <div class="split-header">
         <div class="split-header-left">
-          <span>原文 ({{ getLanguageName(email.language_detected) }})</span>
+          <span>原文 ({{ getLanguageName(email.language_detected) || '中文' }})</span>
         </div>
         <div class="split-header-right">
-          <span>翻译 (中文)</span>
+          <span v-if="email.language_detected && email.language_detected !== 'zh'">翻译 (中文)</span>
+          <span v-else>内容预览</span>
           <el-button
-            v-if="!email.is_translated"
+            v-if="!email.is_translated && email.language_detected && email.language_detected !== 'zh'"
             type="primary"
             size="small"
             @click="handleTranslate"
@@ -88,7 +89,19 @@
 
       <!-- 段落配对内容 -->
       <div class="paragraph-container" ref="paragraphContainer">
-        <template v-if="email.body_translated">
+        <!-- 中文邮件：左右都显示原文 -->
+        <template v-if="!email.language_detected || email.language_detected === 'zh'">
+          <div class="paragraph-pair" v-for="(para, index) in chineseParagraphs" :key="index">
+            <div class="pair-cell original-cell">
+              <div class="cell-content">{{ para }}</div>
+            </div>
+            <div class="pair-cell translated-cell">
+              <div class="cell-content">{{ para }}</div>
+            </div>
+          </div>
+        </template>
+        <!-- 非中文邮件：显示原文和翻译 -->
+        <template v-else-if="email.body_translated">
           <div class="paragraph-pair" v-for="(pair, index) in paragraphPairs" :key="index">
             <div class="pair-cell original-cell">
               <div class="cell-content">{{ pair.original }}</div>
@@ -119,17 +132,6 @@
       </div>
 
       <!-- HTML 查看按钮 -->
-      <div class="html-toggle" v-if="email.body_html">
-        <el-button text size="small" @click="showHtmlDialog = true">
-          <el-icon><View /></el-icon>
-          查看 HTML 原文
-        </el-button>
-      </div>
-    </div>
-
-    <!-- 中文邮件：单栏显示 -->
-    <div class="reader-body single-view" v-else>
-      <div class="body-content">{{ email.body_original || '(无文本内容)' }}</div>
       <div class="html-toggle" v-if="email.body_html">
         <el-button text size="small" @click="showHtmlDialog = true">
           <el-icon><View /></el-icon>
@@ -220,6 +222,12 @@ const paragraphPairs = computed(() => {
   }
 
   return pairs
+})
+
+// 中文邮件段落：用于中文邮件左右双栏显示
+const chineseParagraphs = computed(() => {
+  const text = displayOriginalBody.value
+  return splitIntoParagraphs(text)
 })
 
 // 将文本按段落分割（以空行为分隔符）
