@@ -552,28 +552,32 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                                         text_to_translate, lang, "zh"
                                     )
 
-                                # 4. 组合历史翻译
+                                # 4. 保存纯翻译结果（不含历史引用，避免递归叠加）
+                                pure_body_translated = body_translated  # 仅新内容的翻译
+
+                                # 5. 组合历史翻译（仅用于显示）
+                                display_body_translated = body_translated
                                 if has_quote:
                                     if quoted_translation:
-                                        body_translated += f"\n\n--- 以下为引用内容（已翻译）---\n{quoted_translation}"
+                                        display_body_translated += f"\n\n--- 以下为引用内容（已翻译）---\n{quoted_translation}"
                                     else:
                                         # 没有找到历史翻译，显示原文摘要
                                         truncated = quoted_content[:500] + ('...' if len(quoted_content) > 500 else '')
-                                        body_translated += f"\n\n--- 以下为引用内容（原文）---\n{truncated}"
+                                        display_body_translated += f"\n\n--- 以下为引用内容（原文）---\n{truncated}"
 
                             new_email.subject_translated = subject_translated
-                            new_email.body_translated = body_translated
+                            new_email.body_translated = display_body_translated  # 显示用（含历史引用）
                             # 只有当翻译结果非空时才标记为已翻译
-                            new_email.is_translated = bool(subject_translated or body_translated)
+                            new_email.is_translated = bool(subject_translated or pure_body_translated)
 
-                            # 保存到共享翻译表（只有翻译成功才保存）
-                            if subject_translated or body_translated:
+                            # 保存到共享翻译表（只保存纯翻译，不含历史引用，避免递归叠加）
+                            if subject_translated or pure_body_translated:
                                 shared_entry = SharedEmailTranslation(
                                     message_id=email_data["message_id"],
                                     subject_original=email_data.get("subject_original"),
                                     subject_translated=subject_translated,
                                     body_original=email_data.get("body_original"),
-                                    body_translated=body_translated,
+                                    body_translated=pure_body_translated,  # 纯翻译，不含历史
                                     source_lang=lang,
                                     target_lang="zh",
                                     translated_by=account.id
@@ -741,7 +745,11 @@ async def smart_translate_email_body(
 
     if quote_start == -1:
         # 没有引用，全文翻译
-        return await translate_with_cache_async(db, translate_service, body, source_lang, target_lang)
+        full_translation = await translate_with_cache_async(db, translate_service, body, source_lang, target_lang)
+        return {
+            'pure': full_translation,      # 纯翻译，用于保存到 SharedEmailTranslation
+            'display': full_translation    # 显示翻译，用于 Email.body_translated
+        }
 
     print(f"[SmartTranslate] Found quote at line {quote_start}, new content: {len(new_content)} chars, quoted: {len(quoted_content)} chars")
 
@@ -750,8 +758,8 @@ async def smart_translate_email_body(
     if new_content:
         new_translated = await translate_with_cache_async(db, translate_service, new_content, source_lang, target_lang)
 
-    # 尝试查找引用内容的已有翻译
-    quoted_translated = ""
+    # 尝试查找引用内容的已有翻译（用于显示，但不保存到 SharedEmailTranslation）
+    quoted_display = ""
     if quoted_content and in_reply_to:
         # 通过 in_reply_to 查找原邮件的翻译
         shared_result = await db.execute(
@@ -762,16 +770,19 @@ async def smart_translate_email_body(
         shared = shared_result.scalar_one_or_none()
         if shared and shared.body_translated:
             # 使用已有翻译，加上引用标记
-            quoted_translated = f"\n\n--- 以下为引用内容（已翻译）---\n{shared.body_translated}"
+            quoted_display = f"\n\n--- 以下为引用内容（已翻译）---\n{shared.body_translated}"
             print(f"[SmartTranslate] Reused translation from {in_reply_to[:30]}")
         else:
             # 没有找到已有翻译，标记为引用（不翻译）
-            quoted_translated = f"\n\n--- 以下为引用内容（原文）---\n{quoted_content[:500]}{'...' if len(quoted_content) > 500 else ''}"
+            quoted_display = f"\n\n--- 以下为引用内容（原文）---\n{quoted_content[:500]}{'...' if len(quoted_content) > 500 else ''}"
     elif quoted_content:
         # 没有 in_reply_to，只标记引用
-        quoted_translated = f"\n\n--- 以下为引用内容（原文）---\n{quoted_content[:500]}{'...' if len(quoted_content) > 500 else ''}"
+        quoted_display = f"\n\n--- 以下为引用内容（原文）---\n{quoted_content[:500]}{'...' if len(quoted_content) > 500 else ''}"
 
-    return new_translated + quoted_translated
+    return {
+        'pure': new_translated,                      # 纯翻译（不含历史引用），用于保存到 SharedEmailTranslation
+        'display': new_translated + quoted_display   # 显示翻译（含历史引用），用于 Email.body_translated
+    }
 
 
 @router.get("/stats/unread")
@@ -1275,7 +1286,8 @@ async def translate_email(
         print(f"[Translate] Extracted {len(body_to_translate)} chars from HTML for email {email.id}")
 
     # 智能翻译正文（检测引用，支持智能路由）
-    body_translated = ""
+    pure_body_translated = ""    # 纯翻译，用于保存到 SharedEmailTranslation
+    display_body_translated = "" # 显示翻译，用于 Email.body_translated
     provider_used = "unknown"
     if body_to_translate:
         # 创建翻译服务
@@ -1292,29 +1304,56 @@ async def translate_email(
 
         if use_smart_routing:
             # 智能路由翻译（根据复杂度自动选择引擎）
+            # 先检测引用内容，只翻译新内容
+            new_content, quoted_content, quote_start = extract_new_content_from_reply(body_to_translate)
+
+            content_to_translate = new_content if quote_start != -1 else body_to_translate
+
             result = service.translate_with_smart_routing(
-                text=body_to_translate,
+                text=content_to_translate,
                 subject=email.subject_original or "",
                 target_lang="zh",
                 source_lang=source_lang
             )
-            body_translated = result["translated_text"]
+            pure_body_translated = result["translated_text"]
             provider_used = result["provider_used"]
             complexity_info = result["complexity"]
             print(f"[ManualTranslate SmartRouting] Email {email.id} "
                   f"→ {provider_used} (complexity: {complexity_info['level']}, "
                   f"score: {complexity_info['score']})")
+
+            # 组合显示翻译（用于 Email.body_translated）
+            display_body_translated = pure_body_translated
+            if quote_start != -1 and quoted_content:
+                # 尝试查找引用内容的已有翻译
+                if email.in_reply_to:
+                    shared_result = await db.execute(
+                        select(SharedEmailTranslation).where(
+                            SharedEmailTranslation.message_id == email.in_reply_to
+                        )
+                    )
+                    shared = shared_result.scalar_one_or_none()
+                    if shared and shared.body_translated:
+                        display_body_translated += f"\n\n--- 以下为引用内容（已翻译）---\n{shared.body_translated}"
+                    else:
+                        truncated = quoted_content[:500] + ('...' if len(quoted_content) > 500 else '')
+                        display_body_translated += f"\n\n--- 以下为引用内容（原文）---\n{truncated}"
+                else:
+                    truncated = quoted_content[:500] + ('...' if len(quoted_content) > 500 else '')
+                    display_body_translated += f"\n\n--- 以下为引用内容（原文）---\n{truncated}"
         else:
             # 普通智能翻译（检测引用，只翻译新内容）
-            body_translated = await smart_translate_email_body(
+            translate_result = await smart_translate_email_body(
                 db, service, body_to_translate, source_lang, "zh",
                 in_reply_to=email.in_reply_to
             )
+            pure_body_translated = translate_result['pure']
+            display_body_translated = translate_result['display']
             provider_used = settings.translate_provider
 
     # 4. 更新邮件记录
     email.subject_translated = subject_translated
-    email.body_translated = body_translated
+    email.body_translated = display_body_translated  # 显示用（含历史引用）
     email.is_translated = True
 
     # 5. 保存到共享翻译表（供其他用户复用）
@@ -1324,13 +1363,13 @@ async def translate_email(
             subject_original=email.subject_original,
             subject_translated=subject_translated,
             body_original=email.body_original,
-            body_translated=body_translated,
+            body_translated=pure_body_translated,  # 纯翻译，不含历史引用，避免递归叠加
             source_lang=source_lang,
             target_lang="zh",
             translated_by=account.id
         )
         db.add(shared_entry)
-        print(f"[SharedTranslation SAVE] message_id={email.message_id}")
+        print(f"[SharedTranslation SAVE] message_id={email.message_id} (pure translation, no history)")
 
     await db.commit()
     await db.refresh(email)
