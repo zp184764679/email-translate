@@ -404,6 +404,73 @@ class TranslateService:
                 lines.append(f"| {term} | {translation} |")
         return "\n".join(lines)
 
+    def _clean_translation_output(self, translated: str, original: str, target_lang: str) -> str:
+        """清理翻译输出，去除模型可能输出的原文重复
+
+        有些模型会输出类似：
+        - 原文 + 译文
+        - 原文（重复）+ 译文
+        - 带"原文："、"译文："前缀的格式
+
+        Args:
+            translated: 模型输出的翻译结果
+            original: 原文
+            target_lang: 目标语言
+        """
+        if not translated:
+            return translated
+
+        # 1. 去除常见的前缀标记
+        prefixes_to_remove = [
+            "译文：", "译文:", "翻译：", "翻译:",
+            "Translation:", "Translation：",
+            "译文\n", "翻译\n",
+        ]
+        for prefix in prefixes_to_remove:
+            if translated.startswith(prefix):
+                translated = translated[len(prefix):].strip()
+
+        # 2. 如果输出包含分隔线后的译文，只保留分隔线后的内容
+        separators = ["---", "===", "***", "———"]
+        for sep in separators:
+            if sep in translated:
+                parts = translated.split(sep)
+                # 检查最后一部分是否像译文（包含中文）
+                if len(parts) >= 2:
+                    last_part = parts[-1].strip()
+                    # 如果目标是中文，检查最后部分是否有中文
+                    if target_lang == "zh" and re.search(r'[\u4e00-\u9fff]', last_part):
+                        # 检查最后部分不是原文的重复
+                        if last_part != original.strip() and len(last_part) > 10:
+                            translated = last_part
+                            break
+
+        # 3. 检查是否原文重复出现在开头
+        # 如果翻译结果以原文开头，去除原文部分
+        original_stripped = original.strip()
+        if len(original_stripped) > 20:  # 只对较长原文做检查
+            # 检查完整原文是否在开头
+            if translated.startswith(original_stripped):
+                translated = translated[len(original_stripped):].strip()
+            else:
+                # 检查原文的前100个字符是否在开头
+                original_start = original_stripped[:100]
+                if translated.startswith(original_start):
+                    # 找到原文结束的位置
+                    # 简单策略：如果找到与原文相似的大段文本，跳过它
+                    # 通过检查中文字符出现的位置来判断
+                    if target_lang == "zh":
+                        # 找到第一个连续中文段落的位置
+                        match = re.search(r'[\u4e00-\u9fff]{5,}', translated)
+                        if match and match.start() > 50:
+                            # 如果中文出现在较后位置，可能前面是原文
+                            translated = translated[match.start():].strip()
+
+        # 4. 去除开头的空行
+        translated = translated.lstrip('\n')
+
+        return translated
+
     def _build_translation_prompt(self, text: str, target_lang: str, source_lang: str = None,
                                    glossary: List[Dict] = None, use_think: bool = True,
                                    is_short_text: bool = False, is_long_text: bool = False) -> str:
@@ -545,7 +612,12 @@ Container: 40ft Blue Ring
 关于交期事宜，请确认。
 
 ---
-{text}"""
+以下是需要翻译的邮件原文：
+
+{text}
+
+---
+请直接输出译文（不要输出原文，不要输出"译文："前缀）："""
         return prompt
 
     # ============ Ollama Translation ============
@@ -602,6 +674,9 @@ Container: 40ft Blue Ring
             # 去除 qwen3 的思考标签 <think>...</think>
             translated = re.sub(r'<think>.*?</think>', '', translated, flags=re.DOTALL)
             translated = translated.strip()
+
+            # 去除可能的原文重复（模型有时会输出原文+译文）
+            translated = self._clean_translation_output(translated, text, target_lang)
 
             print(f"[Ollama/{self.ollama_model}] Translated to {target_lang}")
             return translated
