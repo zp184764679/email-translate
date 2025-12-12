@@ -133,9 +133,11 @@ const loading = ref(false)
 const translating = ref(false)
 const showMode = ref('translated')  // translated, original, split
 let translateAbortController = null  // 用于取消翻译请求
+let isUnmounted = false  // 组件卸载状态标志
 
 // 组件卸载时取消进行中的翻译请求
 onUnmounted(() => {
+  isUnmounted = true  // 标记已卸载，防止异步回调修改状态
   if (translateAbortController) {
     translateAbortController.abort()
     translateAbortController = null
@@ -205,6 +207,8 @@ async function translateEmail() {
   translating.value = true
   try {
     const result = await api.translateEmail(email.value.id, translateAbortController.signal)
+    // 组件卸载后不更新状态
+    if (isUnmounted) return
     email.value = result
     showMode.value = 'translated'
     ElMessage.success('翻译完成')
@@ -215,10 +219,15 @@ async function translateEmail() {
       console.log('Translation request cancelled')
       return
     }
+    // 组件卸载后不显示错误
+    if (isUnmounted) return
     console.error('Translation failed:', e)
     ElMessage.error('翻译失败')
   } finally {
-    translating.value = false
+    // 只在组件未卸载时修改状态
+    if (!isUnmounted) {
+      translating.value = false
+    }
     translateAbortController = null
   }
 }
