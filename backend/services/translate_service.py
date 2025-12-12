@@ -425,49 +425,66 @@ class TranslateService:
             "译文：", "译文:", "翻译：", "翻译:",
             "Translation:", "Translation：",
             "译文\n", "翻译\n",
+            "原文：", "原文:",  # 也去除原文标记
         ]
         for prefix in prefixes_to_remove:
             if translated.startswith(prefix):
                 translated = translated[len(prefix):].strip()
 
-        # 2. 如果输出包含分隔线后的译文，只保留分隔线后的内容
-        separators = ["---", "===", "***", "———"]
+        # 2. 如果输出包含分隔线，检测前后内容的语言分布
+        separators = ["---", "===", "***", "———", "##"]
         for sep in separators:
             if sep in translated:
-                parts = translated.split(sep)
-                # 检查最后一部分是否像译文（包含中文）
-                if len(parts) >= 2:
-                    last_part = parts[-1].strip()
-                    # 如果目标是中文，检查最后部分是否有中文
-                    if target_lang == "zh" and re.search(r'[\u4e00-\u9fff]', last_part):
-                        # 检查最后部分不是原文的重复
-                        if last_part != original.strip() and len(last_part) > 10:
-                            translated = last_part
+                parts = translated.split(sep, 1)  # 只分割第一个分隔线
+                if len(parts) == 2:
+                    before = parts[0].strip()
+                    after = parts[1].strip()
+
+                    if target_lang == "zh" and before and after:
+                        # 计算前后部分的中文占比
+                        before_chinese = len(re.findall(r'[\u4e00-\u9fff]', before))
+                        before_ratio = before_chinese / max(len(before), 1)
+
+                        after_chinese = len(re.findall(r'[\u4e00-\u9fff]', after))
+                        after_ratio = after_chinese / max(len(after), 1)
+
+                        # 如果前面主要是非中文（<10%），后面主要是中文（>30%），则只保留后面
+                        if before_ratio < 0.1 and after_ratio > 0.3:
+                            translated = after
                             break
 
-        # 3. 检查是否原文重复出现在开头
-        # 如果翻译结果以原文开头，去除原文部分
+        # 3. 检测并移除原文重复块（基于语言分布）
+        # 如果翻译结果前半部分主要是非中文（原文），后半部分主要是中文（译文），只保留中文部分
+        if target_lang == "zh":
+            lines = translated.split('\n')
+            first_chinese_line = -1
+
+            for i, line in enumerate(lines):
+                # 找到第一行包含至少3个连续中文字符的行
+                if re.search(r'[\u4e00-\u9fff]{3,}', line):
+                    first_chinese_line = i
+                    break
+
+            if first_chinese_line > 0:
+                # 检查前面的行是否都是非中文（原文）
+                before_lines = lines[:first_chinese_line]
+                before_text = '\n'.join(before_lines)
+                chinese_count = len(re.findall(r'[\u4e00-\u9fff]', before_text))
+                chinese_ratio = chinese_count / max(len(before_text), 1)
+
+                # 前面部分中文占比很低（<10%），很可能是原文重复
+                if chinese_ratio < 0.1 and len(before_text) > 20:
+                    translated = '\n'.join(lines[first_chinese_line:])
+
+        # 4. 检查是否原文完整重复出现在开头
         original_stripped = original.strip()
-        if len(original_stripped) > 20:  # 只对较长原文做检查
-            # 检查完整原文是否在开头
+        if len(original_stripped) > 20:
             if translated.startswith(original_stripped):
                 translated = translated[len(original_stripped):].strip()
-            else:
-                # 检查原文的前100个字符是否在开头
-                original_start = original_stripped[:100]
-                if translated.startswith(original_start):
-                    # 找到原文结束的位置
-                    # 简单策略：如果找到与原文相似的大段文本，跳过它
-                    # 通过检查中文字符出现的位置来判断
-                    if target_lang == "zh":
-                        # 找到第一个连续中文段落的位置
-                        match = re.search(r'[\u4e00-\u9fff]{5,}', translated)
-                        if match and match.start() > 50:
-                            # 如果中文出现在较后位置，可能前面是原文
-                            translated = translated[match.start():].strip()
 
-        # 4. 去除开头的空行
+        # 5. 去除开头的空行和分隔符
         translated = translated.lstrip('\n')
+        translated = re.sub(r'^[\-=\*—#]+\s*\n*', '', translated)  # 去除开头的分隔符行
 
         return translated
 
@@ -491,31 +508,30 @@ class TranslateService:
         target_name = lang_names.get(target_lang, target_lang)
         source_name = lang_names.get(source_lang, "原文") if source_lang else "原文"
 
-        # 短文本使用简化的严格 prompt
+        # 短文本使用简化的严格 prompt（不使用格式标签，避免模型输出原文）
         if is_short_text:
-            return f"""将以下文本翻译为{target_name}。
+            return f"""翻译任务：将以下内容翻译为{target_name}。
 
-严格要求：
-- 只翻译，不解释
-- 不要添加任何原文没有的内容
-- 译文长度应与原文相当
-- 直接输出译文，不要有任何前缀
+要求：只输出译文，不输出原文，不添加任何标签或前缀。
 
-原文: {text}
-译文:"""
+{text}"""
 
-        # 长文本使用简洁明确的提示词，防止模型做摘要
+        # 长文本使用简洁明确的提示词，防止模型做摘要（不使用 --- 分隔线）
         if is_long_text:
             return f"""你是专业翻译。将下面的{source_name}文本完整翻译为{target_name}。
 
-**关键要求**：
+关键要求：
 1. 必须完整翻译每一句话，绝对不能省略或概括
 2. 保持原文的段落和换行格式
 3. 人名、公司名、产品型号、编号保持原样
-4. 只输出译文，不要任何解释或前缀
+4. 只输出译文，不要输出原文，不要任何解释或前缀
 
----
-{text}"""
+## 待翻译内容
+
+{text}
+
+## 输出
+只输出上述内容的{target_name}翻译："""
 
         # 术语表（核心术语 + 供应商特定术语）
         glossary_table = self._format_glossary_table(glossary)
@@ -611,13 +627,12 @@ Container: 40ft Blue Ring
 承蒙关照。
 关于交期事宜，请确认。
 
----
-以下是需要翻译的邮件原文：
+## 待翻译邮件
 
 {text}
 
----
-请直接输出译文（不要输出原文，不要输出"译文："前缀）："""
+## 输出要求
+只输出上述邮件的{target_name}翻译，不要包含原文，不要添加任何前缀或标签："""
         return prompt
 
     # ============ Ollama Translation ============
