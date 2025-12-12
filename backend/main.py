@@ -10,7 +10,7 @@ import asyncio
 
 from config import get_settings
 from database.database import init_db
-from routers import emails_router, users_router, translate_router, drafts_router, suppliers_router, signatures_router, labels_router, folders_router, calendar_router, ai_extract_router, tasks_router
+from routers import emails_router, users_router, translate_router, drafts_router, suppliers_router, signatures_router, labels_router, folders_router, calendar_router, ai_extract_router, tasks_router, rules_router
 from websocket import manager as ws_manager, websocket_endpoint
 
 settings = get_settings()
@@ -176,6 +176,7 @@ app.include_router(folders_router)
 app.include_router(calendar_router)
 app.include_router(ai_extract_router)
 app.include_router(tasks_router)
+app.include_router(rules_router)
 
 
 # WebSocket 端点

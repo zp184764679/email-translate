@@ -91,6 +91,93 @@ class EmailService:
 
         return emails
 
+    # IMAP文件夹映射（21cn企业邮箱）
+    IMAP_FOLDER_MAP = {
+        "inbox": "INBOX",
+        "sent": "Sent Messages",      # 已发送
+        "drafts": "Drafts",           # 草稿
+        "trash": "Deleted Messages",  # 已删除
+        "spam": "Junk",               # 垃圾邮件
+    }
+
+    def list_folders(self) -> List[str]:
+        """列出所有可用的IMAP文件夹"""
+        if not self.imap_conn:
+            if not self.connect_imap():
+                return []
+
+        folders = []
+        try:
+            status, folder_list = self.imap_conn.list()
+            if status == "OK":
+                for folder_data in folder_list:
+                    # 解析文件夹名称
+                    if isinstance(folder_data, bytes):
+                        folder_str = folder_data.decode('utf-8', errors='ignore')
+                        # 提取文件夹名称（格式：(flags) "/" "folder_name"）
+                        match = re.search(r'"([^"]+)"$', folder_str)
+                        if match:
+                            folders.append(match.group(1))
+            print(f"[EmailService] Available folders: {folders}")
+        except Exception as e:
+            print(f"[EmailService] Error listing folders: {e}")
+
+        return folders
+
+    def fetch_emails_multi_folder(
+        self,
+        folders: List[str] = None,
+        since_date: datetime = None,
+        limit_per_folder: int = 200
+    ) -> Dict[str, List[Dict]]:
+        """
+        从多个IMAP文件夹拉取邮件
+
+        Args:
+            folders: 要拉取的文件夹列表，如 ["inbox", "sent"]
+            since_date: 起始日期
+            limit_per_folder: 每个文件夹的邮件数量限制
+
+        Returns:
+            {
+                "inbox": [email1, email2, ...],
+                "sent": [email3, email4, ...]
+            }
+        """
+        if folders is None:
+            folders = ["inbox", "sent"]  # 默认拉取收件箱和已发送
+
+        results = {}
+
+        for folder_key in folders:
+            # 获取IMAP文件夹名称
+            imap_folder = self.IMAP_FOLDER_MAP.get(folder_key, folder_key)
+
+            print(f"[EmailService] Fetching from folder: {folder_key} ({imap_folder})")
+
+            try:
+                emails = self.fetch_emails(
+                    folder=imap_folder,
+                    since_date=since_date,
+                    limit=limit_per_folder
+                )
+
+                # 根据文件夹设置direction
+                for email_item in emails:
+                    if folder_key == "sent":
+                        email_item["direction"] = "outbound"
+                    else:
+                        email_item["direction"] = "inbound"
+
+                results[folder_key] = emails
+                print(f"[EmailService] Fetched {len(emails)} emails from {folder_key}")
+
+            except Exception as e:
+                print(f"[EmailService] Error fetching from {folder_key}: {e}")
+                results[folder_key] = []
+
+        return results
+
     def _parse_email(self, raw_email: bytes) -> Optional[Dict]:
         """Parse raw email data"""
         msg = email.message_from_bytes(raw_email)

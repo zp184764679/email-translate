@@ -418,6 +418,47 @@ const api = {
 
   async deleteExtraction(emailId) {
     return instance.delete(`/ai/extract/${emailId}`)
+  },
+
+  // Rules - 邮件规则
+  async getRules() {
+    return instance.get('/rules')
+  },
+
+  async getRule(id) {
+    return instance.get(`/rules/${id}`)
+  },
+
+  async createRule(data) {
+    return instance.post('/rules', data)
+  },
+
+  async updateRule(id, data) {
+    return instance.put(`/rules/${id}`, data)
+  },
+
+  async deleteRule(id) {
+    return instance.delete(`/rules/${id}`)
+  },
+
+  async toggleRule(id) {
+    return instance.post(`/rules/${id}/toggle`)
+  },
+
+  async reorderRules(ruleIds) {
+    return instance.post('/rules/reorder', { rule_ids: ruleIds })
+  },
+
+  async testRules(emailData) {
+    return instance.post('/rules/test', { email_data: emailData })
+  },
+
+  async applyRulesToEmails(emailIds) {
+    return instance.post('/rules/apply', emailIds)
+  },
+
+  async getRuleFieldOptions() {
+    return instance.get('/rules/fields/options')
   }
 }
 
