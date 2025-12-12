@@ -161,7 +161,7 @@
 </template>
 
 <script setup>
-import { ref, watch, computed } from 'vue'
+import { ref, watch, computed, onUnmounted } from 'vue'
 import { Back, Right, Delete, Star, Paperclip, Document, DocumentCopy, View } from '@element-plus/icons-vue'
 import DOMPurify from 'dompurify'
 import dayjs from 'dayjs'
@@ -183,6 +183,15 @@ const emit = defineEmits(['reply', 'replyAll', 'forward', 'delete', 'flag', 'ref
 const quickReply = ref('')
 const translating = ref(false)
 const showHtmlDialog = ref(false)
+let translateAbortController = null  // 用于取消翻译请求
+
+// 组件卸载时取消进行中的翻译请求
+onUnmounted(() => {
+  if (translateAbortController) {
+    translateAbortController.abort()
+    translateAbortController = null
+  }
+})
 
 // 计算属性：显示原文（优先纯文本，其次从 HTML 提取）
 const displayOriginalBody = computed(() => {
@@ -358,18 +367,26 @@ function handleFlag() {
 }
 
 async function handleTranslate() {
+  // 创建 AbortController 用于取消请求
+  translateAbortController = new AbortController()
   translating.value = true
   try {
-    await api.translateEmail(props.email.id)
+    await api.translateEmail(props.email.id, translateAbortController.signal)
     ElMessage.success('翻译完成')
     emit('refresh')
     // 触发全局邮件列表刷新
     userStore.triggerEmailRefresh()
   } catch (e) {
+    // 如果是用户主动取消，不显示错误
+    if (e.name === 'CanceledError' || e.name === 'AbortError') {
+      console.log('Translation request cancelled')
+      return
+    }
     console.error('Translation failed:', e)
     ElMessage.error('翻译失败: ' + (e.response?.data?.detail || e.message))
   } finally {
     translating.value = false
+    translateAbortController = null
   }
 }
 

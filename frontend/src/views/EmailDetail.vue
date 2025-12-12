@@ -425,7 +425,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeft, Back, ChatLineSquare, Right, Delete, Star,
@@ -454,6 +454,15 @@ const downloadingAttachments = ref({})  // 跟踪每个附件的下载状态
 const threadEmails = ref([])  // 邮件线程
 const signatures = ref([])  // 签名列表
 const showLabelSelector = ref(false)  // 标签选择器可见性
+let translateAbortController = null  // 用于取消翻译请求
+
+// 组件卸载时取消进行中的翻译请求
+onUnmounted(() => {
+  if (translateAbortController) {
+    translateAbortController.abort()
+    translateAbortController = null
+  }
+})
 
 // 邮件详情快捷键
 const { setEnabled: setShortcutsEnabled } = useKeyboardShortcuts([
@@ -1081,19 +1090,27 @@ async function downloadAllAttachments() {
 }
 
 async function translateEmail() {
+  // 创建 AbortController 用于取消请求
+  translateAbortController = new AbortController()
   translating.value = true
   try {
     // 直接使用API返回的翻译结果更新UI
-    const translatedEmail = await api.translateEmail(email.value.id)
+    const translatedEmail = await api.translateEmail(email.value.id, translateAbortController.signal)
     email.value = translatedEmail
     ElMessage.success('翻译完成')
     // 触发全局邮件列表刷新
     userStore.triggerEmailRefresh()
   } catch (e) {
+    // 如果是用户主动取消，不显示错误
+    if (e.name === 'CanceledError' || e.name === 'AbortError') {
+      console.log('Translation request cancelled')
+      return
+    }
     console.error('Translation failed:', e)
     ElMessage.error('翻译失败: ' + (e.response?.data?.detail || e.message))
   } finally {
     translating.value = false
+    translateAbortController = null
   }
 }
 

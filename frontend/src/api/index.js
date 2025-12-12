@@ -174,8 +174,12 @@ const api = {
   },
 
   // Email Actions
-  async translateEmail(id) {
-    return instance.post(`/emails/${id}/translate`)
+  async translateEmail(id, signal = null) {
+    // 翻译可能需要较长时间（Ollama），设置 10 分钟超时
+    return instance.post(`/emails/${id}/translate`, null, {
+      timeout: 600000,  // 10 分钟
+      signal  // AbortController signal，用于取消请求
+    })
   },
 
   async markAsRead(id) {
