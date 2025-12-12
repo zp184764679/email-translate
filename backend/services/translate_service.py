@@ -63,6 +63,12 @@ class TranslateService:
         "NCV": "不合格品确认单",
         "ACP": "异常品处理",
 
+        # ========== 公司名称 ==========
+        "Jingzhicheng": "精之成",
+        "JZC": "精之成",
+        "Shenzhen Jingzhicheng": "深圳精之成",
+        "Dongguan Jingzhicheng": "东莞精之成",
+
         # ========== 易错术语（字面意思≠行业含义）==========
         "treatment": "处理方式",  # 不是"治疗"
         "Escapee": "流出原因",
