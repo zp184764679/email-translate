@@ -102,9 +102,22 @@ class AccountResponse(BaseModel):
     smtp_server: str
     is_active: bool
     last_sync_at: Optional[datetime]
+    default_approver_id: Optional[int] = None
 
     class Config:
         from_attributes = True
+
+
+class ApproverResponse(BaseModel):
+    id: int
+    email: str
+
+    class Config:
+        from_attributes = True
+
+
+class SetDefaultApproverRequest(BaseModel):
+    approver_id: int
 
 
 # ============ Helper Functions ============
@@ -323,3 +336,49 @@ async def get_current_account_info(account: EmailAccount = Depends(get_current_a
 async def logout():
     """退出登录（前端清除token即可）"""
     return {"message": "已退出登录"}
+
+
+# ============ 审批人相关 API ============
+from typing import List
+
+
+@router.get("/approvers", response_model=List[ApproverResponse])
+async def get_approvers(
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """获取可选审批人列表（排除自己）"""
+    result = await db.execute(
+        select(EmailAccount)
+        .where(
+            EmailAccount.is_active == True,
+            EmailAccount.id != account.id  # 排除自己
+        )
+        .order_by(EmailAccount.email)
+    )
+    return result.scalars().all()
+
+
+@router.put("/me/default-approver")
+async def set_default_approver(
+    request: SetDefaultApproverRequest,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """设置默认审批人"""
+    # 验证审批人存在
+    result = await db.execute(
+        select(EmailAccount).where(EmailAccount.id == request.approver_id)
+    )
+    approver = result.scalar_one_or_none()
+
+    if not approver:
+        raise HTTPException(status_code=404, detail="审批人不存在")
+
+    if approver.id == account.id:
+        raise HTTPException(status_code=400, detail="不能将自己设为默认审批人")
+
+    account.default_approver_id = request.approver_id
+    await db.commit()
+
+    return {"message": "默认审批人设置成功", "approver": approver.email}

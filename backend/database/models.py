@@ -38,7 +38,11 @@ class EmailAccount(Base):
     last_sync_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    # 审批相关
+    default_approver_id = Column(Integer, ForeignKey("email_accounts.id"))  # 默认审批人
+
     emails = relationship("Email", back_populates="account")
+    default_approver = relationship("EmailAccount", remote_side="EmailAccount.id", foreign_keys=[default_approver_id])
 
 
 class Supplier(Base):
@@ -137,12 +141,18 @@ class Draft(Base):
     body_translated = Column(Text)
     target_language = Column(String(10))
 
-    status = Column(String(20), default="draft")  # draft, sent
+    status = Column(String(20), default="draft")  # draft, pending, sent, rejected
     sent_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    # 审批相关字段
+    approver_id = Column(Integer, ForeignKey("email_accounts.id"))  # 审批人
+    submitted_at = Column(DateTime)  # 提交审批时间
+    reject_reason = Column(Text)  # 驳回原因
+
     reply_to_email = relationship("Email")
+    approver = relationship("EmailAccount", foreign_keys=[approver_id])
 
 
 class ApprovalRule(Base):

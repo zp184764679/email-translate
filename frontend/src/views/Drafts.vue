@@ -52,7 +52,7 @@
             v-if="draft.status === 'draft'"
             type="primary"
             size="small"
-            @click.stop="submitDraft(draft)"
+            @click.stop="submitDraftFromList(draft)"
           >
             发送
           </el-button>
@@ -125,8 +125,42 @@
       <template #footer>
         <el-button @click="showEditDialog = false">取消</el-button>
         <el-button @click="saveDraft">保存草稿</el-button>
-        <el-button type="primary" @click="sendDraft" :loading="sending">
-          发送
+        <el-button type="primary" @click="showApproverDialog" :loading="sending">
+          提交审批
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 选择审批人对话框 -->
+    <el-dialog
+      v-model="showApproverSelector"
+      title="选择审批人"
+      width="400px"
+      :close-on-click-modal="false"
+    >
+      <el-form label-width="80px">
+        <el-form-item label="审批人" required>
+          <el-select
+            v-model="selectedApproverId"
+            placeholder="请选择审批人"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="approver in approvers"
+              :key="approver.id"
+              :label="approver.email"
+              :value="approver.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item>
+          <el-checkbox v-model="saveAsDefaultApprover">设为默认审批人</el-checkbox>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showApproverSelector = false">取消</el-button>
+        <el-button type="primary" @click="confirmSendWithApprover" :loading="sending">
+          确认提交
         </el-button>
       </template>
     </el-dialog>
@@ -148,8 +182,18 @@ const editingDraft = ref(null)
 const translating = ref(false)
 const sending = ref(false)
 
-onMounted(() => {
-  loadDrafts()
+// 审批人相关
+const showApproverSelector = ref(false)
+const approvers = ref([])
+const selectedApproverId = ref(null)
+const saveAsDefaultApprover = ref(false)
+const defaultApproverId = ref(null)
+const pendingDraftForSend = ref(null)  // 待发送的草稿
+
+onMounted(async () => {
+  await loadDrafts()
+  await loadApprovers()
+  await loadUserInfo()
 })
 
 async function loadDrafts() {
@@ -353,6 +397,116 @@ function getLanguageName(lang) {
     ru: '俄语'
   }
   return names[lang] || lang
+}
+
+// ============ 审批人相关函数 ============
+async function loadApprovers() {
+  try {
+    approvers.value = await api.getApprovers()
+  } catch (e) {
+    console.error('Failed to load approvers:', e)
+  }
+}
+
+async function loadUserInfo() {
+  try {
+    const userInfo = await api.getCurrentAccount()
+    defaultApproverId.value = userInfo.default_approver_id
+  } catch (e) {
+    console.error('Failed to load user info:', e)
+  }
+}
+
+function showApproverDialog() {
+  // 验证草稿内容
+  if (!editingDraft.value.body_chinese.trim()) {
+    ElMessage.warning('请输入内容')
+    return
+  }
+
+  if (!editingDraft.value.body_translated.trim()) {
+    ElMessage.warning('请先翻译内容')
+    return
+  }
+
+  // 设置默认审批人
+  if (defaultApproverId.value) {
+    selectedApproverId.value = defaultApproverId.value
+  } else if (approvers.value.length > 0) {
+    selectedApproverId.value = approvers.value[0].id
+  }
+
+  // 保存待发送的草稿引用
+  pendingDraftForSend.value = editingDraft.value
+
+  // 显示审批人选择对话框
+  showApproverSelector.value = true
+}
+
+async function confirmSendWithApprover() {
+  if (!selectedApproverId.value) {
+    ElMessage.warning('请选择审批人')
+    return
+  }
+
+  sending.value = true
+  try {
+    let draft = pendingDraftForSend.value
+
+    // 如果是新草稿，先保存
+    if (!draft.id) {
+      draft = await api.createDraft(draft)
+    } else {
+      // 更新现有草稿
+      await api.updateDraft(draft.id, draft)
+    }
+
+    // 提交审批
+    const result = await api.submitDraft(
+      draft.id,
+      selectedApproverId.value,
+      saveAsDefaultApprover.value
+    )
+
+    ElMessage.success(`邮件已提交审批，审批人: ${result.approver}`)
+
+    // 如果设置为默认审批人，更新本地状态
+    if (saveAsDefaultApprover.value) {
+      defaultApproverId.value = selectedApproverId.value
+    }
+
+    // 关闭对话框
+    showApproverSelector.value = false
+    showEditDialog.value = false
+
+    // 重置状态
+    saveAsDefaultApprover.value = false
+    pendingDraftForSend.value = null
+
+    // 刷新草稿列表
+    loadDrafts()
+  } catch (e) {
+    console.error('Failed to submit for approval:', e)
+    ElMessage.error('提交审批失败')
+  } finally {
+    sending.value = false
+  }
+}
+
+// 草稿列表中直接发送（也需要选择审批人）
+async function submitDraftFromList(draft) {
+  // 设置默认审批人
+  if (defaultApproverId.value) {
+    selectedApproverId.value = defaultApproverId.value
+  } else if (approvers.value.length > 0) {
+    selectedApproverId.value = approvers.value[0].id
+  }
+
+  // 保存待发送的草稿
+  pendingDraftForSend.value = draft
+
+  // 显示审批人选择对话框
+  showApproverSelector.value = true
 }
 </script>
 

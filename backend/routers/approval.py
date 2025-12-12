@@ -36,6 +36,7 @@ class DraftUpdate(BaseModel):
 class DraftResponse(BaseModel):
     id: int
     reply_to_email_id: int
+    author_id: Optional[int] = None
     to_address: Optional[str] = None
     cc_address: Optional[str] = None
     subject: Optional[str] = None
@@ -45,9 +46,22 @@ class DraftResponse(BaseModel):
     status: str
     sent_at: Optional[datetime]
     created_at: datetime
+    # 审批相关
+    approver_id: Optional[int] = None
+    submitted_at: Optional[datetime] = None
+    reject_reason: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+
+class SubmitForApprovalRequest(BaseModel):
+    approver_id: int
+    save_as_default: bool = False
+
+
+class RejectRequest(BaseModel):
+    reason: str
 
 
 # ============ Routes ============
@@ -113,16 +127,27 @@ async def update_draft(
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """更新草稿"""
+    """更新草稿（作者或审批人都可以修改）"""
+    # 先查找草稿
     result = await db.execute(
-        select(Draft)
-        .join(Email, Draft.reply_to_email_id == Email.id)
-        .where(Draft.id == draft_id, Email.account_id == account.id)
+        select(Draft).where(Draft.id == draft_id)
     )
     draft = result.scalar_one_or_none()
 
     if not draft:
         raise HTTPException(status_code=404, detail="草稿不存在")
+
+    # 检查权限：作者或审批人可以修改
+    email_result = await db.execute(
+        select(Email).where(Email.id == draft.reply_to_email_id)
+    )
+    email = email_result.scalar_one_or_none()
+
+    is_author = email and email.account_id == account.id
+    is_approver = draft.approver_id == account.id and draft.status == "pending"
+
+    if not is_author and not is_approver:
+        raise HTTPException(status_code=403, detail="没有权限修改此草稿")
 
     if draft.status == "sent":
         raise HTTPException(status_code=400, detail="已发送的邮件无法编辑")
@@ -146,12 +171,13 @@ async def update_draft(
 
 
 @router.post("/{draft_id}/send")
-async def send_draft(
+async def submit_for_approval(
     draft_id: int,
+    request: SubmitForApprovalRequest,
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """发送草稿"""
+    """提交草稿给审批人审批"""
     result = await db.execute(
         select(Draft)
         .join(Email, Draft.reply_to_email_id == Email.id)
@@ -165,48 +191,34 @@ async def send_draft(
     if draft.status == "sent":
         raise HTTPException(status_code=400, detail="邮件已发送")
 
-    # 获取原始邮件
-    email_result = await db.execute(select(Email).where(Email.id == draft.reply_to_email_id))
-    original = email_result.scalar_one_or_none()
+    if draft.status == "pending":
+        raise HTTPException(status_code=400, detail="邮件已提交审批，请等待审批")
 
-    if not original:
-        raise HTTPException(status_code=404, detail="原邮件不存在")
+    # 验证审批人存在
+    approver_result = await db.execute(
+        select(EmailAccount).where(EmailAccount.id == request.approver_id)
+    )
+    approver = approver_result.scalar_one_or_none()
+    if not approver:
+        raise HTTPException(status_code=404, detail="审批人不存在")
 
-    # 发送邮件
-    try:
-        service = EmailService(
-            imap_server=account.imap_server,
-            smtp_server=account.smtp_server,
-            email_address=account.email,
-            password=decrypt_password(account.password),
-            smtp_port=account.smtp_port
-        )
+    # 提交审批
+    draft.status = "pending"
+    draft.approver_id = request.approver_id
+    draft.submitted_at = datetime.utcnow()
+    draft.reject_reason = None  # 清除之前的驳回原因
 
-        # 使用草稿中的收件人和主题，如果没有则使用原邮件信息
-        to_addr = draft.to_address or original.from_email
-        subject = draft.subject
-        if not subject:
-            subject = original.subject_original
-            if not subject.lower().startswith("re:"):
-                subject = f"Re: {subject}"
+    # 保存为默认审批人
+    if request.save_as_default:
+        account.default_approver_id = request.approver_id
 
-        success = service.send_email(
-            to=to_addr,
-            cc=draft.cc_address,  # 添加抄送
-            subject=subject,
-            body=draft.body_translated or draft.body_chinese
-        )
+    await db.commit()
 
-        if success:
-            draft.status = "sent"
-            draft.sent_at = datetime.utcnow()
-            await db.commit()
-            return {"status": "sent", "message": "邮件发送成功"}
-        else:
-            raise HTTPException(status_code=500, detail="邮件发送失败")
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"发送失败: {str(e)}")
+    return {
+        "status": "pending",
+        "message": "邮件已提交审批",
+        "approver": approver.email
+    }
 
 
 @router.delete("/{draft_id}")
@@ -233,3 +245,172 @@ async def delete_draft(
     await db.commit()
 
     return {"message": "草稿已删除"}
+
+
+# ============ 审批相关 API ============
+
+class PendingDraftResponse(BaseModel):
+    """待审批草稿响应（包含作者信息）"""
+    id: int
+    reply_to_email_id: int
+    author_id: int
+    author_email: str  # 提交人邮箱
+    to_address: Optional[str] = None
+    cc_address: Optional[str] = None
+    subject: Optional[str] = None
+    body_chinese: str
+    body_translated: Optional[str]
+    target_language: str
+    status: str
+    submitted_at: Optional[datetime] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+@router.get("/pending", response_model=List[PendingDraftResponse])
+async def get_pending_drafts(
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """获取需要当前用户审批的草稿列表"""
+    result = await db.execute(
+        select(Draft, EmailAccount.email.label("author_email"))
+        .join(EmailAccount, Draft.author_id == EmailAccount.id)
+        .where(
+            Draft.approver_id == account.id,
+            Draft.status == "pending"
+        )
+        .order_by(Draft.submitted_at.desc())
+    )
+
+    drafts = []
+    for row in result.all():
+        draft = row[0]
+        author_email = row[1]
+        drafts.append(PendingDraftResponse(
+            id=draft.id,
+            reply_to_email_id=draft.reply_to_email_id,
+            author_id=draft.author_id,
+            author_email=author_email,
+            to_address=draft.to_address,
+            cc_address=draft.cc_address,
+            subject=draft.subject,
+            body_chinese=draft.body_chinese,
+            body_translated=draft.body_translated,
+            target_language=draft.target_language,
+            status=draft.status,
+            submitted_at=draft.submitted_at,
+            created_at=draft.created_at
+        ))
+
+    return drafts
+
+
+@router.post("/{draft_id}/approve")
+async def approve_draft(
+    draft_id: int,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """通过审批并发送邮件"""
+    # 获取草稿
+    result = await db.execute(
+        select(Draft).where(Draft.id == draft_id)
+    )
+    draft = result.scalar_one_or_none()
+
+    if not draft:
+        raise HTTPException(status_code=404, detail="草稿不存在")
+
+    # 验证当前用户是审批人
+    if draft.approver_id != account.id:
+        raise HTTPException(status_code=403, detail="您不是此邮件的审批人")
+
+    if draft.status != "pending":
+        raise HTTPException(status_code=400, detail="此草稿不在待审批状态")
+
+    # 获取草稿作者账户（用于发送邮件）
+    author_result = await db.execute(
+        select(EmailAccount).where(EmailAccount.id == draft.author_id)
+    )
+    author = author_result.scalar_one_or_none()
+    if not author:
+        raise HTTPException(status_code=404, detail="草稿作者不存在")
+
+    # 获取原始邮件
+    email_result = await db.execute(
+        select(Email).where(Email.id == draft.reply_to_email_id)
+    )
+    original = email_result.scalar_one_or_none()
+
+    # 发送邮件（使用作者的账户发送）
+    try:
+        service = EmailService(
+            imap_server=author.imap_server,
+            smtp_server=author.smtp_server,
+            email_address=author.email,
+            password=decrypt_password(author.password),
+            smtp_port=author.smtp_port
+        )
+
+        to_addr = draft.to_address
+        if not to_addr and original:
+            to_addr = original.from_email
+
+        subject = draft.subject
+        if not subject and original:
+            subject = original.subject_original
+            if subject and not subject.lower().startswith("re:"):
+                subject = f"Re: {subject}"
+
+        success = service.send_email(
+            to=to_addr,
+            cc=draft.cc_address,
+            subject=subject or "",
+            body=draft.body_translated or draft.body_chinese
+        )
+
+        if success:
+            draft.status = "sent"
+            draft.sent_at = datetime.utcnow()
+            await db.commit()
+            return {"status": "sent", "message": "审批通过，邮件已发送"}
+        else:
+            raise HTTPException(status_code=500, detail="邮件发送失败")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"发送失败: {str(e)}")
+
+
+@router.post("/{draft_id}/reject")
+async def reject_draft(
+    draft_id: int,
+    request: RejectRequest,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """驳回审批"""
+    result = await db.execute(
+        select(Draft).where(Draft.id == draft_id)
+    )
+    draft = result.scalar_one_or_none()
+
+    if not draft:
+        raise HTTPException(status_code=404, detail="草稿不存在")
+
+    # 验证当前用户是审批人
+    if draft.approver_id != account.id:
+        raise HTTPException(status_code=403, detail="您不是此邮件的审批人")
+
+    if draft.status != "pending":
+        raise HTTPException(status_code=400, detail="此草稿不在待审批状态")
+
+    # 驳回
+    draft.status = "rejected"
+    draft.reject_reason = request.reason
+
+    await db.commit()
+
+    return {"status": "rejected", "message": "已驳回"}
