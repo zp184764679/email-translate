@@ -112,6 +112,15 @@
           <span class="folder-name">日历</span>
         </div>
 
+        <div
+          class="folder-item"
+          :class="{ active: currentFolder === 'rules' }"
+          @click="navigateTo('/rules', 'rules')"
+        >
+          <el-icon><Operation /></el-icon>
+          <span class="folder-name">规则</span>
+        </div>
+
         <div class="folder-divider"></div>
 
         <div

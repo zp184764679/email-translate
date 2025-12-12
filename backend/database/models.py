@@ -411,3 +411,35 @@ class EmailExtraction(Base):
     __table_args__ = (
         {'mysql_engine': 'InnoDB'},
     )
+
+
+class EmailRule(Base):
+    """邮件规则表 - 自动分类规则"""
+    __tablename__ = "email_rules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("email_accounts.id"), nullable=False)
+    name = Column(String(100), nullable=False)  # 规则名称
+    description = Column(String(255))  # 规则描述
+    is_active = Column(Boolean, default=True)  # 是否启用
+    priority = Column(Integer, default=0)  # 优先级（数字越小越先执行）
+    stop_processing = Column(Boolean, default=False)  # 命中后是否停止后续规则
+
+    # 条件（JSON格式，支持多条件组合）
+    # 格式: {"logic": "AND", "rules": [{"field": "from_email", "operator": "contains", "value": "@supplier.com"}]}
+    conditions = Column(JSON, nullable=False)
+
+    # 动作（JSON格式，支持多动作）
+    # 格式: [{"type": "move_to_folder", "folder_id": 5}, {"type": "add_label", "label_id": 3}]
+    actions = Column(JSON, nullable=False)
+
+    # 统计
+    match_count = Column(Integer, default=0)  # 匹配次数
+    last_match_at = Column(DateTime)  # 最后匹配时间
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )

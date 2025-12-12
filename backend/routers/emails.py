@@ -460,9 +460,24 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                     print(f"[EmailSync] Skipped duplicate: {email_data.get('message_id', 'unknown')[:50]}")
                     continue
 
-                # 自动翻译非中文邮件
+                # 应用邮件规则
+                skip_translate = False
+                try:
+                    from services.rule_engine import RuleEngine
+                    rule_engine = RuleEngine(db, account.id)
+                    await rule_engine.load_rules()
+
+                    if rule_engine.rules:
+                        rule_result = await rule_engine.process_email(email_data, new_email.id)
+                        skip_translate = rule_result.get("skip_translate", False)
+                        if rule_result.get("applied_rules"):
+                            print(f"[RuleEngine] Applied rules to email {new_email.id}: {rule_result['applied_rules']}")
+                except Exception as rule_error:
+                    print(f"[RuleEngine] Error processing rules: {rule_error}")
+
+                # 自动翻译非中文邮件（如果没有被规则跳过）
                 lang = email_data.get("language_detected", "")
-                if lang and lang != "zh" and settings.translate_enabled:
+                if lang and lang != "zh" and settings.translate_enabled and not skip_translate:
                     try:
                         # 先检查共享翻译表
                         shared_result = await db.execute(
