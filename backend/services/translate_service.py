@@ -884,36 +884,21 @@ Please check the following items:
                           glossary: List[Dict], score: int) -> Dict:
         """简单邮件翻译 - Ollama 直接翻译
 
-        对于邮件链，只翻译最新内容，历史引用保持原样
+        注意：邮件链处理（提取新内容、复用历史翻译）已在 emails.py 中完成，
+        这里只负责翻译传入的文本。
         """
-        # 检查是否是邮件链，提取最新内容
-        latest_content, quoted_content = self.extract_latest_email(text)
-        has_quote = bool(quoted_content)
-
-        if has_quote:
-            print(f"[SmartRouting] 检测到邮件链: 最新内容 {len(latest_content)} 字符, 引用 {len(quoted_content)} 字符")
-            text_to_translate = latest_content
-        else:
-            text_to_translate = text
-
         try:
-            print(f"[SmartRouting] Simple email -> Ollama")
-            translated = self.translate_with_ollama(text_to_translate, target_lang, source_lang, glossary)
-
-            # 如果有引用，拼接回去
-            if has_quote:
-                translated = translated + "\n\n---\n[以下为历史邮件引用]\n" + quoted_content
+            print(f"[SmartRouting] Simple email -> Ollama ({len(text)} chars)")
+            translated = self.translate_with_ollama(text, target_lang, source_lang, glossary)
 
             return {
                 "translated_text": translated,
                 "provider_used": "ollama",
                 "complexity": {"level": "simple", "score": score},
-                "fallback_reason": None,
-                "has_quote": has_quote
+                "fallback_reason": None
             }
         except Exception as e:
             print(f"[SmartRouting] Ollama failed: {e}, falling back to Claude")
-            # 回退到 Claude（_translate_with_fallback 也会处理邮件链）
             return self._translate_with_fallback(text, target_lang, source_lang, glossary,
                                                   {"level": "simple", "score": score})
 

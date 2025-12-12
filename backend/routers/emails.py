@@ -440,6 +440,20 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                 try:
                     new_email = await crud.create_email(db, email_data)
                     saved_count += 1
+
+                    # 保存附件到数据库
+                    if attachments:
+                        for att in attachments:
+                            attachment = Attachment(
+                                email_id=new_email.id,
+                                filename=att.get("filename"),
+                                file_path=att.get("file_path"),
+                                file_size=att.get("file_size"),
+                                mime_type=att.get("mime_type")
+                            )
+                            db.add(attachment)
+                        print(f"[EmailSync] Saved {len(attachments)} attachments for email {new_email.id}")
+
                 except IntegrityError:
                     # 处理并发请求导致的重复插入
                     await db.rollback()
@@ -473,17 +487,39 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                                     email_data["subject_original"], lang, "zh"
                                 )
 
-                            # 智能翻译正文（检测引用 + 智能路由）
+                            # 智能翻译正文（检测引用 + 智能路由 + 历史翻译复用）
                             body_translated = ""
                             provider_used = "ollama"
                             complexity_info = None
 
                             if email_data.get("body_original"):
                                 in_reply_to = email_data.get("in_reply_to")
+                                body_original = email_data["body_original"]
+
+                                # 1. 提取邮件链结构
+                                new_content, quoted_content, quote_start = extract_new_content_from_reply(body_original)
+                                has_quote = quote_start != -1
+
+                                # 2. 查找历史翻译（如果有引用）
+                                quoted_translation = None
+                                if has_quote and in_reply_to:
+                                    shared_result = await db.execute(
+                                        select(SharedEmailTranslation).where(
+                                            SharedEmailTranslation.message_id == in_reply_to
+                                        )
+                                    )
+                                    shared_reply = shared_result.scalar_one_or_none()
+                                    if shared_reply and shared_reply.body_translated:
+                                        quoted_translation = shared_reply.body_translated
+                                        print(f"[SmartTranslate] Found history translation for {in_reply_to[:30]}")
+
+                                # 3. 确定要翻译的内容
+                                text_to_translate = new_content if has_quote else body_original
+
                                 if use_smart_routing:
-                                    # 智能路由翻译
+                                    # 智能路由翻译（只翻译新内容）
                                     result = translate_service.translate_with_smart_routing(
-                                        text=email_data["body_original"],
+                                        text=text_to_translate,
                                         subject=email_data.get("subject_original", ""),
                                         target_lang="zh",
                                         source_lang=lang
@@ -495,12 +531,20 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                                           f"→ {provider_used} (complexity: {complexity_info['level']}, "
                                           f"score: {complexity_info['score']})")
                                 else:
-                                    # 智能翻译（检测引用，只翻译新内容）
-                                    body_translated = await smart_translate_email_body(
+                                    # 普通翻译（只翻译新内容）
+                                    body_translated = await translate_with_cache_async(
                                         db, translate_service,
-                                        email_data["body_original"], lang, "zh",
-                                        in_reply_to=in_reply_to
+                                        text_to_translate, lang, "zh"
                                     )
+
+                                # 4. 组合历史翻译
+                                if has_quote:
+                                    if quoted_translation:
+                                        body_translated += f"\n\n--- 以下为引用内容（已翻译）---\n{quoted_translation}"
+                                    else:
+                                        # 没有找到历史翻译，显示原文摘要
+                                        truncated = quoted_content[:500] + ('...' if len(quoted_content) > 500 else '')
+                                        body_translated += f"\n\n--- 以下为引用内容（原文）---\n{truncated}"
 
                             new_email.subject_translated = subject_translated
                             new_email.body_translated = body_translated
