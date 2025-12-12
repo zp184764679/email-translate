@@ -97,8 +97,8 @@
         </div>
         <div class="split-divider"></div>
         <div class="split-pane">
-          <div class="split-label">翻译</div>
-          <div class="split-text">{{ email.body_translated || '(未翻译)' }}</div>
+          <div class="split-label">{{ (!email.language_detected || email.language_detected === 'zh') ? '内容预览' : '翻译' }}</div>
+          <div class="split-text">{{ (!email.language_detected || email.language_detected === 'zh') ? (email.body_original || '(无文本内容)') : (email.body_translated || '(未翻译)') }}</div>
         </div>
       </div>
     </div>

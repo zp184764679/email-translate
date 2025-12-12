@@ -99,8 +99,8 @@
         </div>
       </div>
 
-      <!-- 翻译提示条 -->
-      <div class="translation-notice" v-if="!email.is_translated && email.language_detected !== 'zh'">
+      <!-- 翻译提示条（仅非中文且未翻译时显示）-->
+      <div class="translation-notice" v-if="!email.is_translated && email.language_detected && email.language_detected !== 'zh'">
         <el-icon><InfoFilled /></el-icon>
         <span>此邮件为 {{ getLanguageName(email.language_detected) }}，尚未翻译</span>
         <el-button type="primary" size="small" @click="translateEmail" :loading="translating">
@@ -139,18 +139,19 @@
         </div>
       </div>
 
-      <!-- 邮件正文 - Split View -->
+      <!-- 邮件正文 - Split View（所有邮件统一双栏显示）-->
       <div class="body-section split-view">
         <div class="split-header">
           <div class="split-header-left">
             <el-icon><Document /></el-icon>
-            <span>原文 ({{ getLanguageName(email.language_detected) }})</span>
+            <span>原文 ({{ getLanguageName(email.language_detected) || '中文' }})</span>
             <el-tag v-if="!email.body_original || !email.body_original.trim()" type="info" size="small">HTML</el-tag>
           </div>
           <div class="split-header-right">
             <el-icon><Document /></el-icon>
-            <span>翻译 (中文)</span>
-            <el-tag v-if="!email.is_translated" type="warning" size="small">未翻译</el-tag>
+            <span v-if="email.language_detected && email.language_detected !== 'zh'">翻译 (中文)</span>
+            <span v-else>内容预览</span>
+            <el-tag v-if="!email.is_translated && email.language_detected && email.language_detected !== 'zh'" type="warning" size="small">未翻译</el-tag>
           </div>
         </div>
 
@@ -175,13 +176,22 @@
           <!-- 分隔线 -->
           <div class="split-divider"></div>
 
-          <!-- 右侧翻译 -->
+          <!-- 右侧翻译/预览 -->
           <div
             class="split-pane translated-pane"
             ref="translatedPane"
             @scroll="handleTranslatedScroll"
           >
-            <div class="pane-content" v-if="email.body_translated">
+            <!-- 中文邮件：右侧显示原文 -->
+            <div class="pane-content" v-if="!email.language_detected || email.language_detected === 'zh'">
+              <template v-if="email.body_original && email.body_original.trim()">
+                {{ email.body_original }}
+              </template>
+              <div class="html-content" v-else-if="email.body_html" v-html="sanitizeHtml(email.body_html)"></div>
+              <template v-else>(无文本内容)</template>
+            </div>
+            <!-- 非中文邮件：显示翻译 -->
+            <div class="pane-content" v-else-if="email.body_translated">
               {{ email.body_translated }}
             </div>
             <div class="pane-placeholder" v-else>
