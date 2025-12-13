@@ -66,6 +66,33 @@
             </el-table-column>
           </el-table>
         </el-card>
+
+        <!-- 审批设置 -->
+        <el-card style="margin-top: 20px;">
+          <template #header>
+            <span>审批设置</span>
+          </template>
+
+          <el-form label-width="120px">
+            <el-form-item label="默认审批人">
+              <el-select
+                v-model="defaultApproverId"
+                placeholder="选择默认审批人"
+                clearable
+                style="width: 100%;"
+                @change="saveDefaultApprover"
+              >
+                <el-option
+                  v-for="approver in approvers"
+                  :key="approver.id"
+                  :label="approver.email"
+                  :value="approver.id"
+                />
+              </el-select>
+              <div class="form-tip">提交审批时将自动选择此人</div>
+            </el-form-item>
+          </el-form>
+        </el-card>
       </el-col>
 
       <!-- Approval Rules -->
@@ -219,6 +246,8 @@ const userStore = useUserStore()
 const accounts = ref([])
 const rules = ref([])
 const signatures = ref([])
+const approvers = ref([])
+const defaultApproverId = ref(null)
 const accountDialogVisible = ref(false)
 const ruleDialogVisible = ref(false)
 const signatureDialogVisible = ref(false)
@@ -266,6 +295,7 @@ function getLanguageName(code) {
 onMounted(() => {
   loadAccounts()
   loadSignatures()
+  loadApprovers()
   if (userStore.isAdmin) {
     loadRules()
   }
@@ -277,6 +307,28 @@ async function loadAccounts() {
     accounts.value = result.accounts
   } catch (e) {
     console.error('Failed to load accounts:', e)
+  }
+}
+
+async function loadApprovers() {
+  try {
+    // 获取可选审批人列表
+    approvers.value = await api.getApprovers()
+    // 获取当前账户信息
+    const me = await api.getCurrentAccount()
+    defaultApproverId.value = me.default_approver_id
+  } catch (e) {
+    console.error('Failed to load approvers:', e)
+  }
+}
+
+async function saveDefaultApprover() {
+  try {
+    await api.setDefaultApprover(defaultApproverId.value)
+    ElMessage.success('默认审批人已保存')
+  } catch (e) {
+    console.error('Failed to save default approver:', e)
+    ElMessage.error('保存失败')
   }
 }
 
@@ -485,5 +537,11 @@ async function deleteSignature(signature) {
   white-space: pre-wrap;
   font-size: 12px;
   color: #666;
+}
+
+.form-tip {
+  font-size: 12px;
+  color: #909399;
+  margin-top: 4px;
 }
 </style>
