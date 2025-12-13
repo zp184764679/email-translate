@@ -68,7 +68,7 @@
               </el-tag>
               <!-- 语言标签 -->
               <el-tag
-                v-if="email.language_detected && email.language_detected !== 'zh' && email.language_detected !== 'unknown'"
+                v-if="email.language_detected && email.language_detected !== 'unknown'"
                 size="small"
                 type="info"
               >

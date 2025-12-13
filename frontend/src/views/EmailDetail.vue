@@ -42,12 +42,21 @@
         <div class="email-labels">
           <el-tag v-if="email.direction === 'inbound'" type="primary" size="small">收件</el-tag>
           <el-tag v-else type="success" size="small">发件</el-tag>
+          <!-- 外语标签：显示翻译状态 -->
           <el-tag
             v-if="email.language_detected && email.language_detected !== 'zh' && email.language_detected !== 'unknown'"
             :type="email.is_translated ? 'success' : 'warning'"
             size="small"
           >
             {{ email.is_translated ? '已翻译' : getLanguageName(email.language_detected) }}
+          </el-tag>
+          <!-- 中文标签：直接显示语言 -->
+          <el-tag
+            v-else-if="email.language_detected === 'zh'"
+            type="info"
+            size="small"
+          >
+            {{ getLanguageName(email.language_detected) }}
           </el-tag>
           <!-- 自定义标签 -->
           <el-tag
