@@ -913,7 +913,7 @@ async function deleteFolderConfirm() {
 /* 内容区域 */
 .content-area {
   flex: 1;
-  overflow: hidden;
+  overflow: auto;
 }
 
 /* 响应式调整 */
