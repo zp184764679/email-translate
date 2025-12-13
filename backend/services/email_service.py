@@ -334,25 +334,77 @@ class EmailService:
         return text_body, html_body
 
     def _get_attachments(self, msg, message_id: str) -> List[Dict]:
-        """Extract attachments from email"""
+        """Extract attachments from email
+
+        检测以下类型的附件：
+        1. Content-Disposition: attachment
+        2. Content-Disposition: inline 但有文件名（非文本/HTML）
+        3. 没有 Content-Disposition 但有文件名的非文本部分
+        """
         attachments = []
+        seen_filenames = set()  # 避免重复
 
         if msg.is_multipart():
             for part in msg.walk():
-                content_disposition = str(part.get("Content-Disposition", ""))
+                # 跳过 multipart 容器本身
+                if part.get_content_maintype() == 'multipart':
+                    continue
 
-                if "attachment" in content_disposition:
-                    filename = part.get_filename()
-                    if filename:
-                        filename = self._decode_header(filename)
-                        # Save attachment
-                        file_path = self._save_attachment(part, message_id, filename)
-                        attachments.append({
-                            "filename": filename,
-                            "file_path": file_path,
-                            "file_size": len(part.get_payload(decode=True) or b""),
-                            "mime_type": part.get_content_type()
-                        })
+                content_type = part.get_content_type()
+                content_disposition = str(part.get("Content-Disposition", ""))
+                filename = part.get_filename()
+
+                # 解码文件名
+                if filename:
+                    filename = self._decode_header(filename)
+
+                # 判断是否为附件
+                is_attachment = False
+
+                # 1. 明确的 attachment 类型
+                if "attachment" in content_disposition.lower():
+                    is_attachment = True
+
+                # 2. inline 但有文件名，且不是纯文本/HTML（可能是图片等）
+                elif "inline" in content_disposition.lower() and filename:
+                    # 跳过纯文本和 HTML（这些通常是邮件正文）
+                    if content_type not in ("text/plain", "text/html"):
+                        is_attachment = True
+
+                # 3. 没有 Content-Disposition 但有文件名
+                elif filename and content_type not in ("text/plain", "text/html"):
+                    is_attachment = True
+
+                # 4. 检查 Content-Type 中的 name 参数（某些邮件客户端用这个）
+                if not filename and not is_attachment:
+                    content_type_header = part.get("Content-Type", "")
+                    if "name=" in content_type_header:
+                        import re
+                        name_match = re.search(r'name="?([^";]+)"?', content_type_header)
+                        if name_match:
+                            filename = self._decode_header(name_match.group(1))
+                            if content_type not in ("text/plain", "text/html"):
+                                is_attachment = True
+
+                if is_attachment and filename:
+                    # 避免重复附件
+                    if filename in seen_filenames:
+                        continue
+                    seen_filenames.add(filename)
+
+                    try:
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            file_path = self._save_attachment(part, message_id, filename)
+                            attachments.append({
+                                "filename": filename,
+                                "file_path": file_path,
+                                "file_size": len(payload),
+                                "mime_type": content_type
+                            })
+                            print(f"[Attachment] Found: {filename} ({content_type}, {len(payload)} bytes)")
+                    except Exception as e:
+                        print(f"[Attachment] Error saving {filename}: {e}")
 
         return attachments
 
