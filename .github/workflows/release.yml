@@ -78,12 +78,18 @@ jobs:
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
-      # 更新版本号（手动触发时）
+      # 更新版本号（从 tag 或手动输入）
       - name: Update version
-        if: github.event_name == 'workflow_dispatch'
         run: |
           cd frontend
-          npm version ${{ github.event.inputs.version }} --no-git-tag-version
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            # 从 tag 提取版本号 (v1.0.30 -> 1.0.30)
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "Setting version to: $VERSION"
+          npm version $VERSION --no-git-tag-version --allow-same-version
         shell: bash
 
       # 安装依赖并构建前端
@@ -142,12 +148,18 @@ jobs:
           name: frontend-dist
           path: frontend/dist
 
-      # 更新版本号（手动触发时）
+      # 更新版本号（从 tag 或手动输入）
       - name: Update version
-        if: github.event_name == 'workflow_dispatch'
         run: |
           cd frontend
-          npm version ${{ github.event.inputs.version }} --no-git-tag-version
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            # 从 tag 提取版本号 (v1.0.30 -> 1.0.30)
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "Setting version to: $VERSION"
+          npm version $VERSION --no-git-tag-version --allow-same-version
         shell: bash
 
       # 安装前端依赖（仅用于 electron-builder）
