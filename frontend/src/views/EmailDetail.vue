@@ -43,7 +43,7 @@
           <el-tag v-if="email.direction === 'inbound'" type="primary" size="small">收件</el-tag>
           <el-tag v-else type="success" size="small">发件</el-tag>
           <el-tag
-            v-if="email.language_detected && email.language_detected !== 'zh'"
+            v-if="email.language_detected && email.language_detected !== 'zh' && email.language_detected !== 'unknown'"
             :type="email.is_translated ? 'success' : 'warning'"
             size="small"
           >
@@ -100,7 +100,7 @@
       </div>
 
       <!-- 翻译提示条（仅非中文且未翻译时显示）-->
-      <div class="translation-notice" v-if="!email.is_translated && email.language_detected && email.language_detected !== 'zh'">
+      <div class="translation-notice" v-if="!email.is_translated && email.language_detected && email.language_detected !== 'zh' && email.language_detected !== 'unknown'">
         <el-icon><InfoFilled /></el-icon>
         <span>此邮件为 {{ getLanguageName(email.language_detected) }}，尚未翻译</span>
         <el-button type="primary" size="small" @click="translateEmail" :loading="translating">
@@ -149,9 +149,9 @@
           </div>
           <div class="split-header-right">
             <el-icon><Document /></el-icon>
-            <span v-if="email.language_detected && email.language_detected !== 'zh'">翻译 (中文)</span>
+            <span v-if="email.language_detected && email.language_detected !== 'zh' && email.language_detected !== 'unknown'">翻译 (中文)</span>
             <span v-else>内容预览</span>
-            <el-tag v-if="!email.is_translated && email.language_detected && email.language_detected !== 'zh'" type="warning" size="small">未翻译</el-tag>
+            <el-tag v-if="!email.is_translated && email.language_detected && email.language_detected !== 'zh' && email.language_detected !== 'unknown'" type="warning" size="small">未翻译</el-tag>
           </div>
         </div>
 
@@ -182,8 +182,8 @@
             ref="translatedPane"
             @scroll="handleTranslatedScroll"
           >
-            <!-- 中文邮件：右侧显示原文 -->
-            <div class="pane-content" v-if="!email.language_detected || email.language_detected === 'zh'">
+            <!-- 中文邮件或未识别语言：右侧显示原文 -->
+            <div class="pane-content" v-if="!email.language_detected || email.language_detected === 'zh' || email.language_detected === 'unknown'">
               <template v-if="email.body_original && email.body_original.trim()">
                 {{ email.body_original }}
               </template>
@@ -1243,6 +1243,7 @@ function formatAddressList(addressStr) {
 }
 
 function getLanguageName(lang) {
+  if (!lang || lang === 'unknown') return '🇨🇳 中文'
   const names = {
     en: '🇬🇧 英语',
     ja: '🇯🇵 日语',
@@ -1255,9 +1256,20 @@ function getLanguageName(lang) {
     ru: '🇷🇺 俄语',
     it: '🇮🇹 意大利语',
     nl: '🇳🇱 荷兰语',
-    unknown: '❓ 未知'
+    vi: '🇻🇳 越南语',
+    th: '🇹🇭 泰语',
+    ar: '🇸🇦 阿拉伯语',
+    tr: '🇹🇷 土耳其语',
+    pl: '🇵🇱 波兰语',
+    cs: '🇨🇿 捷克语',
+    sv: '🇸🇪 瑞典语',
+    da: '🇩🇰 丹麦语',
+    fi: '🇫🇮 芬兰语',
+    no: '🇳🇴 挪威语',
+    id: '🇮🇩 印尼语',
+    ms: '🇲🇾 马来语'
   }
-  return names[lang] || lang
+  return names[lang] || `🌐 ${lang}`
 }
 
 function getInitials(name) {

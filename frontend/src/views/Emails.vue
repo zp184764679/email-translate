@@ -68,7 +68,7 @@
               </el-tag>
               <!-- 语言标签 -->
               <el-tag
-                v-if="email.language_detected && email.language_detected !== 'zh'"
+                v-if="email.language_detected && email.language_detected !== 'zh' && email.language_detected !== 'unknown'"
                 size="small"
                 type="info"
               >
@@ -113,7 +113,7 @@
                 <span class="sender-name">{{ email.from_name || extractEmailName(email.from_email) }}</span>
                 <!-- 右侧显示"未翻译"标签 -->
                 <el-tag
-                  v-if="!email.is_translated && email.language_detected !== 'zh'"
+                  v-if="!email.is_translated && email.language_detected && email.language_detected !== 'zh' && email.language_detected !== 'unknown'"
                   size="small"
                   type="warning"
                   class="untranslated-tag"
@@ -618,6 +618,7 @@ function formatTime(date) {
 }
 
 function getLanguageName(lang) {
+  if (!lang || lang === 'unknown') return ''
   const names = {
     en: '🇬🇧 英',
     ja: '🇯🇵 日',
@@ -628,9 +629,22 @@ function getLanguageName(lang) {
     pt: '🇵🇹 葡',
     ru: '🇷🇺 俄',
     it: '🇮🇹 意',
-    nl: '🇳🇱 荷'
+    nl: '🇳🇱 荷',
+    vi: '🇻🇳 越',
+    th: '🇹🇭 泰',
+    ar: '🇸🇦 阿',
+    tr: '🇹🇷 土',
+    pl: '🇵🇱 波',
+    cs: '🇨🇿 捷',
+    sv: '🇸🇪 瑞',
+    da: '🇩🇰 丹',
+    fi: '🇫🇮 芬',
+    no: '🇳🇴 挪',
+    id: '🇮🇩 印尼',
+    ms: '🇲🇾 马',
+    zh: '🇨🇳 中'
   }
-  return names[lang] || lang
+  return names[lang] || `🌐 ${lang}`
 }
 
 function getPreview(email) {
