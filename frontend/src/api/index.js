@@ -161,16 +161,18 @@ const api = {
     return instance.put(`/drafts/${id}`, data)
   },
 
-  async sendDraft(id, approverId, saveAsDefault = false) {
+  async sendDraft(id, { approverId, approverGroupId, saveAsDefault = false }) {
     return instance.post(`/drafts/${id}/send`, {
-      approver_id: approverId,
+      approver_id: approverId || null,
+      approver_group_id: approverGroupId || null,
       save_as_default: saveAsDefault
     })
   },
 
-  async submitDraft(id, approverId, saveAsDefault = false) {
+  async submitDraft(id, { approverId, approverGroupId, saveAsDefault = false }) {
     return instance.post(`/drafts/${id}/send`, {
-      approver_id: approverId,
+      approver_id: approverId || null,
+      approver_group_id: approverGroupId || null,
       save_as_default: saveAsDefault
     })
   },
@@ -198,6 +200,35 @@ const api = {
 
   async setDefaultApprover(approverId) {
     return instance.put('/users/me/default-approver', { approver_id: approverId })
+  },
+
+  // Approval Groups - 审批人组
+  async getApprovalGroups() {
+    return instance.get('/approval-groups')
+  },
+
+  async getAvailableApprovalGroups() {
+    return instance.get('/approval-groups/available')
+  },
+
+  async createApprovalGroup(data) {
+    return instance.post('/approval-groups', data)
+  },
+
+  async updateApprovalGroup(id, data) {
+    return instance.put(`/approval-groups/${id}`, data)
+  },
+
+  async deleteApprovalGroup(id) {
+    return instance.delete(`/approval-groups/${id}`)
+  },
+
+  async addGroupMember(groupId, memberId) {
+    return instance.post(`/approval-groups/${groupId}/members`, { member_id: memberId })
+  },
+
+  async removeGroupMember(groupId, memberId) {
+    return instance.delete(`/approval-groups/${groupId}/members/${memberId}`)
   },
 
   // Email Actions

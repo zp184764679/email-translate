@@ -147,12 +147,14 @@ class Draft(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # 审批相关字段
-    approver_id = Column(Integer, ForeignKey("email_accounts.id"))  # 审批人
+    approver_id = Column(Integer, ForeignKey("email_accounts.id"))  # 审批人（单人模式）
+    approver_group_id = Column(Integer, ForeignKey("approver_groups.id"))  # 审批人组（组模式）
     submitted_at = Column(DateTime)  # 提交审批时间
     reject_reason = Column(Text)  # 驳回原因
 
     reply_to_email = relationship("Email")
     approver = relationship("EmailAccount", foreign_keys=[approver_id])
+    approver_group = relationship("ApproverGroup")
 
 
 class ApprovalRule(Base):
@@ -417,6 +419,43 @@ class EmailExtraction(Base):
 
     # 关系
     email = relationship("Email")
+
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
+
+
+class ApproverGroup(Base):
+    """审批人组表 - 单选组模式"""
+    __tablename__ = "approver_groups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)  # 组名
+    description = Column(String(500))  # 描述
+    owner_id = Column(Integer, ForeignKey("email_accounts.id"), nullable=False)  # 创建者
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # 关系
+    owner = relationship("EmailAccount", foreign_keys=[owner_id])
+    members = relationship("ApproverGroupMember", back_populates="group", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
+
+
+class ApproverGroupMember(Base):
+    """审批人组成员表"""
+    __tablename__ = "approver_group_members"
+
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(Integer, ForeignKey("approver_groups.id", ondelete="CASCADE"), nullable=False)
+    member_id = Column(Integer, ForeignKey("email_accounts.id"), nullable=False)
+    added_at = Column(DateTime, default=datetime.utcnow)
+
+    # 关系
+    group = relationship("ApproverGroup", back_populates="members")
+    member = relationship("EmailAccount")
 
     __table_args__ = (
         {'mysql_engine': 'InnoDB'},

@@ -93,6 +93,47 @@
             </el-form-item>
           </el-form>
         </el-card>
+
+        <!-- 审批人组管理 -->
+        <el-card style="margin-top: 20px;">
+          <template #header>
+            <div class="card-header">
+              <span>审批人组</span>
+              <el-button type="primary" size="small" :icon="Plus" @click="showAddGroup">新建组</el-button>
+            </div>
+          </template>
+
+          <el-table :data="approvalGroups" stripe>
+            <el-table-column prop="name" label="组名" width="120" />
+            <el-table-column label="成员" min-width="200">
+              <template #default="{ row }">
+                <el-tag
+                  v-for="member in row.members"
+                  :key="member.id"
+                  size="small"
+                  style="margin-right: 4px; margin-bottom: 4px;"
+                  closable
+                  @close="removeGroupMember(row.id, member.id)"
+                >
+                  {{ member.email }}
+                </el-tag>
+                <el-button
+                  size="small"
+                  :icon="Plus"
+                  circle
+                  @click="showAddMember(row)"
+                />
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="120">
+              <template #default="{ row }">
+                <el-button size="small" @click="editGroup(row)">编辑</el-button>
+                <el-button size="small" type="danger" @click="deleteGroup(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-if="approvalGroups.length === 0" description="暂无审批人组，点击上方按钮创建" />
+        </el-card>
       </el-col>
 
       <!-- Approval Rules -->
@@ -231,11 +272,65 @@
         <el-button type="primary" @click="saveSignature" :loading="savingSignature">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- Approval Group Dialog -->
+    <el-dialog v-model="groupDialogVisible" :title="groupForm.id ? '编辑审批人组' : '新建审批人组'" width="500px">
+      <el-form :model="groupForm" label-width="80px">
+        <el-form-item label="组名" required>
+          <el-input v-model="groupForm.name" placeholder="例如: 采购组、销售组" />
+        </el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="groupForm.description" type="textarea" :rows="2" placeholder="可选：组的用途说明" />
+        </el-form-item>
+        <el-form-item label="成员" v-if="!groupForm.id">
+          <el-select
+            v-model="groupForm.member_ids"
+            multiple
+            filterable
+            placeholder="选择组成员"
+            style="width: 100%;"
+          >
+            <el-option
+              v-for="approver in approvers"
+              :key="approver.id"
+              :label="approver.email"
+              :value="approver.id"
+            />
+          </el-select>
+          <div class="form-tip">可以先创建组，之后再添加成员</div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="groupDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveGroup" :loading="savingGroup">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- Add Member Dialog -->
+    <el-dialog v-model="memberDialogVisible" title="添加组成员" width="400px">
+      <el-select
+        v-model="selectedMemberId"
+        filterable
+        placeholder="选择要添加的成员"
+        style="width: 100%;"
+      >
+        <el-option
+          v-for="approver in availableMembers"
+          :key="approver.id"
+          :label="approver.email"
+          :value="approver.id"
+        />
+      </el-select>
+      <template #footer>
+        <el-button @click="memberDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="addMemberToGroup" :disabled="!selectedMemberId">添加</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import api from '@/api'
@@ -247,12 +342,18 @@ const accounts = ref([])
 const rules = ref([])
 const signatures = ref([])
 const approvers = ref([])
+const approvalGroups = ref([])
 const defaultApproverId = ref(null)
 const accountDialogVisible = ref(false)
 const ruleDialogVisible = ref(false)
 const signatureDialogVisible = ref(false)
+const groupDialogVisible = ref(false)
+const memberDialogVisible = ref(false)
 const translatingSignature = ref(false)
 const savingSignature = ref(false)
+const savingGroup = ref(false)
+const selectedMemberId = ref(null)
+const currentGroupId = ref(null)
 
 const accountForm = reactive({
   email: '',
@@ -278,6 +379,22 @@ const signatureForm = reactive({
   is_default: false
 })
 
+const groupForm = reactive({
+  id: null,
+  name: '',
+  description: '',
+  member_ids: []
+})
+
+// 计算可添加的成员（排除已在组中的成员）
+const availableMembers = computed(() => {
+  if (!currentGroupId.value) return approvers.value
+  const group = approvalGroups.value.find(g => g.id === currentGroupId.value)
+  if (!group) return approvers.value
+  const existingIds = new Set(group.members.map(m => m.id))
+  return approvers.value.filter(a => !existingIds.has(a.id))
+})
+
 const languageMap = {
   en: '英语',
   ja: '日语',
@@ -296,6 +413,7 @@ onMounted(() => {
   loadAccounts()
   loadSignatures()
   loadApprovers()
+  loadApprovalGroups()
   if (userStore.isAdmin) {
     loadRules()
   }
@@ -329,6 +447,117 @@ async function saveDefaultApprover() {
   } catch (e) {
     console.error('Failed to save default approver:', e)
     ElMessage.error('保存失败')
+  }
+}
+
+// ========== 审批人组管理 ==========
+async function loadApprovalGroups() {
+  try {
+    approvalGroups.value = await api.getApprovalGroups()
+  } catch (e) {
+    console.error('Failed to load approval groups:', e)
+  }
+}
+
+function showAddGroup() {
+  Object.assign(groupForm, {
+    id: null,
+    name: '',
+    description: '',
+    member_ids: []
+  })
+  groupDialogVisible.value = true
+}
+
+function editGroup(group) {
+  Object.assign(groupForm, {
+    id: group.id,
+    name: group.name,
+    description: group.description || '',
+    member_ids: []
+  })
+  groupDialogVisible.value = true
+}
+
+async function saveGroup() {
+  if (!groupForm.name) {
+    ElMessage.warning('请输入组名')
+    return
+  }
+
+  savingGroup.value = true
+  try {
+    if (groupForm.id) {
+      await api.updateApprovalGroup(groupForm.id, {
+        name: groupForm.name,
+        description: groupForm.description
+      })
+      ElMessage.success('审批人组已更新')
+    } else {
+      await api.createApprovalGroup({
+        name: groupForm.name,
+        description: groupForm.description,
+        member_ids: groupForm.member_ids
+      })
+      ElMessage.success('审批人组已创建')
+    }
+    groupDialogVisible.value = false
+    loadApprovalGroups()
+  } catch (e) {
+    console.error('Failed to save group:', e)
+    ElMessage.error('保存失败')
+  } finally {
+    savingGroup.value = false
+  }
+}
+
+async function deleteGroup(group) {
+  try {
+    await ElMessageBox.confirm(`确定要删除审批人组 "${group.name}" 吗？`, '确认删除', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+
+    await api.deleteApprovalGroup(group.id)
+    ElMessage.success('审批人组已删除')
+    loadApprovalGroups()
+  } catch (e) {
+    if (e !== 'cancel') {
+      console.error('Failed to delete group:', e)
+      ElMessage.error('删除失败')
+    }
+  }
+}
+
+function showAddMember(group) {
+  currentGroupId.value = group.id
+  selectedMemberId.value = null
+  memberDialogVisible.value = true
+}
+
+async function addMemberToGroup() {
+  if (!selectedMemberId.value || !currentGroupId.value) return
+
+  try {
+    await api.addGroupMember(currentGroupId.value, selectedMemberId.value)
+    ElMessage.success('成员已添加')
+    memberDialogVisible.value = false
+    loadApprovalGroups()
+  } catch (e) {
+    console.error('Failed to add member:', e)
+    ElMessage.error('添加失败')
+  }
+}
+
+async function removeGroupMember(groupId, memberId) {
+  try {
+    await api.removeGroupMember(groupId, memberId)
+    ElMessage.success('成员已移除')
+    loadApprovalGroups()
+  } catch (e) {
+    console.error('Failed to remove member:', e)
+    ElMessage.error('移除失败')
   }
 }
 

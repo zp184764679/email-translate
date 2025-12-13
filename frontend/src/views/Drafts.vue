@@ -135,28 +135,63 @@
     <el-dialog
       v-model="showApproverSelector"
       title="选择审批人"
-      width="400px"
+      width="450px"
       :close-on-click-modal="false"
     >
-      <el-form label-width="80px">
-        <el-form-item label="审批人" required>
-          <el-select
-            v-model="selectedApproverId"
-            placeholder="请选择审批人"
-            style="width: 100%"
-          >
-            <el-option
-              v-for="approver in approvers"
-              :key="approver.id"
-              :label="approver.email"
-              :value="approver.id"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item>
-          <el-checkbox v-model="saveAsDefaultApprover">设为默认审批人</el-checkbox>
-        </el-form-item>
-      </el-form>
+      <el-tabs v-model="approvalMode">
+        <el-tab-pane label="单人审批" name="individual">
+          <el-form label-width="80px" style="margin-top: 16px;">
+            <el-form-item label="审批人" required>
+              <el-select
+                v-model="selectedApproverId"
+                placeholder="请选择审批人"
+                style="width: 100%"
+              >
+                <el-option
+                  v-for="approver in approvers"
+                  :key="approver.id"
+                  :label="approver.email"
+                  :value="approver.id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item>
+              <el-checkbox v-model="saveAsDefaultApprover">设为默认审批人</el-checkbox>
+            </el-form-item>
+          </el-form>
+        </el-tab-pane>
+        <el-tab-pane label="审批人组" name="group">
+          <el-form label-width="80px" style="margin-top: 16px;">
+            <el-form-item label="选择组" required>
+              <el-select
+                v-model="selectedGroupId"
+                placeholder="请选择审批人组"
+                style="width: 100%"
+              >
+                <el-option
+                  v-for="group in approvalGroups"
+                  :key="group.id"
+                  :label="`${group.name} (${group.members.length}人)`"
+                  :value="group.id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item v-if="selectedGroup">
+              <div class="group-members">
+                <span class="group-members-label">组成员：</span>
+                <el-tag
+                  v-for="member in selectedGroup.members"
+                  :key="member.id"
+                  size="small"
+                  style="margin-right: 4px;"
+                >
+                  {{ member.email }}
+                </el-tag>
+              </div>
+            </el-form-item>
+          </el-form>
+        </el-tab-pane>
+      </el-tabs>
       <template #footer>
         <el-button @click="showApproverSelector = false">取消</el-button>
         <el-button type="primary" @click="confirmSendWithApprover" :loading="sending">
@@ -168,7 +203,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { EditPen } from '@element-plus/icons-vue'
 import api from '@/api'
 import dayjs from 'dayjs'
@@ -184,15 +219,25 @@ const sending = ref(false)
 
 // 审批人相关
 const showApproverSelector = ref(false)
+const approvalMode = ref('individual')  // 'individual' 或 'group'
 const approvers = ref([])
+const approvalGroups = ref([])
 const selectedApproverId = ref(null)
+const selectedGroupId = ref(null)
 const saveAsDefaultApprover = ref(false)
 const defaultApproverId = ref(null)
 const pendingDraftForSend = ref(null)  // 待发送的草稿
 
+// 计算当前选中的组
+const selectedGroup = computed(() => {
+  if (!selectedGroupId.value) return null
+  return approvalGroups.value.find(g => g.id === selectedGroupId.value)
+})
+
 onMounted(async () => {
   await loadDrafts()
   await loadApprovers()
+  await loadApprovalGroups()
   await loadUserInfo()
 })
 
@@ -408,6 +453,14 @@ async function loadApprovers() {
   }
 }
 
+async function loadApprovalGroups() {
+  try {
+    approvalGroups.value = await api.getAvailableApprovalGroups()
+  } catch (e) {
+    console.error('Failed to load approval groups:', e)
+  }
+}
+
 async function loadUserInfo() {
   try {
     const userInfo = await api.getCurrentAccount()
@@ -444,8 +497,13 @@ function showApproverDialog() {
 }
 
 async function confirmSendWithApprover() {
-  if (!selectedApproverId.value) {
+  // 验证选择
+  if (approvalMode.value === 'individual' && !selectedApproverId.value) {
     ElMessage.warning('请选择审批人')
+    return
+  }
+  if (approvalMode.value === 'group' && !selectedGroupId.value) {
+    ElMessage.warning('请选择审批人组')
     return
   }
 
@@ -461,17 +519,17 @@ async function confirmSendWithApprover() {
       await api.updateDraft(draft.id, draft)
     }
 
-    // 提交审批
-    const result = await api.submitDraft(
-      draft.id,
-      selectedApproverId.value,
-      saveAsDefaultApprover.value
-    )
+    // 提交审批（支持单人或组）
+    const result = await api.submitDraft(draft.id, {
+      approverId: approvalMode.value === 'individual' ? selectedApproverId.value : null,
+      approverGroupId: approvalMode.value === 'group' ? selectedGroupId.value : null,
+      saveAsDefault: saveAsDefaultApprover.value
+    })
 
     ElMessage.success(`邮件已提交审批，审批人: ${result.approver}`)
 
     // 如果设置为默认审批人，更新本地状态
-    if (saveAsDefaultApprover.value) {
+    if (saveAsDefaultApprover.value && approvalMode.value === 'individual') {
       defaultApproverId.value = selectedApproverId.value
     }
 
@@ -482,6 +540,7 @@ async function confirmSendWithApprover() {
     // 重置状态
     saveAsDefaultApprover.value = false
     pendingDraftForSend.value = null
+    approvalMode.value = 'individual'
 
     // 刷新草稿列表
     loadDrafts()
@@ -640,5 +699,18 @@ async function submitDraftFromList(draft) {
   font-weight: 500;
   color: #606266;
   margin-bottom: 8px;
+}
+
+.group-members {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.group-members-label {
+  font-size: 13px;
+  color: #909399;
+  margin-right: 8px;
 }
 </style>

@@ -97,7 +97,7 @@
 ### 审批流程
 
 ```
-作者撰写草稿 → 翻译 → 提交审批（选择审批人）
+作者撰写草稿 → 翻译 → 提交审批（选择审批人/组）
                            ↓
                     审批人收到待审批列表
                            ↓
@@ -106,6 +106,20 @@
            直接通过    修改后通过      驳回
            (发送邮件)  (修改+发送)  (返回修改)
 ```
+
+### 审批方式
+
+支持两种审批方式：
+
+1. **单人审批** - 选择单个审批人，只有该人可以审批
+2. **组审批** - 选择审批人组，组内任一成员都可以审批
+
+### 审批人组管理
+
+在 **设置页面 → 审批人组** 中可以：
+- 创建审批人组（如"采购组"、"销售组"）
+- 添加/移除组成员
+- 编辑组名称和描述
 
 ### 设置默认审批人
 
@@ -116,12 +130,24 @@
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/api/drafts` | POST | 创建草稿 |
-| `/api/drafts/{id}/send` | POST | 提交审批 |
+| `/api/drafts/{id}/send` | POST | 提交审批（支持 approver_id 或 approver_group_id） |
 | `/api/drafts/{id}/approve` | POST | 审批通过并发送 |
 | `/api/drafts/{id}/reject` | POST | 驳回 |
 | `/api/drafts/pending` | GET | 获取待审批列表 |
 | `/api/users/approvers` | GET | 获取可选审批人 |
 | `/api/users/me/default-approver` | PUT | 设置默认审批人 |
+
+### 审批人组 API
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/approval-groups` | GET | 获取我创建的组 |
+| `/api/approval-groups/available` | GET | 获取可用组（我创建的+我所在的） |
+| `/api/approval-groups` | POST | 创建审批人组 |
+| `/api/approval-groups/{id}` | PUT | 更新组信息 |
+| `/api/approval-groups/{id}` | DELETE | 删除组 |
+| `/api/approval-groups/{id}/members` | POST | 添加组成员 |
+| `/api/approval-groups/{id}/members/{member_id}` | DELETE | 移除组成员 |
 
 ## 开发命令
 
@@ -358,7 +384,9 @@ VITE_API_URL=http://localhost:8000/api
 - **Email** - 邮件（原文、译文、语言检测、is_read、is_flagged、labels、folders）
 - **Supplier** - 供应商（域名、联系邮箱）
 - **Glossary** - 术语表（原文→译文）
-- **Draft** - 回复草稿（中文、译文、状态）
+- **Draft** - 回复草稿（中文、译文、状态、approver_id、approver_group_id）
+- **ApproverGroup** - 审批人组（name、description、owner_id）
+- **ApproverGroupMember** - 审批人组成员（group_id、member_id）
 - **EmailLabel** - 邮件标签（name、color、account_id）
 - **EmailFolder** - 自定义文件夹（支持嵌套，parent_id）
 - **CalendarEvent** - 日历事件（title、start_time、end_time、可关联邮件）
