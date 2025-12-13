@@ -1,5 +1,35 @@
 <template>
   <div class="extraction-panel">
+    <!-- 日期提醒卡片 - 醒目显示 -->
+    <el-alert
+      v-if="extraction?.dates?.length && !dismissedDateAlert"
+      title="发现日期信息，是否添加到日历？"
+      type="warning"
+      show-icon
+      :closable="true"
+      @close="dismissedDateAlert = true"
+      class="date-alert"
+    >
+      <template #default>
+        <div class="date-alert-content">
+          <div v-for="(date, i) in extraction.dates.slice(0, 3)" :key="i" class="date-alert-item">
+            <span>
+              <strong>{{ date.date }}</strong>
+              {{ date.time ? date.time : '' }}
+              {{ date.context ? `- ${date.context}` : '' }}
+              <el-tag v-if="date.is_meeting" type="danger" size="small">会议</el-tag>
+            </span>
+            <el-button type="primary" size="small" @click="createEventFromDate(date)">
+              添加到日历
+            </el-button>
+          </div>
+          <div v-if="extraction.dates.length > 3" class="more-dates">
+            还有 {{ extraction.dates.length - 3 }} 个日期...
+          </div>
+        </div>
+      </template>
+    </el-alert>
+
     <div class="panel-header">
       <h4>AI 智能提取</h4>
       <div class="header-actions">
@@ -223,6 +253,7 @@ const emit = defineEmits(['event-created'])
 const loading = ref(false)
 const extraction = ref(null)
 const showEventDialog = ref(false)
+const dismissedDateAlert = ref(false)
 const eventForm = ref({
   title: '',
   date: null
@@ -244,6 +275,8 @@ const isEmptyExtraction = computed(() => {
 // Watch email change
 watch(() => props.emailId, async (newId) => {
   if (newId) {
+    dismissedDateAlert.value = false  // 切换邮件时重置日期提示
+    extraction.value = null
     await loadExtraction()
   }
 }, { immediate: true })
@@ -403,6 +436,35 @@ async function confirmCreateEvent() {
   border-radius: 8px;
   padding: 16px;
   margin-top: 16px;
+}
+
+.date-alert {
+  margin-bottom: 16px;
+}
+
+.date-alert-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.date-alert-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px dashed #eee;
+}
+
+.date-alert-item:last-child {
+  border-bottom: none;
+}
+
+.more-dates {
+  color: #909399;
+  font-size: 12px;
+  text-align: right;
 }
 
 .panel-header {
