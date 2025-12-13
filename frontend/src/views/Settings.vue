@@ -1,101 +1,74 @@
 <template>
   <div class="settings-page">
+    <!-- 邮件签名 -->
+    <el-card style="margin-bottom: 20px;">
+      <template #header>
+        <div class="card-header">
+          <span>邮件签名</span>
+          <el-button type="primary" :icon="Plus" @click="showAddSignature">新建签名</el-button>
+        </div>
+      </template>
+
+      <el-table :data="signatures" stripe>
+        <el-table-column prop="name" label="签名名称" width="150" />
+        <el-table-column label="中文内容" min-width="200">
+          <template #default="{ row }">
+            <div class="signature-preview">{{ row.content_chinese || '-' }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="翻译内容" min-width="200">
+          <template #default="{ row }">
+            <div class="signature-preview">{{ row.content_translated || '-' }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="目标语言" width="100">
+          <template #default="{ row }">
+            <el-tag size="small">{{ getLanguageName(row.target_language) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="默认" width="80">
+          <template #default="{ row }">
+            <el-tag v-if="row.is_default" type="success" size="small">默认</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="200">
+          <template #default="{ row }">
+            <el-button size="small" @click="editSignature(row)">编辑</el-button>
+            <el-button size="small" type="primary" @click="setDefaultSignature(row)" :disabled="row.is_default">设为默认</el-button>
+            <el-button size="small" type="danger" @click="deleteSignature(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-empty v-if="signatures.length === 0" description="暂无签名，点击上方按钮创建" />
+    </el-card>
+
+    <!-- 审批设置 -->
     <el-row :gutter="20">
-      <!-- Email Signatures -->
-      <el-col :span="24" style="margin-bottom: 20px;">
+      <el-col :span="8">
         <el-card>
           <template #header>
-            <div class="card-header">
-              <span>邮件签名</span>
-              <el-button type="primary" :icon="Plus" @click="showAddSignature">新建签名</el-button>
-            </div>
+            <span>默认审批人</span>
           </template>
-
-          <el-table :data="signatures" stripe>
-            <el-table-column prop="name" label="签名名称" width="150" />
-            <el-table-column label="中文内容" min-width="200">
-              <template #default="{ row }">
-                <div class="signature-preview">{{ row.content_chinese || '-' }}</div>
-              </template>
-            </el-table-column>
-            <el-table-column label="翻译内容" min-width="200">
-              <template #default="{ row }">
-                <div class="signature-preview">{{ row.content_translated || '-' }}</div>
-              </template>
-            </el-table-column>
-            <el-table-column label="目标语言" width="100">
-              <template #default="{ row }">
-                <el-tag size="small">{{ getLanguageName(row.target_language) }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="默认" width="80">
-              <template #default="{ row }">
-                <el-tag v-if="row.is_default" type="success" size="small">默认</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="200">
-              <template #default="{ row }">
-                <el-button size="small" @click="editSignature(row)">编辑</el-button>
-                <el-button size="small" type="primary" @click="setDefaultSignature(row)" :disabled="row.is_default">设为默认</el-button>
-                <el-button size="small" type="danger" @click="deleteSignature(row)">删除</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-          <el-empty v-if="signatures.length === 0" description="暂无签名，点击上方按钮创建" />
+          <el-select
+            v-model="defaultApproverId"
+            placeholder="选择默认审批人"
+            clearable
+            style="width: 100%;"
+            @change="saveDefaultApprover"
+          >
+            <el-option
+              v-for="approver in approvers"
+              :key="approver.id"
+              :label="approver.email"
+              :value="approver.id"
+            />
+          </el-select>
+          <div class="form-tip">提交审批时将自动选择此人</div>
         </el-card>
       </el-col>
 
-      <!-- Email Accounts -->
-      <el-col :span="12">
+      <el-col :span="16">
         <el-card>
-          <template #header>
-            <div class="card-header">
-              <span>邮箱账户</span>
-              <el-button type="primary" :icon="Plus" @click="showAddAccount">添加</el-button>
-            </div>
-          </template>
-
-          <el-table :data="accounts" stripe>
-            <el-table-column prop="email" label="邮箱" />
-            <el-table-column label="状态" width="80">
-              <template #default="{ row }">
-                <el-tag :type="row.is_active ? 'success' : 'info'">
-                  {{ row.is_active ? '启用' : '禁用' }}
-                </el-tag>
-              </template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-
-        <!-- 审批设置 -->
-        <el-card style="margin-top: 20px;">
-          <template #header>
-            <span>审批设置</span>
-          </template>
-
-          <el-form label-width="120px">
-            <el-form-item label="默认审批人">
-              <el-select
-                v-model="defaultApproverId"
-                placeholder="选择默认审批人"
-                clearable
-                style="width: 100%;"
-                @change="saveDefaultApprover"
-              >
-                <el-option
-                  v-for="approver in approvers"
-                  :key="approver.id"
-                  :label="approver.email"
-                  :value="approver.id"
-                />
-              </el-select>
-              <div class="form-tip">提交审批时将自动选择此人</div>
-            </el-form-item>
-          </el-form>
-        </el-card>
-
-        <!-- 审批人组管理 -->
-        <el-card style="margin-top: 20px;">
           <template #header>
             <div class="card-header">
               <span>审批人组</span>
@@ -103,124 +76,40 @@
             </div>
           </template>
 
-          <el-table :data="approvalGroups" stripe>
+          <el-table :data="approvalGroups" stripe max-height="300">
             <el-table-column prop="name" label="组名" width="120" />
-            <el-table-column label="成员" min-width="200">
+            <el-table-column prop="description" label="描述" width="150">
               <template #default="{ row }">
-                <el-tag
-                  v-for="member in row.members"
-                  :key="member.id"
-                  size="small"
-                  style="margin-right: 4px; margin-bottom: 4px;"
-                  closable
-                  @close="removeGroupMember(row.id, member.id)"
-                >
-                  {{ member.email }}
-                </el-tag>
-                <el-button
-                  size="small"
-                  :icon="Plus"
-                  circle
-                  @click="showAddMember(row)"
-                />
+                <span class="text-muted">{{ row.description || '-' }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="120">
+            <el-table-column label="成员" min-width="250">
+              <template #default="{ row }">
+                <div class="member-tags">
+                  <el-tag
+                    v-for="member in row.members"
+                    :key="member.id"
+                    size="small"
+                    closable
+                    @close="removeGroupMember(row.id, member.id)"
+                  >
+                    {{ member.email.split('@')[0] }}
+                  </el-tag>
+                  <el-button size="small" :icon="Plus" circle @click="showAddMember(row)" title="添加成员" />
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="140" fixed="right">
               <template #default="{ row }">
                 <el-button size="small" @click="editGroup(row)">编辑</el-button>
                 <el-button size="small" type="danger" @click="deleteGroup(row)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>
-          <el-empty v-if="approvalGroups.length === 0" description="暂无审批人组，点击上方按钮创建" />
-        </el-card>
-      </el-col>
-
-      <!-- Approval Rules -->
-      <el-col :span="12" v-if="userStore.isAdmin">
-        <el-card>
-          <template #header>
-            <div class="card-header">
-              <span>审批规则</span>
-              <el-button type="primary" :icon="Plus" @click="showAddRule">添加</el-button>
-            </div>
-          </template>
-
-          <el-table :data="rules" stripe>
-            <el-table-column prop="name" label="规则名称" />
-            <el-table-column label="关键词" min-width="150">
-              <template #default="{ row }">
-                <el-tag v-for="kw in row.keywords" :key="kw" size="small" style="margin-right: 4px;">
-                  {{ kw }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="80">
-              <template #default="{ row }">
-                <el-button size="small" type="danger" @click="deleteRule(row)">删除</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
+          <el-empty v-if="approvalGroups.length === 0" description="暂无审批人组，点击上方按钮创建" :image-size="60" />
         </el-card>
       </el-col>
     </el-row>
-
-    <!-- Add Account Dialog -->
-    <el-dialog v-model="accountDialogVisible" title="添加邮箱账户" width="500px">
-      <el-form :model="accountForm" label-width="100px">
-        <el-form-item label="邮箱地址">
-          <el-input v-model="accountForm.email" placeholder="example@company.com" />
-        </el-form-item>
-        <el-form-item label="密码">
-          <el-input v-model="accountForm.password" type="password" placeholder="邮箱密码或授权码" />
-        </el-form-item>
-        <el-form-item label="IMAP服务器">
-          <el-input v-model="accountForm.imap_server" placeholder="imap.company.com" />
-        </el-form-item>
-        <el-form-item label="IMAP端口">
-          <el-input-number v-model="accountForm.imap_port" :min="1" :max="65535" />
-        </el-form-item>
-        <el-form-item label="SMTP服务器">
-          <el-input v-model="accountForm.smtp_server" placeholder="smtp.company.com" />
-        </el-form-item>
-        <el-form-item label="SMTP端口">
-          <el-input-number v-model="accountForm.smtp_port" :min="1" :max="65535" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="accountDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="addAccount">添加</el-button>
-      </template>
-    </el-dialog>
-
-    <!-- Add Rule Dialog -->
-    <el-dialog v-model="ruleDialogVisible" title="添加审批规则" width="500px">
-      <el-form :model="ruleForm" label-width="100px">
-        <el-form-item label="规则名称">
-          <el-input v-model="ruleForm.name" placeholder="例如: 价格相关" />
-        </el-form-item>
-        <el-form-item label="触发关键词">
-          <el-select
-            v-model="ruleForm.keywords"
-            multiple
-            filterable
-            allow-create
-            default-first-option
-            placeholder="输入关键词后按回车"
-          />
-        </el-form-item>
-        <el-form-item label="审批角色">
-          <el-select v-model="ruleForm.approver_role">
-            <el-option label="主管" value="manager" />
-            <el-option label="管理员" value="admin" />
-          </el-select>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="ruleDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="addRule">添加</el-button>
-      </template>
-    </el-dialog>
 
     <!-- Signature Dialog -->
     <el-dialog v-model="signatureDialogVisible" :title="signatureForm.id ? '编辑签名' : '新建签名'" width="600px">
@@ -332,20 +221,13 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
-import { useUserStore } from '@/stores/user'
 import api from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-const userStore = useUserStore()
-
-const accounts = ref([])
-const rules = ref([])
 const signatures = ref([])
 const approvers = ref([])
 const approvalGroups = ref([])
 const defaultApproverId = ref(null)
-const accountDialogVisible = ref(false)
-const ruleDialogVisible = ref(false)
 const signatureDialogVisible = ref(false)
 const groupDialogVisible = ref(false)
 const memberDialogVisible = ref(false)
@@ -354,21 +236,6 @@ const savingSignature = ref(false)
 const savingGroup = ref(false)
 const selectedMemberId = ref(null)
 const currentGroupId = ref(null)
-
-const accountForm = reactive({
-  email: '',
-  password: '',
-  imap_server: '',
-  imap_port: 993,
-  smtp_server: '',
-  smtp_port: 465
-})
-
-const ruleForm = reactive({
-  name: '',
-  keywords: [],
-  approver_role: 'manager'
-})
 
 const signatureForm = reactive({
   id: null,
@@ -410,23 +277,10 @@ function getLanguageName(code) {
 }
 
 onMounted(() => {
-  loadAccounts()
   loadSignatures()
   loadApprovers()
   loadApprovalGroups()
-  if (userStore.isAdmin) {
-    loadRules()
-  }
 })
-
-async function loadAccounts() {
-  try {
-    const result = await api.getEmailAccounts()
-    accounts.value = result.accounts
-  } catch (e) {
-    console.error('Failed to load accounts:', e)
-  }
-}
 
 async function loadApprovers() {
   try {
@@ -561,77 +415,6 @@ async function removeGroupMember(groupId, memberId) {
   }
 }
 
-async function loadRules() {
-  try {
-    rules.value = await api.getApprovalRules()
-  } catch (e) {
-    console.error('Failed to load rules:', e)
-  }
-}
-
-function showAddAccount() {
-  Object.assign(accountForm, {
-    email: '',
-    password: '',
-    imap_server: '',
-    imap_port: 993,
-    smtp_server: '',
-    smtp_port: 465
-  })
-  accountDialogVisible.value = true
-}
-
-function showAddRule() {
-  Object.assign(ruleForm, {
-    name: '',
-    keywords: [],
-    approver_role: 'manager'
-  })
-  ruleDialogVisible.value = true
-}
-
-async function addAccount() {
-  if (!accountForm.email || !accountForm.password) {
-    ElMessage.warning('请填写邮箱和密码')
-    return
-  }
-
-  try {
-    await api.createEmailAccount(accountForm)
-    ElMessage.success('邮箱账户已添加')
-    accountDialogVisible.value = false
-    loadAccounts()
-  } catch (e) {
-    console.error('Failed to add account:', e)
-  }
-}
-
-async function addRule() {
-  if (!ruleForm.name || ruleForm.keywords.length === 0) {
-    ElMessage.warning('请填写规则名称和关键词')
-    return
-  }
-
-  try {
-    await api.createApprovalRule(ruleForm)
-    ElMessage.success('审批规则已添加')
-    ruleDialogVisible.value = false
-    loadRules()
-  } catch (e) {
-    console.error('Failed to add rule:', e)
-  }
-}
-
-async function deleteRule(rule) {
-  try {
-    await api.deleteApprovalRule(rule.id)
-    ElMessage.success('规则已删除')
-    loadRules()
-  } catch (e) {
-    console.error('Failed to delete rule:', e)
-  }
-}
-
 // Signature functions
 async function loadSignatures() {
   try {
@@ -753,6 +536,10 @@ async function deleteSignature(signature) {
 </script>
 
 <style scoped>
+.settings-page {
+  padding: 20px;
+}
+
 .card-header {
   display: flex;
   justify-content: space-between;
@@ -772,5 +559,21 @@ async function deleteSignature(signature) {
   font-size: 12px;
   color: #909399;
   margin-top: 4px;
+}
+
+.text-muted {
+  color: #909399;
+  font-size: 12px;
+}
+
+.member-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.member-tags .el-tag {
+  margin: 0;
 }
 </style>
