@@ -15,26 +15,107 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  # ==================== 并行构建：后端 ====================
+  build-backend:
     runs-on: windows-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements.txt
+
+      # 缓存 PyInstaller 工作目录
+      - name: Cache PyInstaller
+        uses: actions/cache@v4
+        with:
+          path: |
+            backend/build
+            ~/.cache/pip
+          key: pyinstaller-${{ runner.os }}-py312-${{ hashFiles('backend/requirements.txt') }}
+          restore-keys: |
+            pyinstaller-${{ runner.os }}-py312-
+
+      # 安装 UPX 压缩工具（减小 exe 体积）
+      - name: Install UPX
+        run: |
+          choco install upx -y
+        shell: powershell
+
+      # 打包后端（使用多线程）
+      - name: Build Backend
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          pip install pyinstaller
+          # 使用 --jobs 参数启用多核编译
+          pyinstaller backend.spec --noconfirm
+        shell: bash
+
+      # 上传后端产物
+      - name: Upload Backend Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-exe
+          path: backend/dist/backend.exe
+          retention-days: 1
+
+  # ==================== 并行构建：前端 ====================
+  build-frontend:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      # 更新版本号（手动触发时）
+      - name: Update version
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          cd frontend
+          npm version ${{ github.event.inputs.version }} --no-git-tag-version
+        shell: bash
+
+      # 安装依赖并构建前端
+      - name: Build Frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+        shell: bash
+
+      # 上传前端产物
+      - name: Upload Frontend Artifact
+        uses: actions/upload-artifact@v4
         with:
-          python-version: '3.11'
-          cache: 'pip'
-          cache-dependency-path: backend/requirements.txt
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 1
+
+  # ==================== 合并打包 Electron ====================
+  package-electron:
+    runs-on: windows-latest
+    needs: [build-backend, build-frontend]  # 等待并行构建完成
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
 
       # 缓存 Electron 和 electron-builder
       - name: Cache Electron
@@ -47,6 +128,20 @@ jobs:
           restore-keys: |
             electron-${{ runner.os }}-
 
+      # 下载后端产物
+      - name: Download Backend Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-exe
+          path: backend/dist
+
+      # 下载前端产物
+      - name: Download Frontend Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
       # 更新版本号（手动触发时）
       - name: Update version
         if: github.event_name == 'workflow_dispatch'
@@ -55,21 +150,11 @@ jobs:
           npm version ${{ github.event.inputs.version }} --no-git-tag-version
         shell: bash
 
-      # 打包后端
-      - name: Build Backend
-        run: |
-          cd backend
-          pip install -r requirements.txt
-          pip install pyinstaller
-          pyinstaller backend.spec --noconfirm
-        shell: bash
-
-      # 构建前端
-      - name: Build Frontend
+      # 安装前端依赖（仅用于 electron-builder）
+      - name: Install Dependencies
         run: |
           cd frontend
           npm ci
-          npm run build
         shell: bash
 
       # 打包 Electron（带重试机制）
