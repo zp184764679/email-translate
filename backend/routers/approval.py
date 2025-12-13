@@ -1,12 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, or_
+from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 
 from database.database import get_db
-from database.models import Draft, Email, EmailAccount
+from database.models import Draft, Email, EmailAccount, ApproverGroup, ApproverGroupMember
 from services.email_service import EmailService
 from routers.users import get_current_account
 from utils.crypto import decrypt_password
@@ -48,6 +49,7 @@ class DraftResponse(BaseModel):
     created_at: datetime
     # 审批相关
     approver_id: Optional[int] = None
+    approver_group_id: Optional[int] = None
     submitted_at: Optional[datetime] = None
     reject_reason: Optional[str] = None
 
@@ -56,7 +58,8 @@ class DraftResponse(BaseModel):
 
 
 class SubmitForApprovalRequest(BaseModel):
-    approver_id: int
+    approver_id: Optional[int] = None        # 单人审批
+    approver_group_id: Optional[int] = None  # 组审批（二选一）
     save_as_default: bool = False
 
 
@@ -144,7 +147,21 @@ async def update_draft(
     email = email_result.scalar_one_or_none()
 
     is_author = email and email.account_id == account.id
-    is_approver = draft.approver_id == account.id and draft.status == "pending"
+
+    # 检查是否是审批人（单人或组成员）
+    is_approver = False
+    if draft.status == "pending":
+        if draft.approver_id == account.id:
+            is_approver = True
+        elif draft.approver_group_id:
+            # 检查是否是组成员
+            member_check = await db.execute(
+                select(ApproverGroupMember).where(
+                    ApproverGroupMember.group_id == draft.approver_group_id,
+                    ApproverGroupMember.member_id == account.id
+                )
+            )
+            is_approver = member_check.scalar_one_or_none() is not None
 
     if not is_author and not is_approver:
         raise HTTPException(status_code=403, detail="没有权限修改此草稿")
@@ -177,7 +194,14 @@ async def submit_for_approval(
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """提交草稿给审批人审批"""
+    """提交草稿给审批人审批（支持单人或组）"""
+    # 验证必须选择一个审批方式
+    if not request.approver_id and not request.approver_group_id:
+        raise HTTPException(status_code=400, detail="请选择审批人或审批人组")
+
+    if request.approver_id and request.approver_group_id:
+        raise HTTPException(status_code=400, detail="只能选择一种审批方式")
+
     result = await db.execute(
         select(Draft)
         .join(Email, Draft.reply_to_email_id == Email.id)
@@ -194,30 +218,54 @@ async def submit_for_approval(
     if draft.status == "pending":
         raise HTTPException(status_code=400, detail="邮件已提交审批，请等待审批")
 
-    # 验证审批人存在
-    approver_result = await db.execute(
-        select(EmailAccount).where(EmailAccount.id == request.approver_id)
-    )
-    approver = approver_result.scalar_one_or_none()
-    if not approver:
-        raise HTTPException(status_code=404, detail="审批人不存在")
+    approver_info = None
+
+    if request.approver_id:
+        # 单人审批模式
+        approver_result = await db.execute(
+            select(EmailAccount).where(EmailAccount.id == request.approver_id)
+        )
+        approver = approver_result.scalar_one_or_none()
+        if not approver:
+            raise HTTPException(status_code=404, detail="审批人不存在")
+
+        draft.approver_id = request.approver_id
+        draft.approver_group_id = None
+        approver_info = approver.email
+
+        # 保存为默认审批人
+        if request.save_as_default:
+            account.default_approver_id = request.approver_id
+
+    else:
+        # 组审批模式
+        group_result = await db.execute(
+            select(ApproverGroup)
+            .options(selectinload(ApproverGroup.members))
+            .where(ApproverGroup.id == request.approver_group_id)
+        )
+        group = group_result.scalar_one_or_none()
+        if not group:
+            raise HTTPException(status_code=404, detail="审批人组不存在")
+
+        if not group.members:
+            raise HTTPException(status_code=400, detail="审批人组没有成员")
+
+        draft.approver_id = None
+        draft.approver_group_id = request.approver_group_id
+        approver_info = f"组: {group.name}"
 
     # 提交审批
     draft.status = "pending"
-    draft.approver_id = request.approver_id
     draft.submitted_at = datetime.utcnow()
-    draft.reject_reason = None  # 清除之前的驳回原因
-
-    # 保存为默认审批人
-    if request.save_as_default:
-        account.default_approver_id = request.approver_id
+    draft.reject_reason = None
 
     await db.commit()
 
     return {
         "status": "pending",
         "message": "邮件已提交审批",
-        "approver": approver.email
+        "approver": approver_info
     }
 
 
@@ -264,6 +312,10 @@ class PendingDraftResponse(BaseModel):
     status: str
     submitted_at: Optional[datetime] = None
     created_at: datetime
+    # 审批方式
+    approver_id: Optional[int] = None
+    approver_group_id: Optional[int] = None
+    approver_group_name: Optional[str] = None  # 组名
 
     class Config:
         from_attributes = True
@@ -274,14 +326,31 @@ async def get_pending_drafts(
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """获取需要当前用户审批的草稿列表"""
-    result = await db.execute(
-        select(Draft, EmailAccount.email.label("author_email"))
-        .join(EmailAccount, Draft.author_id == EmailAccount.id)
-        .where(
-            Draft.approver_id == account.id,
-            Draft.status == "pending"
+    """获取需要当前用户审批的草稿列表（支持单人和组）"""
+    # 先获取用户所在的组ID列表
+    member_groups_result = await db.execute(
+        select(ApproverGroupMember.group_id).where(
+            ApproverGroupMember.member_id == account.id
         )
+    )
+    my_group_ids = [row[0] for row in member_groups_result.all()]
+
+    # 查询待审批草稿：指定给我 或 指定给我所在的组
+    conditions = [Draft.status == "pending"]
+
+    if my_group_ids:
+        conditions.append(or_(
+            Draft.approver_id == account.id,
+            Draft.approver_group_id.in_(my_group_ids)
+        ))
+    else:
+        conditions.append(Draft.approver_id == account.id)
+
+    result = await db.execute(
+        select(Draft, EmailAccount.email.label("author_email"), ApproverGroup.name.label("group_name"))
+        .join(EmailAccount, Draft.author_id == EmailAccount.id)
+        .outerjoin(ApproverGroup, Draft.approver_group_id == ApproverGroup.id)
+        .where(*conditions)
         .order_by(Draft.submitted_at.desc())
     )
 
@@ -289,6 +358,7 @@ async def get_pending_drafts(
     for row in result.all():
         draft = row[0]
         author_email = row[1]
+        group_name = row[2]
         drafts.append(PendingDraftResponse(
             id=draft.id,
             reply_to_email_id=draft.reply_to_email_id,
@@ -302,10 +372,32 @@ async def get_pending_drafts(
             target_language=draft.target_language,
             status=draft.status,
             submitted_at=draft.submitted_at,
-            created_at=draft.created_at
+            created_at=draft.created_at,
+            approver_id=draft.approver_id,
+            approver_group_id=draft.approver_group_id,
+            approver_group_name=group_name
         ))
 
     return drafts
+
+
+async def check_approver_permission(draft: Draft, account: EmailAccount, db: AsyncSession) -> bool:
+    """检查用户是否有审批权限（支持单人和组）"""
+    # 单人审批
+    if draft.approver_id:
+        return draft.approver_id == account.id
+
+    # 组审批：检查用户是否是组成员
+    if draft.approver_group_id:
+        result = await db.execute(
+            select(ApproverGroupMember).where(
+                ApproverGroupMember.group_id == draft.approver_group_id,
+                ApproverGroupMember.member_id == account.id
+            )
+        )
+        return result.scalar_one_or_none() is not None
+
+    return False
 
 
 @router.post("/{draft_id}/approve")
@@ -324,9 +416,10 @@ async def approve_draft(
     if not draft:
         raise HTTPException(status_code=404, detail="草稿不存在")
 
-    # 验证当前用户是审批人
-    if draft.approver_id != account.id:
-        raise HTTPException(status_code=403, detail="您不是此邮件的审批人")
+    # 验证当前用户有审批权限
+    has_permission = await check_approver_permission(draft, account, db)
+    if not has_permission:
+        raise HTTPException(status_code=403, detail="您没有审批此邮件的权限")
 
     if draft.status != "pending":
         raise HTTPException(status_code=400, detail="此草稿不在待审批状态")
@@ -400,9 +493,10 @@ async def reject_draft(
     if not draft:
         raise HTTPException(status_code=404, detail="草稿不存在")
 
-    # 验证当前用户是审批人
-    if draft.approver_id != account.id:
-        raise HTTPException(status_code=403, detail="您不是此邮件的审批人")
+    # 验证当前用户有审批权限
+    has_permission = await check_approver_permission(draft, account, db)
+    if not has_permission:
+        raise HTTPException(status_code=403, detail="您没有审批此邮件的权限")
 
     if draft.status != "pending":
         raise HTTPException(status_code=400, detail="此草稿不在待审批状态")
