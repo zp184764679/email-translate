@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sqlalchemy import select
-from database.database import async_session_maker
+from database.database import async_session
 from database.models import Email, EmailAccount, Attachment
 from services.email_service import EmailService
 from utils.crypto import decrypt_password
@@ -28,26 +28,35 @@ import imaplib
 async def refresh_all_attachments():
     """重新扫描所有邮件的附件"""
 
-    async with async_session_maker() as db:
-        # 获取所有活跃账户
+    async with async_session() as db:
+        # 获取所有活跃账户（只选择需要的字段）
         result = await db.execute(
-            select(EmailAccount).where(EmailAccount.is_active == True)
+            select(
+                EmailAccount.id,
+                EmailAccount.email,
+                EmailAccount.password,
+                EmailAccount.imap_server,
+                EmailAccount.smtp_server,
+                EmailAccount.imap_port,
+                EmailAccount.smtp_port
+            ).where(EmailAccount.is_active == True)
         )
-        accounts = result.scalars().all()
+        account_rows = result.all()
 
-        if not accounts:
+        if not account_rows:
             print("❌ 没有找到活跃的邮箱账户")
             return
 
         total_updated = 0
         total_attachments = 0
 
-        for account in accounts:
-            print(f"\n📧 处理账户: {account.email}")
+        for row in account_rows:
+            account_id, email, encrypted_password, imap_server, smtp_server, imap_port, smtp_port = row
+            print(f"\n📧 处理账户: {email}")
 
             # 获取该账户的所有邮件
             result = await db.execute(
-                select(Email).where(Email.account_id == account.id)
+                select(Email).where(Email.account_id == account_id)
             )
             emails = result.scalars().all()
 
@@ -58,23 +67,23 @@ async def refresh_all_attachments():
             print(f"   📊 找到 {len(emails)} 封邮件")
 
             # 解密密码
-            password = decrypt_password(account.password)
+            password = decrypt_password(encrypted_password)
 
             # 创建邮件服务
             service = EmailService(
-                email=account.email,
+                imap_server=imap_server,
+                smtp_server=smtp_server,
+                email_address=email,
                 password=password,
-                imap_server=account.imap_server,
-                smtp_server=account.smtp_server,
-                imap_port=account.imap_port,
-                smtp_port=account.smtp_port
+                imap_port=imap_port,
+                smtp_port=smtp_port
             )
 
             try:
                 # 连接 IMAP
                 print(f"   🔌 连接 IMAP 服务器...")
-                imap = imaplib.IMAP4_SSL(account.imap_server, account.imap_port)
-                imap.login(account.email, password)
+                imap = imaplib.IMAP4_SSL(imap_server, imap_port)
+                imap.login(email, password)
                 imap.select("INBOX")
 
                 updated_count = 0
@@ -115,7 +124,7 @@ async def refresh_all_attachments():
                         attachment = Attachment(
                             email_id=email.id,
                             filename=att_data['filename'],
-                            content_type=att_data['content_type'],
+                            mime_type=att_data.get('content_type') or att_data.get('mime_type'),
                             file_size=att_data['file_size'],
                             file_path=att_data['file_path']
                         )
@@ -135,7 +144,7 @@ async def refresh_all_attachments():
                 imap.logout()
 
             except Exception as e:
-                print(f"   ❌ 处理账户 {account.email} 时出错: {e}")
+                print(f"   ❌ 处理账户 {email} 时出错: {e}")
                 await db.rollback()
                 continue
 
@@ -146,7 +155,7 @@ async def refresh_all_attachments():
 async def refresh_single_email(email_id: int):
     """重新扫描单个邮件的附件"""
 
-    async with async_session_maker() as db:
+    async with async_session() as db:
         # 获取邮件
         result = await db.execute(select(Email).where(Email.id == email_id))
         email = result.scalar_one_or_none()
@@ -170,10 +179,10 @@ async def refresh_single_email(email_id: int):
 
         # 创建邮件服务
         service = EmailService(
-            email=account.email,
-            password=password,
             imap_server=account.imap_server,
             smtp_server=account.smtp_server,
+            email_address=account.email,
+            password=password,
             imap_port=account.imap_port,
             smtp_port=account.smtp_port
         )
@@ -215,7 +224,7 @@ async def refresh_single_email(email_id: int):
                 attachment = Attachment(
                     email_id=email.id,
                     filename=att_data['filename'],
-                    content_type=att_data['content_type'],
+                    mime_type=att_data.get('content_type') or att_data.get('mime_type'),
                     file_size=att_data['file_size'],
                     file_path=att_data['file_path']
                 )
