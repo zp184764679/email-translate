@@ -50,11 +50,9 @@ def extract_email_info_task(self, email_id: int, account_id: int, force: bool = 
         dict: 提取结果
     """
     from database.models import Email, EmailExtraction
-    from services.ai_extract_service import AIExtractService
-    from config import get_settings
+    from services.ai_extract_service import extract_email_info
     import json
 
-    settings = get_settings()
     db = get_db_session()
 
     try:
@@ -87,18 +85,17 @@ def extract_email_info_task(self, email_id: int, account_id: int, force: bool = 
             "email_id": email_id
         })
 
-        # 创建 AI 提取服务
-        service = AIExtractService(
-            ollama_base_url=settings.ollama_base_url,
-            ollama_model=settings.ollama_model
-        )
-
         # 准备邮件内容
         subject = email.subject_original or ""
         body = email.body_original or ""
+        body_translated = email.body_translated  # 优先使用翻译后的内容
 
-        # 执行提取
-        extraction_data = service.extract_info(subject=subject, body=body)
+        # 执行提取（使用异步函数）
+        extraction_data = asyncio.run(extract_email_info(
+            subject=subject,
+            body=body,
+            body_translated=body_translated
+        ))
 
         if not extraction_data:
             raise Exception("AI extraction returned no data")
@@ -110,6 +107,7 @@ def extract_email_info_task(self, email_id: int, account_id: int, force: bool = 
             existing.amounts = json.dumps(extraction_data.get("amounts", []), ensure_ascii=False)
             existing.contacts = json.dumps(extraction_data.get("contacts", []), ensure_ascii=False)
             existing.action_items = json.dumps(extraction_data.get("action_items", []), ensure_ascii=False)
+            existing.key_points = json.dumps(extraction_data.get("key_points", []), ensure_ascii=False)
             existing.extracted_at = datetime.utcnow()
         else:
             new_extraction = EmailExtraction(
@@ -119,6 +117,7 @@ def extract_email_info_task(self, email_id: int, account_id: int, force: bool = 
                 amounts=json.dumps(extraction_data.get("amounts", []), ensure_ascii=False),
                 contacts=json.dumps(extraction_data.get("contacts", []), ensure_ascii=False),
                 action_items=json.dumps(extraction_data.get("action_items", []), ensure_ascii=False),
+                key_points=json.dumps(extraction_data.get("key_points", []), ensure_ascii=False),
                 extracted_at=datetime.utcnow()
             )
             db.add(new_extraction)

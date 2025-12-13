@@ -588,6 +588,15 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                                 print(f"[AutoTranslate] Skip saving (empty translation): {email_data['message_id'][:30]}")
 
                         translated_count += 1
+
+                        # 6. 触发后台 AI 提取任务（异步，不阻塞）
+                        try:
+                            from tasks.ai_tasks import extract_email_info_task
+                            extract_email_info_task.delay(new_email.id, account.id)
+                            print(f"[AutoExtract] Task queued for email_id={new_email.id}")
+                        except Exception as ex:
+                            print(f"[AutoExtract] Failed to queue task: {ex}")
+
                     except Exception as te:
                         print(f"[AutoTranslate] Failed for {email_data['message_id'][:30]}: {te}")
 
