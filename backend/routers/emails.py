@@ -1183,6 +1183,10 @@ async def batch_unflag_emails(
     return {"message": f"已为 {result.rowcount} 封邮件取消星标"}
 
 
+# 翻译锁：防止同一邮件被同时翻译
+_translating_emails = set()
+
+
 @router.post("/{email_id}/translate", response_model=EmailResponse)
 async def translate_email(
     email_id: int,
@@ -1197,6 +1201,10 @@ async def translate_email(
 
     settings = get_settings()
 
+    # 检查是否正在翻译中
+    if email_id in _translating_emails:
+        raise HTTPException(status_code=409, detail="该邮件正在翻译中，请稍候")
+
     result = await db.execute(
         select(Email).where(Email.id == email_id, Email.account_id == account.id)
     )
@@ -1209,180 +1217,195 @@ async def translate_email(
     if email.is_translated and email.body_translated:
         return email
 
-    # 1. 先检查共享翻译表（其他用户是否已翻译过这封邮件）
-    if email.message_id:
-        shared_result = await db.execute(
-            select(SharedEmailTranslation).where(
-                SharedEmailTranslation.message_id == email.message_id
+    # 添加到翻译中集合（防止重复翻译）
+    _translating_emails.add(email_id)
+    print(f"[Translate] Starting translation for email {email_id}")
+
+    try:
+        # 1. 先检查共享翻译表（其他用户是否已翻译过这封邮件）
+        if email.message_id:
+            shared_result = await db.execute(
+                select(SharedEmailTranslation).where(
+                    SharedEmailTranslation.message_id == email.message_id
+                )
             )
-        )
-        shared = shared_result.scalar_one_or_none()
-        if shared:
-            print(f"[SharedTranslation HIT] message_id={email.message_id}")
-            email.subject_translated = shared.subject_translated
-            email.body_translated = shared.body_translated
-            email.is_translated = True
-            await db.commit()
-            await db.refresh(email)
-            return email
+            shared = shared_result.scalar_one_or_none()
+            if shared:
+                print(f"[SharedTranslation HIT] message_id={email.message_id}")
+                email.subject_translated = shared.subject_translated
+                email.body_translated = shared.body_translated
+                email.is_translated = True
+                await db.commit()
+                await db.refresh(email)
+                return email
 
-    # 2. 翻译辅助函数（带缓存，L1 Redis → L2 MySQL）
-    async def translate_with_cache(text: str, source_lang: str, target_lang: str) -> str:
-        if not text:
-            return ""
+        # 2. 翻译辅助函数（带缓存，L1 Redis → L2 MySQL）
+        async def translate_with_cache(text: str, source_lang: str, target_lang: str) -> str:
+            if not text:
+                return ""
 
-        # 计算缓存键
-        cache_key = hashlib.sha256(f"{text}|{source_lang or 'auto'}|{target_lang}".encode()).hexdigest()
-        redis_key = f"trans:{cache_key}"
+            # 计算缓存键
+            cache_key = hashlib.sha256(f"{text}|{source_lang or 'auto'}|{target_lang}".encode()).hexdigest()
+            redis_key = f"trans:{cache_key}"
 
-        # L1: 先查 Redis（毫秒级）
-        redis_result = cache_get(redis_key)
-        if redis_result:
-            print(f"[Redis HIT] text={text[:30]}...")
-            return redis_result
+            # L1: 先查 Redis（毫秒级）
+            redis_result = cache_get(redis_key)
+            if redis_result:
+                print(f"[Redis HIT] text={text[:30]}...")
+                return redis_result
 
-        # L2: Redis 未命中，查 MySQL
-        cache_result = await db.execute(
-            select(TranslationCache).where(TranslationCache.text_hash == cache_key)
-        )
-        cached = cache_result.scalar_one_or_none()
-        if cached:
-            cached.hit_count += 1
-            # 写回 Redis（预热 L1 缓存）
-            cache_set(redis_key, cached.translated_text, ttl=3600)
-            print(f"[MySQL HIT] hit_count={cached.hit_count}")
-            return cached.translated_text
-
-        # 调用翻译 API
-        service = TranslateService(
-            api_key=settings.claude_api_key,
-            provider=settings.translate_provider,
-            ollama_base_url=settings.ollama_base_url,
-            ollama_model=settings.ollama_model,
-            claude_model=getattr(settings, 'claude_model', None),
-        )
-
-        translated = service.translate_text(text=text, target_lang=target_lang)
-
-        # L1: 写入 Redis
-        cache_set(redis_key, translated, ttl=3600)
-
-        # L2: 保存到 MySQL（持久化）
-        new_cache = TranslationCache(
-            text_hash=cache_key,
-            source_text=text,
-            translated_text=translated,
-            source_lang=source_lang,
-            target_lang=target_lang
-        )
-        db.add(new_cache)
-        print(f"[Cache SAVE] Redis + MySQL, text={text[:30]}...")
-
-        return translated
-
-    # 3. 执行翻译
-    source_lang = email.language_detected or "auto"
-
-    subject_translated = await translate_with_cache(
-        email.subject_original, source_lang, "zh"
-    ) if email.subject_original else ""
-
-    # 获取要翻译的正文内容：优先纯文本，其次从 HTML 提取
-    body_to_translate = email.body_original
-    if not body_to_translate and email.body_html:
-        # 从 HTML 提取文本用于翻译，保留段落格式
-        body_to_translate = html_to_text_with_format(email.body_html)
-        print(f"[Translate] Extracted {len(body_to_translate)} chars from HTML for email {email.id}")
-
-    # 智能翻译正文（检测引用，支持智能路由）
-    pure_body_translated = ""    # 纯翻译，用于保存到 SharedEmailTranslation
-    display_body_translated = "" # 显示翻译，用于 Email.body_translated
-    provider_used = "unknown"
-    if body_to_translate:
-        # 创建翻译服务
-        service = TranslateService(
-            api_key=settings.claude_api_key,
-            provider=settings.translate_provider,
-            ollama_base_url=settings.ollama_base_url,
-            ollama_model=settings.ollama_model,
-            claude_model=getattr(settings, 'claude_model', None),
-        )
-
-        # 检查是否启用智能路由（与新邮件自动翻译保持一致）
-        use_smart_routing = getattr(settings, 'smart_routing_enabled', True)
-
-        if use_smart_routing:
-            # 智能路由翻译（根据复杂度自动选择引擎）
-            # 先检测引用内容，只翻译新内容
-            new_content, quoted_content, quote_start = extract_new_content_from_reply(body_to_translate)
-
-            content_to_translate = new_content if quote_start != -1 else body_to_translate
-
-            result = service.translate_with_smart_routing(
-                text=content_to_translate,
-                subject=email.subject_original or "",
-                target_lang="zh",
-                source_lang=source_lang
+            # L2: Redis 未命中，查 MySQL
+            cache_result = await db.execute(
+                select(TranslationCache).where(TranslationCache.text_hash == cache_key)
             )
-            pure_body_translated = result["translated_text"]
-            provider_used = result["provider_used"]
-            complexity_info = result["complexity"]
-            print(f"[ManualTranslate SmartRouting] Email {email.id} "
-                  f"→ {provider_used} (complexity: {complexity_info['level']}, "
-                  f"score: {complexity_info['score']})")
+            cached = cache_result.scalar_one_or_none()
+            if cached:
+                cached.hit_count += 1
+                # 写回 Redis（预热 L1 缓存）
+                cache_set(redis_key, cached.translated_text, ttl=3600)
+                print(f"[MySQL HIT] hit_count={cached.hit_count}")
+                return cached.translated_text
 
-            # 组合显示翻译（用于 Email.body_translated）
-            display_body_translated = pure_body_translated
-            if quote_start != -1 and quoted_content:
-                # 尝试查找引用内容的已有翻译
-                if email.in_reply_to:
-                    shared_result = await db.execute(
-                        select(SharedEmailTranslation).where(
-                            SharedEmailTranslation.message_id == email.in_reply_to
+            # 调用翻译 API
+            service = TranslateService(
+                api_key=settings.claude_api_key,
+                provider=settings.translate_provider,
+                ollama_base_url=settings.ollama_base_url,
+                ollama_model=settings.ollama_model,
+                claude_model=getattr(settings, 'claude_model', None),
+            )
+
+            translated = service.translate_text(text=text, target_lang=target_lang)
+
+            # L1: 写入 Redis
+            cache_set(redis_key, translated, ttl=3600)
+
+            # L2: 保存到 MySQL（持久化）
+            new_cache = TranslationCache(
+                text_hash=cache_key,
+                source_text=text,
+                translated_text=translated,
+                source_lang=source_lang,
+                target_lang=target_lang
+            )
+            db.add(new_cache)
+            print(f"[Cache SAVE] Redis + MySQL, text={text[:30]}...")
+
+            return translated
+
+        # 3. 执行翻译
+        source_lang = email.language_detected or "auto"
+
+        subject_translated = await translate_with_cache(
+            email.subject_original, source_lang, "zh"
+        ) if email.subject_original else ""
+
+        # 获取要翻译的正文内容：优先纯文本，其次从 HTML 提取
+        body_to_translate = email.body_original
+        if not body_to_translate and email.body_html:
+            # 从 HTML 提取文本用于翻译，保留段落格式
+            body_to_translate = html_to_text_with_format(email.body_html)
+            print(f"[Translate] Extracted {len(body_to_translate)} chars from HTML for email {email.id}")
+
+        # 智能翻译正文（检测引用，支持智能路由）
+        pure_body_translated = ""    # 纯翻译，用于保存到 SharedEmailTranslation
+        display_body_translated = "" # 显示翻译，用于 Email.body_translated
+        provider_used = "unknown"
+        if body_to_translate:
+            # 创建翻译服务
+            service = TranslateService(
+                api_key=settings.claude_api_key,
+                provider=settings.translate_provider,
+                ollama_base_url=settings.ollama_base_url,
+                ollama_model=settings.ollama_model,
+                claude_model=getattr(settings, 'claude_model', None),
+            )
+
+            # 检查是否启用智能路由（与新邮件自动翻译保持一致）
+            use_smart_routing = getattr(settings, 'smart_routing_enabled', True)
+
+            if use_smart_routing:
+                # 智能路由翻译（根据复杂度自动选择引擎）
+                # 先检测引用内容，只翻译新内容
+                new_content, quoted_content, quote_start = extract_new_content_from_reply(body_to_translate)
+
+                content_to_translate = new_content if quote_start != -1 else body_to_translate
+
+                result = service.translate_with_smart_routing(
+                    text=content_to_translate,
+                    subject=email.subject_original or "",
+                    target_lang="zh",
+                    source_lang=source_lang
+                )
+                pure_body_translated = result["translated_text"]
+                provider_used = result["provider_used"]
+                complexity_info = result["complexity"]
+                print(f"[ManualTranslate SmartRouting] Email {email.id} "
+                      f"→ {provider_used} (complexity: {complexity_info['level']}, "
+                      f"score: {complexity_info['score']})")
+
+                # 组合显示翻译（用于 Email.body_translated）
+                display_body_translated = pure_body_translated
+                if quote_start != -1 and quoted_content:
+                    # 尝试查找引用内容的已有翻译
+                    if email.in_reply_to:
+                        shared_result = await db.execute(
+                            select(SharedEmailTranslation).where(
+                                SharedEmailTranslation.message_id == email.in_reply_to
+                            )
                         )
-                    )
-                    shared = shared_result.scalar_one_or_none()
-                    if shared and shared.body_translated:
-                        display_body_translated += f"\n\n--- 以下为引用内容（已翻译）---\n{shared.body_translated}"
+                        shared = shared_result.scalar_one_or_none()
+                        if shared and shared.body_translated:
+                            display_body_translated += f"\n\n--- 以下为引用内容（已翻译）---\n{shared.body_translated}"
+                        else:
+                            truncated = quoted_content[:500] + ('...' if len(quoted_content) > 500 else '')
+                            display_body_translated += f"\n\n--- 以下为引用内容（原文）---\n{truncated}"
                     else:
                         truncated = quoted_content[:500] + ('...' if len(quoted_content) > 500 else '')
                         display_body_translated += f"\n\n--- 以下为引用内容（原文）---\n{truncated}"
-                else:
-                    truncated = quoted_content[:500] + ('...' if len(quoted_content) > 500 else '')
-                    display_body_translated += f"\n\n--- 以下为引用内容（原文）---\n{truncated}"
-        else:
-            # 普通智能翻译（检测引用，只翻译新内容）
-            translate_result = await smart_translate_email_body(
-                db, service, body_to_translate, source_lang, "zh",
-                in_reply_to=email.in_reply_to
+            else:
+                # 普通智能翻译（检测引用，只翻译新内容）
+                translate_result = await smart_translate_email_body(
+                    db, service, body_to_translate, source_lang, "zh",
+                    in_reply_to=email.in_reply_to
+                )
+                pure_body_translated = translate_result['pure']
+                display_body_translated = translate_result['display']
+                provider_used = settings.translate_provider
+
+        # 4. 更新邮件记录
+        email.subject_translated = subject_translated
+        email.body_translated = display_body_translated  # 显示用（含历史引用）
+        email.is_translated = True
+
+        # 5. 保存到共享翻译表（保存完整翻译，含历史引用，供后续邮件复用）
+        if email.message_id:
+            shared_entry = SharedEmailTranslation(
+                message_id=email.message_id,
+                subject_original=email.subject_original,
+                subject_translated=subject_translated,
+                body_original=email.body_original,
+                body_translated=display_body_translated,  # 完整翻译，含历史
+                source_lang=source_lang,
+                target_lang="zh",
+                translated_by=account.id
             )
-            pure_body_translated = translate_result['pure']
-            display_body_translated = translate_result['display']
-            provider_used = settings.translate_provider
+            db.add(shared_entry)
+            print(f"[SharedTranslation SAVE] message_id={email.message_id} (full translation with history)")
 
-    # 4. 更新邮件记录
-    email.subject_translated = subject_translated
-    email.body_translated = display_body_translated  # 显示用（含历史引用）
-    email.is_translated = True
+        await db.commit()
+        await db.refresh(email)
+        print(f"[Translate] Completed translation for email {email_id}")
+        return email
 
-    # 5. 保存到共享翻译表（保存完整翻译，含历史引用，供后续邮件复用）
-    if email.message_id:
-        shared_entry = SharedEmailTranslation(
-            message_id=email.message_id,
-            subject_original=email.subject_original,
-            subject_translated=subject_translated,
-            body_original=email.body_original,
-            body_translated=display_body_translated,  # 完整翻译，含历史
-            source_lang=source_lang,
-            target_lang="zh",
-            translated_by=account.id
-        )
-        db.add(shared_entry)
-        print(f"[SharedTranslation SAVE] message_id={email.message_id} (full translation with history)")
+    except Exception as e:
+        print(f"[Translate] Error translating email {email_id}: {e}")
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"翻译失败: {str(e)}")
 
-    await db.commit()
-    await db.refresh(email)
-    return email
+    finally:
+        # 始终移除翻译锁
+        _translating_emails.discard(email_id)
 
 
 # ============ 发送邮件 API ============
