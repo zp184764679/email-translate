@@ -11,7 +11,7 @@ from typing import List, Dict, Optional, Tuple
 import os
 import re
 from datetime import datetime
-from langdetect import detect, detect_langs, LangDetectException
+from services.language_service import get_language_service
 
 
 class EmailService:
@@ -432,102 +432,14 @@ class EmailService:
         return message_id
 
     def _detect_language(self, text: str) -> str:
-        """Detect language of text with improved accuracy"""
-        if not text or len(text.strip()) < 10:
-            return "unknown"
+        """
+        使用 Ollama 检测文本语言
 
-        # 清理文本：移除邮件签名、HTML标签等噪音
-        clean_text = self._clean_text_for_detection(text)
-        if len(clean_text.strip()) < 20:
-            return "unknown"
-
-        try:
-            # 使用 detect_langs 获取概率
-            langs = detect_langs(clean_text)
-            if not langs:
-                return "unknown"
-
-            top_lang = langs[0]
-            lang_code = top_lang.lang
-            confidence = top_lang.prob
-
-            # 如果置信度低于 0.5，认为不确定
-            if confidence < 0.5:
-                return "unknown"
-
-            # 语言映射
-            lang_map = {
-                "zh-cn": "zh", "zh-tw": "zh", "zh": "zh",
-                "en": "en",
-                "ja": "ja",
-                "ko": "ko",
-                "de": "de",  # 德语
-                "fr": "fr",  # 法语
-                "es": "es",  # 西班牙语
-                "it": "it",  # 意大利语
-                "pt": "pt",  # 葡萄牙语
-                "nl": "nl",  # 荷兰语
-                "ru": "ru",  # 俄语
-            }
-
-            detected = lang_map.get(lang_code, lang_code)
-
-            # 英德/英法等混淆修正（langdetect 常见问题）
-            # 商业邮件场景中英语更常见，适当提高英语优先级
-            if detected in ["de", "fr", "nl", "es", "it", "pt"]:
-                # 方法1：第二选项是英语且有一定概率
-                if len(langs) > 1 and langs[1].lang == "en" and langs[1].prob > 0.1:
-                    print(f"[LangDetect] Corrected {detected} -> en (2nd option prob={langs[1].prob:.2f})")
-                    detected = "en"
-                # 方法2：检测常见英语单词（移除置信度限制，因为即使高置信度也可能误判）
-                elif self._has_common_english_words(clean_text):
-                    print(f"[LangDetect] Corrected {detected} -> en (common English words found)")
-                    detected = "en"
-
-            return detected
-
-        except LangDetectException:
-            return "unknown"
-
-    def _clean_text_for_detection(self, text: str) -> str:
-        """Clean text for better language detection"""
-        import re
-        # 移除 HTML 标签
-        text = re.sub(r'<[^>]+>', ' ', text)
-        # 移除 URL
-        text = re.sub(r'http[s]?://\S+', ' ', text)
-        # 移除邮箱地址
-        text = re.sub(r'\S+@\S+\.\S+', ' ', text)
-        # 移除多余空白
-        text = re.sub(r'\s+', ' ', text)
-        # 取前 500 字符进行检测（避免签名等噪音影响）
-        return text[:500].strip()
-
-    def _has_common_english_words(self, text: str) -> bool:
-        """检测文本中是否包含常见英语单词（用于修正英德混淆）"""
-        # 商业邮件中常见的英语单词（德语中不常用或拼写不同）
-        common_english = {
-            # 商业用语
-            'please', 'thank', 'thanks', 'regards', 'sincerely', 'dear',
-            'order', 'shipping', 'delivery', 'payment', 'invoice', 'price',
-            'quote', 'quotation', 'inquiry', 'request', 'confirm', 'confirmation',
-            'attached', 'attachment', 'following', 'below', 'above',
-            # 常用动词
-            'would', 'could', 'should', 'have', 'will', 'can', 'need',
-            'look', 'forward', 'receive', 'send', 'provide', 'update',
-            # 常用名词
-            'information', 'question', 'issue', 'problem', 'solution',
-            'product', 'item', 'quantity', 'quality', 'sample',
-            # 常用介词/连词
-            'the', 'and', 'for', 'with', 'from', 'your', 'our', 'this',
-        }
-
-        text_lower = text.lower()
-        words = set(text_lower.split())
-
-        # 如果包含 3 个以上常见英语单词，认为是英语
-        matches = words & common_english
-        return len(matches) >= 3
+        替代原有的 langdetect 库，提高准确率
+        特别是对于英德混淆等问题
+        """
+        language_service = get_language_service()
+        return language_service.detect_language(text)
 
     def send_email(self, to: str, subject: str, body: str, cc: str = None,
                    attachments: List[str] = None, is_html: bool = False) -> bool:

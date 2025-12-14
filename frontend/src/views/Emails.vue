@@ -357,9 +357,9 @@ watch(() => route.query, (newQuery, oldQuery) => {
   }
 }, { deep: true })
 
-// 监听刷新信号
+// 监听刷新信号 - 使用静默刷新避免阻塞 UI
 watch(() => userStore.emailRefreshKey, () => {
-  loadEmails()
+  loadEmails(true)  // 静默刷新，不显示 loading
 })
 
 // 暴露选中的邮件ID给父组件（Layout.vue）使用
@@ -367,47 +367,64 @@ watch(selectedEmails, (newVal) => {
   window.__selectedEmailIds = newVal
 }, { immediate: true })
 
-async function loadEmails() {
-  loading.value = true
-  try {
-    const params = {
-      limit: pageSize.value,
-      offset: (currentPage.value - 1) * pageSize.value,
-      sort_by: sortBy.value
-    }
+// 加载锁，防止重复加载
+let loadingPromise = null
 
-    // 如果是文件夹视图，调用文件夹API
-    if (route.query.folder_id) {
-      const result = await api.getFolderEmails(route.query.folder_id, params)
+async function loadEmails(silent = false) {
+  // 如果已有加载任务在进行，直接返回该 Promise
+  if (loadingPromise) {
+    return loadingPromise
+  }
+
+  // 非静默模式才显示 loading 状态
+  if (!silent) {
+    loading.value = true
+  }
+
+  loadingPromise = (async () => {
+    try {
+      const params = {
+        limit: pageSize.value,
+        offset: (currentPage.value - 1) * pageSize.value,
+        sort_by: sortBy.value
+      }
+
+      // 如果是文件夹视图，调用文件夹API
+      if (route.query.folder_id) {
+        const result = await api.getFolderEmails(route.query.folder_id, params)
+        emails.value = result.emails
+        total.value = result.total
+        return
+      }
+
+      // 默认显示收件箱（inbound），除非明确指定了其他方向
+      if (route.query.direction) {
+        params.direction = route.query.direction
+      } else {
+        // 收件箱默认只显示收到的邮件
+        params.direction = 'inbound'
+      }
+
+      if (route.query.search) {
+        params.search = route.query.search
+      }
+
+      if (route.query.supplier_id) {
+        params.supplier_id = route.query.supplier_id
+      }
+
+      const result = await api.getEmails(params)
       emails.value = result.emails
       total.value = result.total
-      return
+    } catch (e) {
+      console.error('Failed to load emails:', e)
+    } finally {
+      loading.value = false
+      loadingPromise = null
     }
+  })()
 
-    // 默认显示收件箱（inbound），除非明确指定了其他方向
-    if (route.query.direction) {
-      params.direction = route.query.direction
-    } else {
-      // 收件箱默认只显示收到的邮件
-      params.direction = 'inbound'
-    }
-
-    if (route.query.search) {
-      params.search = route.query.search
-    }
-
-    if (route.query.supplier_id) {
-      params.supplier_id = route.query.supplier_id
-    }
-
-    const result = await api.getEmails(params)
-    emails.value = result.emails
-    total.value = result.total
-  } catch (e) {
-    console.error('Failed to load emails:', e)
-  } finally {
-    loading.value = false
-  }
+  return loadingPromise
 }
 
 function handleEmailClick(email, index) {

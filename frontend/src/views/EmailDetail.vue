@@ -1098,31 +1098,35 @@ async function downloadAllAttachments() {
 }
 
 async function translateEmail() {
+  // 立即显示提交状态
   translating.value = true
-  try {
-    // 直接使用API返回的翻译结果更新UI
-    // 不使用 AbortController，让请求在后台继续运行
-    const translatedEmail = await api.translateEmail(email.value.id)
-    // 组件卸载后不更新状态，但翻译已保存到后端
-    if (isUnmounted) {
-      console.log('Translation completed in background, data saved to server')
-      return
-    }
-    email.value = translatedEmail
-    ElMessage.success('翻译完成')
-    // 触发全局邮件列表刷新
-    userStore.triggerEmailRefresh()
-  } catch (e) {
-    // 组件卸载后不显示错误
-    if (isUnmounted) return
-    console.error('Translation failed:', e)
-    ElMessage.error('翻译失败: ' + (e.response?.data?.detail || e.message))
-  } finally {
-    // 只在组件未卸载时修改状态
-    if (!isUnmounted) {
-      translating.value = false
-    }
-  }
+
+  // 保存当前邮件 ID，用于后续验证
+  const currentEmailId = email.value.id
+
+  // 发起翻译请求（不等待完成）
+  api.translateEmail(currentEmailId)
+    .then(translatedEmail => {
+      // 翻译完成后更新（如果用户还在此页面且是同一封邮件）
+      if (!isUnmounted && email.value.id === currentEmailId) {
+        email.value = translatedEmail
+        ElMessage.success('翻译完成')
+      } else {
+        console.log('Translation completed in background, data saved to server')
+      }
+      // 触发刷新信号（更新列表中该邮件的状态）
+      userStore.triggerEmailRefresh()
+    })
+    .catch(e => {
+      // 组件卸载后不显示错误
+      if (isUnmounted) return
+      console.error('Translation failed:', e)
+      ElMessage.error('翻译失败: ' + (e.response?.data?.detail || e.message))
+    })
+
+  // 立即提示用户并释放 UI
+  ElMessage.info('翻译任务已提交，可继续操作')
+  translating.value = false
 }
 
 async function translateReply() {
