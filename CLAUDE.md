@@ -54,6 +54,7 @@
 │   └── services/           # 业务服务
 │       ├── email_service.py        # IMAP/SMTP 邮件收发
 │       ├── translate_service.py    # 翻译引擎
+│       ├── language_service.py     # Ollama 语言检测
 │       └── notification_service.py # WebSocket 推送
 ├── frontend/               # Vue3 + Electron 前端（桌面客户端）
 │   ├── electron/           # Electron 主进程
@@ -86,7 +87,7 @@
 ## 核心功能
 
 1. **邮箱登录** - 使用公司邮箱密码验证IMAP连接
-2. **邮件收取** - IMAP协议拉取邮件，自动检测语言
+2. **邮件收取** - IMAP协议拉取邮件，Ollama智能检测语言
 3. **智能翻译** - 外语邮件翻译为中文（Ollama/Claude）
 4. **回复撰写** - 中文撰写，翻译为目标语言发送
 5. **审批流程** - 草稿提交审批，审批人审核后发送
@@ -799,6 +800,7 @@ CELERY_RESULT_BACKEND=redis://localhost:6379/2
 | 自动定时拉取 | 每5分钟自动检查新邮件（前端定时器实现） |
 | 新邮件桌面通知 | Electron Notification API |
 | 智能翻译 | 支持 Ollama/Claude |
+| 翻译后台化 | 翻译时不阻塞 UI，用户可继续操作 |
 | 翻译缓存 | 相同文本只翻译一次 |
 | 邮件翻译共享 | 同一封邮件跨用户只翻译一次 |
 | 邮件标记 | 星标、已读/未读 |
@@ -811,7 +813,7 @@ CELERY_RESULT_BACKEND=redis://localhost:6379/2
 | 供应商管理 | 按域名分类供应商 |
 | 邮件搜索 | 按主题、发件人搜索 |
 | 邮件排序 | 按时间、发件人排序 |
-| 语言检测 | 自动识别邮件语言 |
+| 语言检测 | Ollama 智能识别邮件语言（替代 langdetect，解决英德混淆） |
 | 附件存储 | 保存到服务器 |
 | 附件下载 | 单个下载、批量下载 |
 | 登录后自动拉取 | 首次登录自动同步邮件 |
