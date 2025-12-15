@@ -1082,6 +1082,12 @@ function getTextColor(bgColor) {
   /* 不设置 overflow，让父容器统一滚动 */
 }
 
+/* 修复 el-dropdown 导致的并排显示问题 */
+.email-list :deep(.el-dropdown) {
+  display: block;
+  width: 100%;
+}
+
 .email-item {
   display: flex;
   align-items: flex-start;
