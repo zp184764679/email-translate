@@ -254,6 +254,52 @@ function initWebSocket() {
       window.dispatchEvent(new CustomEvent('batch-complete', { detail: data }))
     })
   )
+
+  // 监听日历事件提醒
+  wsUnsubscribes.push(
+    wsManager.on('calendar_reminder', (data) => {
+      console.log('[WS] Calendar reminder:', data)
+
+      // 格式化提醒时间
+      const minutesText = data.minutes_until <= 0
+        ? '现在开始'
+        : data.minutes_until === 1
+          ? '1 分钟后开始'
+          : `${data.minutes_until} 分钟后开始`
+
+      // 格式化开始时间
+      const startTime = new Date(data.start_time)
+      const timeStr = startTime.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+
+      // 构建消息
+      let message = `${timeStr} ${minutesText}`
+      if (data.location) {
+        message += `\n地点: ${data.location}`
+      }
+
+      // 显示应用内通知
+      ElNotification.warning({
+        title: `📅 ${data.title}`,
+        message: message,
+        duration: 0,  // 不自动关闭，让用户手动关闭
+        onClick: () => {
+          // 点击通知跳转到日历页面
+          router.push('/calendar')
+        }
+      })
+
+      // 显示桌面通知（Electron）
+      if (window.electronAPI?.showNotification) {
+        window.electronAPI.showNotification(
+          `📅 ${data.title}`,
+          message
+        )
+      }
+
+      // 触发全局事件
+      window.dispatchEvent(new CustomEvent('calendar-reminder', { detail: data }))
+    })
+  )
 }
 
 onUnmounted(() => {

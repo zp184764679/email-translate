@@ -133,6 +133,9 @@
         </div>
       </div>
 
+      <!-- 今日议程 -->
+      <TodayAgenda class="sidebar-agenda" />
+
       <!-- 底部操作区 -->
       <div class="folder-footer">
         <el-button text @click="handleLogout">
@@ -304,6 +307,7 @@ import api from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import ComposeEmail from '@/components/ComposeEmail.vue'
 import KeyboardShortcutsHelp from '@/components/KeyboardShortcutsHelp.vue'
+import TodayAgenda from '@/components/TodayAgenda.vue'
 import { useKeyboardShortcuts } from '@/composables/useKeyboardShortcuts'
 
 const route = useRoute()
@@ -838,6 +842,15 @@ async function deleteFolderConfirm() {
 
 .context-menu-item.danger:hover {
   background-color: #fef0f0;
+}
+
+.sidebar-agenda {
+  margin: 8px;
+  flex-shrink: 0;
+}
+
+.sidebar-agenda :deep(.agenda-content) {
+  max-height: 200px;
 }
 
 .folder-footer {

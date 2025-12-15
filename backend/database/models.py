@@ -374,7 +374,7 @@ class EmailFolder(Base):
 
 
 class CalendarEvent(Base):
-    """日历事件表 - 支持从邮件创建日程"""
+    """日历事件表 - 支持从邮件创建日程，支持重复事件"""
     __tablename__ = "calendar_events"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -391,12 +391,19 @@ class CalendarEvent(Base):
 
     color = Column(String(20), default="#409EFF")
     reminder_minutes = Column(Integer, default=15)  # 提前提醒分钟数
+    reminded_at = Column(DateTime, nullable=True)   # 已提醒时间（防止重复提醒）
+
+    # 重复事件字段
+    recurrence_rule = Column(String(255), nullable=True)  # RRULE 格式，如 FREQ=WEEKLY;BYDAY=MO,WE,FR
+    recurrence_end = Column(DateTime, nullable=True)      # 重复结束日期
+    parent_event_id = Column(Integer, ForeignKey("calendar_events.id"), nullable=True)  # 父事件ID（重复实例）
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # 关系
     email = relationship("Email")
+    parent_event = relationship("CalendarEvent", remote_side=[id], backref="instances")
 
     __table_args__ = (
         {'mysql_engine': 'InnoDB'},

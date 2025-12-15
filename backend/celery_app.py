@@ -25,6 +25,7 @@ celery_app = Celery(
         "tasks.email_tasks",
         "tasks.ai_tasks",
         "tasks.maintenance_tasks",
+        "tasks.reminder_tasks",
     ]
 )
 
@@ -53,6 +54,7 @@ celery_app.conf.update(
         "tasks.email_tasks.*": {"queue": "email_translate"},
         "tasks.ai_tasks.*": {"queue": "email_translate"},
         "tasks.maintenance_tasks.*": {"queue": "maintenance"},
+        "tasks.reminder_tasks.*": {"queue": "email_translate"},
     },
 
     # 重试配置
@@ -96,6 +98,11 @@ celery_app.conf.update(
         "poll-batch-status": {
             "task": "tasks.translate_tasks.poll_batch_status",
             "schedule": 30.0,
+        },
+        # 日历事件提醒检查 - 每分钟
+        "check-event-reminders": {
+            "task": "tasks.reminder_tasks.check_event_reminders",
+            "schedule": 60.0,
         },
     },
 )

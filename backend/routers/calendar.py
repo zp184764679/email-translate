@@ -1,15 +1,18 @@
 """
 日历事件 API 路由
 支持创建、编辑、删除日历事件，以及从邮件创建事件
+支持重复事件（RRULE 格式）
 """
 
 from datetime import datetime, timedelta
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, or_
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
+from dateutil.rrule import rrulestr
+from dateutil.relativedelta import relativedelta
 
 from database.database import get_db
 from database.models import CalendarEvent, Email, EmailAccount
@@ -30,6 +33,9 @@ class EventCreate(BaseModel):
     color: str = "#409EFF"
     reminder_minutes: int = 15
     email_id: Optional[int] = None
+    # 重复事件字段
+    recurrence_rule: Optional[str] = None  # RRULE 格式
+    recurrence_end: Optional[datetime] = None
 
 
 class EventUpdate(BaseModel):
@@ -41,6 +47,8 @@ class EventUpdate(BaseModel):
     all_day: Optional[bool] = None
     color: Optional[str] = None
     reminder_minutes: Optional[int] = None
+    recurrence_rule: Optional[str] = None
+    recurrence_end: Optional[datetime] = None
 
 
 class EventResponse(BaseModel):
@@ -54,6 +62,10 @@ class EventResponse(BaseModel):
     color: str
     reminder_minutes: int
     email_id: Optional[int]
+    recurrence_rule: Optional[str] = None
+    recurrence_end: Optional[datetime] = None
+    parent_event_id: Optional[int] = None
+    is_recurring: bool = False  # 前端用于区分普通事件和重复事件
     created_at: datetime
     updated_at: datetime
 
@@ -69,23 +81,157 @@ class EventFromEmailCreate(BaseModel):
     description: Optional[str] = None
 
 
+# ============ Helper Functions ============
+
+def expand_recurring_event(event: CalendarEvent, start: datetime, end: datetime) -> List[dict]:
+    """
+    展开重复事件到指定时间范围内的所有实例
+
+    Args:
+        event: 带有 recurrence_rule 的事件
+        start: 范围开始
+        end: 范围结束
+
+    Returns:
+        展开后的事件列表（字典）
+    """
+    if not event.recurrence_rule:
+        return []
+
+    try:
+        # 解析 RRULE
+        rule = rrulestr(
+            f"RRULE:{event.recurrence_rule}",
+            dtstart=event.start_time
+        )
+
+        # 计算事件持续时间
+        duration = event.end_time - event.start_time
+
+        # 生成在范围内的所有实例
+        instances = []
+        recurrence_end = event.recurrence_end or end
+
+        # 获取范围内的所有日期
+        for dt in rule.between(start, min(end, recurrence_end), inc=True):
+            # 跳过原始事件（已作为普通事件返回）
+            if dt == event.start_time:
+                continue
+
+            instance = {
+                "id": event.id,  # 虚拟实例使用相同ID但带不同时间
+                "title": event.title,
+                "description": event.description,
+                "location": event.location,
+                "start_time": dt,
+                "end_time": dt + duration,
+                "all_day": event.all_day,
+                "color": event.color,
+                "reminder_minutes": event.reminder_minutes,
+                "email_id": event.email_id,
+                "recurrence_rule": event.recurrence_rule,
+                "recurrence_end": event.recurrence_end,
+                "parent_event_id": event.id,  # 指向原始事件
+                "is_recurring": True,
+                "created_at": event.created_at,
+                "updated_at": event.updated_at,
+            }
+            instances.append(instance)
+
+        return instances
+
+    except Exception as e:
+        print(f"[Calendar] Failed to expand recurring event {event.id}: {e}")
+        return []
+
+
+def event_to_dict(event: CalendarEvent) -> dict:
+    """将事件对象转为字典，包含 is_recurring 字段"""
+    return {
+        "id": event.id,
+        "title": event.title,
+        "description": event.description,
+        "location": event.location,
+        "start_time": event.start_time,
+        "end_time": event.end_time,
+        "all_day": event.all_day,
+        "color": event.color,
+        "reminder_minutes": event.reminder_minutes,
+        "email_id": event.email_id,
+        "recurrence_rule": event.recurrence_rule,
+        "recurrence_end": event.recurrence_end,
+        "parent_event_id": event.parent_event_id,
+        "is_recurring": bool(event.recurrence_rule),
+        "created_at": event.created_at,
+        "updated_at": event.updated_at,
+    }
+
+
 # ============ API Endpoints ============
 
-@router.get("/events", response_model=List[EventResponse])
+@router.get("/events")
 async def get_events(
     start: Optional[datetime] = Query(None, description="开始时间过滤"),
     end: Optional[datetime] = Query(None, description="结束时间过滤"),
+    search: Optional[str] = Query(None, description="搜索关键词（标题、描述、地点）"),
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """获取日历事件列表，支持按时间范围过滤"""
+    """
+    获取日历事件列表，支持按时间范围过滤和关键词搜索
+    重复事件会自动展开到指定时间范围内
+    """
     query = select(CalendarEvent).where(
         CalendarEvent.account_id == account.id
     )
 
-    if start:
-        query = query.where(CalendarEvent.end_time >= start)
-    if end:
+    # 关键词搜索
+    if search:
+        search_term = f"%{search}%"
+        query = query.where(
+            or_(
+                CalendarEvent.title.ilike(search_term),
+                CalendarEvent.description.ilike(search_term),
+                CalendarEvent.location.ilike(search_term)
+            )
+        )
+
+    # 对于普通事件，按时间范围过滤
+    # 对于重复事件，需要包含在范围内可能有实例的事件
+    if start and end:
+        query = query.where(
+            or_(
+                # 普通事件：在范围内
+                and_(
+                    CalendarEvent.recurrence_rule.is_(None),
+                    CalendarEvent.end_time >= start,
+                    CalendarEvent.start_time <= end
+                ),
+                # 重复事件：开始时间在范围结束前，且（无结束日期或结束日期在范围开始后）
+                and_(
+                    CalendarEvent.recurrence_rule.isnot(None),
+                    CalendarEvent.start_time <= end,
+                    or_(
+                        CalendarEvent.recurrence_end.is_(None),
+                        CalendarEvent.recurrence_end >= start
+                    )
+                )
+            )
+        )
+    elif start:
+        query = query.where(
+            or_(
+                CalendarEvent.end_time >= start,
+                and_(
+                    CalendarEvent.recurrence_rule.isnot(None),
+                    or_(
+                        CalendarEvent.recurrence_end.is_(None),
+                        CalendarEvent.recurrence_end >= start
+                    )
+                )
+            )
+        )
+    elif end:
         query = query.where(CalendarEvent.start_time <= end)
 
     query = query.order_by(CalendarEvent.start_time)
@@ -93,7 +239,32 @@ async def get_events(
     result = await db.execute(query)
     events = result.scalars().all()
 
-    return events
+    # 构建返回结果，展开重复事件
+    all_events = []
+
+    for event in events:
+        # 添加原始事件
+        event_dict = event_to_dict(event)
+
+        # 检查原始事件是否在范围内
+        in_range = True
+        if start and event.end_time < start:
+            in_range = False
+        if end and event.start_time > end:
+            in_range = False
+
+        if in_range:
+            all_events.append(event_dict)
+
+        # 如果是重复事件且指定了时间范围，展开实例
+        if event.recurrence_rule and start and end:
+            instances = expand_recurring_event(event, start, end)
+            all_events.extend(instances)
+
+    # 按开始时间排序
+    all_events.sort(key=lambda x: x["start_time"])
+
+    return all_events
 
 
 @router.post("/events", response_model=EventResponse)
@@ -102,10 +273,17 @@ async def create_event(
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """创建新的日历事件"""
+    """创建新的日历事件，支持重复规则"""
     # 验证时间
     if event_data.end_time < event_data.start_time:
         raise HTTPException(status_code=400, detail="结束时间不能早于开始时间")
+
+    # 验证重复规则格式
+    if event_data.recurrence_rule:
+        try:
+            rrulestr(f"RRULE:{event_data.recurrence_rule}", dtstart=event_data.start_time)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"重复规则格式错误: {str(e)}")
 
     # 如果关联邮件，验证邮件存在
     if event_data.email_id:
@@ -284,3 +462,51 @@ async def get_events_by_email(
     events = result.scalars().all()
 
     return events
+
+
+# ============ Conflict Detection ============
+
+class ConflictCheckRequest(BaseModel):
+    start_time: datetime
+    end_time: datetime
+    exclude_event_id: Optional[int] = None  # 编辑时排除自己
+
+
+class ConflictResponse(BaseModel):
+    has_conflict: bool
+    conflicts: List[EventResponse]
+
+
+@router.post("/events/check-conflicts", response_model=ConflictResponse)
+async def check_event_conflicts(
+    request: ConflictCheckRequest,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    检测时间冲突
+
+    检查指定时间范围内是否有其他事件存在重叠
+    用于创建/编辑事件时提前警告用户
+    """
+    # 查询与指定时间范围重叠的事件
+    # 重叠条件：existing.start < new.end AND existing.end > new.start
+    query = select(CalendarEvent).where(
+        and_(
+            CalendarEvent.account_id == account.id,
+            CalendarEvent.start_time < request.end_time,
+            CalendarEvent.end_time > request.start_time
+        )
+    )
+
+    # 排除指定事件（编辑时排除自己）
+    if request.exclude_event_id:
+        query = query.where(CalendarEvent.id != request.exclude_event_id)
+
+    result = await db.execute(query.order_by(CalendarEvent.start_time))
+    conflicts = result.scalars().all()
+
+    return ConflictResponse(
+        has_conflict=len(conflicts) > 0,
+        conflicts=[event_to_dict(e) for e in conflicts]
+    )

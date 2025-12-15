@@ -2,10 +2,21 @@
   <div class="calendar-container">
     <div class="calendar-header">
       <h2>日历</h2>
-      <el-button type="primary" @click="openEventDialog()">
-        <el-icon><Plus /></el-icon>
-        新建事件
-      </el-button>
+      <div class="header-actions">
+        <el-input
+          v-model="searchKeyword"
+          placeholder="搜索事件..."
+          clearable
+          prefix-icon="Search"
+          class="search-input"
+          @keyup.enter="handleSearch"
+          @clear="handleClearSearch"
+        />
+        <el-button type="primary" @click="openEventDialog()">
+          <el-icon><Plus /></el-icon>
+          新建事件
+        </el-button>
+      </div>
     </div>
 
     <div class="calendar-content">
@@ -70,6 +81,40 @@
             <el-option label="1 天前" :value="1440" />
           </el-select>
         </el-form-item>
+
+        <el-form-item label="重复">
+          <el-select v-model="eventForm.recurrenceType" placeholder="不重复" @change="handleRecurrenceTypeChange">
+            <el-option label="不重复" value="" />
+            <el-option label="每天" value="DAILY" />
+            <el-option label="每周" value="WEEKLY" />
+            <el-option label="每月" value="MONTHLY" />
+            <el-option label="每年" value="YEARLY" />
+          </el-select>
+        </el-form-item>
+
+        <!-- 每周重复的星期选择 -->
+        <el-form-item v-if="eventForm.recurrenceType === 'WEEKLY'" label="重复日">
+          <el-checkbox-group v-model="eventForm.recurrenceWeekdays">
+            <el-checkbox label="MO">周一</el-checkbox>
+            <el-checkbox label="TU">周二</el-checkbox>
+            <el-checkbox label="WE">周三</el-checkbox>
+            <el-checkbox label="TH">周四</el-checkbox>
+            <el-checkbox label="FR">周五</el-checkbox>
+            <el-checkbox label="SA">周六</el-checkbox>
+            <el-checkbox label="SU">周日</el-checkbox>
+          </el-checkbox-group>
+        </el-form-item>
+
+        <!-- 重复结束日期 -->
+        <el-form-item v-if="eventForm.recurrenceType" label="结束日期">
+          <el-date-picker
+            v-model="eventForm.recurrenceEnd"
+            type="date"
+            placeholder="永不结束"
+            format="YYYY-MM-DD"
+            value-format="YYYY-MM-DDT23:59:59"
+          />
+        </el-form-item>
       </el-form>
 
       <template #footer>
@@ -90,7 +135,7 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
-import { Plus } from '@element-plus/icons-vue'
+import { Plus, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import FullCalendar from '@fullcalendar/vue3'
 import dayGridPlugin from '@fullcalendar/daygrid'
@@ -107,6 +152,8 @@ const showEventDialog = ref(false)
 const editingEvent = ref(null)
 const saving = ref(false)
 const deleting = ref(false)
+const conflictWarning = ref(null)  // 冲突警告信息
+const searchKeyword = ref('')  // 搜索关键词
 
 // Event form
 const eventForm = ref({
@@ -116,8 +163,59 @@ const eventForm = ref({
   location: '',
   description: '',
   color: '#409EFF',
-  reminderMinutes: 15
+  reminderMinutes: 15,
+  // 重复事件字段
+  recurrenceType: '',  // '', 'DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY'
+  recurrenceWeekdays: [],  // ['MO', 'TU', 'WE', 'TH', 'FR']
+  recurrenceEnd: null
 })
+
+// 处理重复类型变化
+function handleRecurrenceTypeChange(type) {
+  if (type === 'WEEKLY' && eventForm.value.recurrenceWeekdays.length === 0) {
+    // 默认选择当前日期的星期
+    const dayMap = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA']
+    if (eventForm.value.dateRange && eventForm.value.dateRange[0]) {
+      const startDay = new Date(eventForm.value.dateRange[0]).getDay()
+      eventForm.value.recurrenceWeekdays = [dayMap[startDay]]
+    }
+  }
+}
+
+// 生成 RRULE 字符串
+function buildRecurrenceRule() {
+  if (!eventForm.value.recurrenceType) return null
+
+  let rule = `FREQ=${eventForm.value.recurrenceType}`
+
+  // 每周重复需要指定星期
+  if (eventForm.value.recurrenceType === 'WEEKLY' && eventForm.value.recurrenceWeekdays.length > 0) {
+    rule += `;BYDAY=${eventForm.value.recurrenceWeekdays.join(',')}`
+  }
+
+  return rule
+}
+
+// 解析 RRULE 字符串
+function parseRecurrenceRule(rule) {
+  if (!rule) {
+    return { type: '', weekdays: [], end: null }
+  }
+
+  const parts = rule.split(';')
+  let type = ''
+  let weekdays = []
+
+  for (const part of parts) {
+    if (part.startsWith('FREQ=')) {
+      type = part.replace('FREQ=', '')
+    } else if (part.startsWith('BYDAY=')) {
+      weekdays = part.replace('BYDAY=', '').split(',')
+    }
+  }
+
+  return { type, weekdays }
+}
 
 // Calendar options
 const calendarOptions = reactive({
@@ -157,14 +255,15 @@ async function loadEvents(start, end) {
     const params = {}
     if (start) params.start = start
     if (end) params.end = end
+    if (searchKeyword.value.trim()) params.search = searchKeyword.value.trim()
 
     const result = await api.getCalendarEvents(params)
     events.value = result
 
     // Update calendar events
     calendarOptions.events = result.map(event => ({
-      id: event.id,
-      title: event.title,
+      id: event.is_recurring ? `${event.id}-${event.start_time}` : event.id,  // 重复实例使用组合ID
+      title: event.is_recurring ? `🔄 ${event.title}` : event.title,  // 重复事件添加图标
       start: event.start_time,
       end: event.end_time,
       allDay: event.all_day,
@@ -174,12 +273,31 @@ async function loadEvents(start, end) {
         description: event.description,
         location: event.location,
         reminderMinutes: event.reminder_minutes,
-        emailId: event.email_id
+        emailId: event.email_id,
+        recurrenceRule: event.recurrence_rule,
+        recurrenceEnd: event.recurrence_end,
+        isRecurring: event.is_recurring,
+        parentEventId: event.parent_event_id,
+        originalId: event.id  // 保存原始ID用于编辑
       }
     }))
   } catch (e) {
     console.error('Failed to load events:', e)
   }
+}
+
+// Search handlers
+function handleSearch() {
+  const calendarApi = calendarRef.value?.getApi()
+  if (calendarApi) {
+    const view = calendarApi.view
+    loadEvents(view.activeStart.toISOString(), view.activeEnd.toISOString())
+  }
+}
+
+function handleClearSearch() {
+  searchKeyword.value = ''
+  handleSearch()
 }
 
 // Handle date range change
@@ -195,23 +313,31 @@ function handleDateSelect(selectInfo) {
 // Handle event click (edit event)
 function handleEventClick(clickInfo) {
   const event = clickInfo.event
+  const originalId = event.extendedProps.originalId || event.id
+
   editingEvent.value = {
-    id: event.id,
-    title: event.title,
+    id: originalId,  // 使用原始ID进行编辑
+    title: event.title.replace('🔄 ', ''),  // 移除重复图标
     start: event.start,
     end: event.end,
     allDay: event.allDay,
     ...event.extendedProps
   }
 
+  // 解析重复规则
+  const recurrence = parseRecurrenceRule(event.extendedProps.recurrenceRule)
+
   eventForm.value = {
-    title: event.title,
+    title: event.title.replace('🔄 ', ''),
     dateRange: [event.start, event.end || event.start],
     allDay: event.allDay,
     location: event.extendedProps.location || '',
     description: event.extendedProps.description || '',
     color: event.backgroundColor || '#409EFF',
-    reminderMinutes: event.extendedProps.reminderMinutes || 15
+    reminderMinutes: event.extendedProps.reminderMinutes || 15,
+    recurrenceType: recurrence.type,
+    recurrenceWeekdays: recurrence.weekdays,
+    recurrenceEnd: event.extendedProps.recurrenceEnd || null
   }
 
   showEventDialog.value = true
@@ -274,6 +400,9 @@ async function handleEventResize(info) {
 // Open event dialog
 function openEventDialog(event = null, start = null, end = null, allDay = false) {
   if (event) {
+    // 解析重复规则
+    const recurrence = parseRecurrenceRule(event.recurrenceRule)
+
     editingEvent.value = event
     eventForm.value = {
       title: event.title,
@@ -282,7 +411,10 @@ function openEventDialog(event = null, start = null, end = null, allDay = false)
       location: event.location || '',
       description: event.description || '',
       color: event.color || '#409EFF',
-      reminderMinutes: event.reminderMinutes || 15
+      reminderMinutes: event.reminderMinutes || 15,
+      recurrenceType: recurrence.type,
+      recurrenceWeekdays: recurrence.weekdays,
+      recurrenceEnd: event.recurrenceEnd || null
     }
   } else {
     editingEvent.value = null
@@ -295,7 +427,10 @@ function openEventDialog(event = null, start = null, end = null, allDay = false)
       location: '',
       description: '',
       color: '#409EFF',
-      reminderMinutes: 15
+      reminderMinutes: 15,
+      recurrenceType: '',
+      recurrenceWeekdays: [],
+      recurrenceEnd: null
     }
   }
 
@@ -305,6 +440,7 @@ function openEventDialog(event = null, start = null, end = null, allDay = false)
 // Reset form
 function resetEventForm() {
   editingEvent.value = null
+  conflictWarning.value = null
   eventForm.value = {
     title: '',
     dateRange: [],
@@ -312,12 +448,40 @@ function resetEventForm() {
     location: '',
     description: '',
     color: '#409EFF',
-    reminderMinutes: 15
+    reminderMinutes: 15,
+    recurrenceType: '',
+    recurrenceWeekdays: [],
+    recurrenceEnd: null
+  }
+}
+
+// Check for conflicts
+async function checkConflicts() {
+  if (!eventForm.value.dateRange || eventForm.value.dateRange.length < 2) {
+    conflictWarning.value = null
+    return
+  }
+
+  try {
+    const result = await api.checkEventConflicts(
+      eventForm.value.dateRange[0],
+      eventForm.value.dateRange[1],
+      editingEvent.value?.id || null
+    )
+
+    if (result.has_conflict) {
+      conflictWarning.value = result.conflicts
+    } else {
+      conflictWarning.value = null
+    }
+  } catch (e) {
+    console.error('Failed to check conflicts:', e)
+    conflictWarning.value = null
   }
 }
 
 // Save event
-async function saveEvent() {
+async function saveEvent(forceIgnoreConflict = false) {
   if (!eventForm.value.title.trim()) {
     ElMessage.warning('请输入事件标题')
     return
@@ -337,6 +501,34 @@ async function saveEvent() {
     return
   }
 
+  // 验证每周重复必须选择至少一天
+  if (eventForm.value.recurrenceType === 'WEEKLY' && eventForm.value.recurrenceWeekdays.length === 0) {
+    ElMessage.warning('每周重复请至少选择一天')
+    return
+  }
+
+  // 检查冲突（如果没有强制忽略）
+  if (!forceIgnoreConflict) {
+    await checkConflicts()
+    if (conflictWarning.value && conflictWarning.value.length > 0) {
+      // 有冲突，询问用户是否继续
+      try {
+        const conflictTitles = conflictWarning.value.map(c => c.title).join('、')
+        await ElMessageBox.confirm(
+          `与以下事件时间冲突：${conflictTitles}。是否仍然创建？`,
+          '时间冲突',
+          {
+            confirmButtonText: '仍然创建',
+            cancelButtonText: '取消',
+            type: 'warning'
+          }
+        )
+      } catch {
+        return  // 用户取消
+      }
+    }
+  }
+
   saving.value = true
   try {
     const data = {
@@ -347,7 +539,9 @@ async function saveEvent() {
       location: eventForm.value.location || null,
       description: eventForm.value.description || null,
       color: eventForm.value.color,
-      reminder_minutes: eventForm.value.reminderMinutes
+      reminder_minutes: eventForm.value.reminderMinutes,
+      recurrence_rule: buildRecurrenceRule(),
+      recurrence_end: eventForm.value.recurrenceEnd || null
     }
 
     if (editingEvent.value) {
@@ -359,6 +553,7 @@ async function saveEvent() {
     }
 
     showEventDialog.value = false
+    conflictWarning.value = null
     // Refresh calendar
     const calendarApi = calendarRef.value.getApi()
     calendarApi.refetchEvents()
@@ -429,6 +624,20 @@ onMounted(() => {
   font-size: 20px;
   font-weight: 600;
   color: #303133;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.search-input {
+  width: 220px;
+}
+
+.search-input :deep(.el-input__wrapper) {
+  border-radius: 20px;
 }
 
 .calendar-content {

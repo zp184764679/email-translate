@@ -1,34 +1,33 @@
 <template>
   <div class="extraction-panel">
-    <!-- 日期提醒卡片 - 醒目显示 -->
-    <el-alert
-      v-if="extraction?.dates?.length && !dismissedDateAlert"
-      title="发现日期信息，是否添加到日历？"
-      type="warning"
-      show-icon
-      :closable="true"
-      @close="dismissedDateAlert = true"
-      class="date-alert"
-    >
-      <template #default>
-        <div class="date-alert-content">
-          <div v-for="(date, i) in extraction.dates.slice(0, 3)" :key="i" class="date-alert-item">
-            <span>
+    <!-- 日期提醒卡片 - 醒目横幅（类似 Gmail/Outlook 风格） -->
+    <div v-if="extraction?.dates?.length && !dismissedDateAlert" class="date-suggestion-banner">
+      <div class="banner-icon">
+        <el-icon :size="24"><Calendar /></el-icon>
+      </div>
+      <div class="banner-content">
+        <div class="banner-title">检测到日期信息</div>
+        <div class="banner-dates">
+          <div v-for="(date, i) in extraction.dates.slice(0, 2)" :key="i" class="banner-date-item">
+            <span class="date-text">
               <strong>{{ date.date }}</strong>
-              {{ date.time ? date.time : '' }}
-              {{ date.context ? `- ${date.context}` : '' }}
-              <el-tag v-if="date.is_meeting" type="danger" size="small">会议</el-tag>
+              <span v-if="date.time" class="time-text">{{ date.time }}</span>
             </span>
-            <el-button type="primary" size="small" @click="createEventFromDate(date)">
-              添加到日历
+            <span class="date-context">{{ date.context || (date.is_meeting ? '会议' : '日程') }}</span>
+            <el-button type="primary" size="small" round @click="createEventFromDate(date)">
+              <el-icon><Plus /></el-icon>
+              添加日历
             </el-button>
           </div>
-          <div v-if="extraction.dates.length > 3" class="more-dates">
-            还有 {{ extraction.dates.length - 3 }} 个日期...
+          <div v-if="extraction.dates.length > 2" class="more-dates-link" @click="scrollToDateSection">
+            查看全部 {{ extraction.dates.length }} 个日期 →
           </div>
         </div>
-      </template>
-    </el-alert>
+      </div>
+      <el-button class="banner-close" text circle @click="dismissedDateAlert = true">
+        <el-icon><Close /></el-icon>
+      </el-button>
+    </div>
 
     <div class="panel-header">
       <h4>AI 智能提取</h4>
@@ -235,15 +234,20 @@
 import { ref, computed, watch } from 'vue'
 import {
   MagicStick, Refresh, Loading, Document, Star, Calendar,
-  Money, User, Message, Phone, List, Warning, InfoFilled, Plus
+  Money, User, Message, Phone, List, Warning, InfoFilled, Plus, Close
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import api from '@/api'
 
+// Props
 const props = defineProps({
   emailId: {
     type: Number,
     required: true
+  },
+  autoExtract: {
+    type: Boolean,
+    default: true  // 默认自动提取
   }
 })
 
@@ -281,17 +285,42 @@ watch(() => props.emailId, async (newId) => {
   }
 }, { immediate: true })
 
-// Load existing extraction
+// Load existing extraction, auto-extract if not exists
 async function loadExtraction() {
   try {
     const result = await api.getExtraction(props.emailId)
     extraction.value = result
   } catch (e) {
-    // 404 is expected if no extraction exists
-    if (e.response?.status !== 404) {
+    // 404 means no extraction exists
+    if (e.response?.status === 404) {
+      extraction.value = null
+      // 自动触发提取（后台静默进行）
+      if (props.autoExtract) {
+        await doExtractSilent()
+      }
+    } else {
       console.error('Failed to load extraction:', e)
+      extraction.value = null
     }
+  }
+}
+
+// Silent extraction (no success message, for auto-extract)
+async function doExtractSilent() {
+  loading.value = true
+  try {
+    const result = await api.extractEmail(props.emailId, false)
+    extraction.value = result
+    // 自动提取完成，如果有日期则显示提示
+    if (result?.dates?.length) {
+      console.log('[AutoExtract] Found dates:', result.dates.length)
+    }
+  } catch (e) {
+    // 静默失败，不显示错误消息
+    console.warn('[AutoExtract] Failed:', e.response?.data?.detail || e.message)
     extraction.value = null
+  } finally {
+    loading.value = false
   }
 }
 
@@ -394,6 +423,25 @@ function createEventFromDate(dateInfo) {
     console.error('Invalid date:', dateInfo.date, e)
     ElMessage.error('日期解析失败')
   }
+}
+
+// Scroll to date section
+function scrollToDateSection() {
+  const dateSection = document.querySelector('.extraction-panel .section:has(.section-title .el-icon + :contains("日期"))')
+  // 由于 :contains 选择器不被原生支持，使用更简单的方式
+  const sections = document.querySelectorAll('.extraction-panel .section')
+  for (const section of sections) {
+    const title = section.querySelector('.section-title')
+    if (title && title.textContent.includes('日期')) {
+      section.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      // 添加高亮效果
+      section.classList.add('highlight-section')
+      setTimeout(() => section.classList.remove('highlight-section'), 2000)
+      break
+    }
+  }
+  // 关闭横幅
+  dismissedDateAlert.value = true
 }
 
 // Confirm create event
@@ -598,5 +646,113 @@ async function confirmCreateEvent() {
 .deadline {
   font-size: 12px;
   color: #e6a23c;
+}
+
+/* 日期建议横幅 - Gmail/Outlook 风格 */
+.date-suggestion-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  background: linear-gradient(135deg, #e8f4fd 0%, #f0f9ff 100%);
+  border: 1px solid #b3d8fd;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(64, 158, 255, 0.1);
+}
+
+.banner-icon {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #409eff;
+  border-radius: 50%;
+  color: #fff;
+}
+
+.banner-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.banner-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1a73e8;
+  margin-bottom: 8px;
+}
+
+.banner-dates {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.banner-date-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.date-text {
+  font-size: 14px;
+  color: #303133;
+}
+
+.date-text strong {
+  color: #1a73e8;
+}
+
+.time-text {
+  margin-left: 4px;
+  color: #606266;
+}
+
+.date-context {
+  font-size: 12px;
+  color: #909399;
+  background: #f5f7fa;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.more-dates-link {
+  font-size: 13px;
+  color: #409eff;
+  cursor: pointer;
+  margin-top: 4px;
+}
+
+.more-dates-link:hover {
+  text-decoration: underline;
+}
+
+.banner-close {
+  flex-shrink: 0;
+  color: #909399;
+}
+
+.banner-close:hover {
+  color: #606266;
+}
+
+/* 高亮效果 */
+.highlight-section {
+  animation: highlight-pulse 2s ease-out;
+}
+
+@keyframes highlight-pulse {
+  0% {
+    box-shadow: 0 0 0 3px rgba(64, 158, 255, 0.6);
+    background: #e8f4fd;
+  }
+  100% {
+    box-shadow: none;
+    background: #fff;
+  }
 }
 </style>

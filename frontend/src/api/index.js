@@ -476,6 +476,14 @@ const api = {
     return instance.get(`/calendar/events/by-email/${emailId}`)
   },
 
+  async checkEventConflicts(startTime, endTime, excludeEventId = null) {
+    return instance.post('/calendar/events/check-conflicts', {
+      start_time: startTime,
+      end_time: endTime,
+      exclude_event_id: excludeEventId
+    })
+  },
+
   // AI Extract - AI 邮件信息提取
   async extractEmail(emailId, force = false) {
     return instance.post(`/ai/extract/${emailId}`, null, { params: { force } })
