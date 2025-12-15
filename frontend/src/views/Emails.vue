@@ -23,6 +23,7 @@
               'focused': focusedIndex === index
             }"
             @click="handleEmailClick(email, index)"
+            @contextmenu.prevent="handleEmailContextMenu($event, email, index)"
           >
             <div class="email-actions">
               <el-checkbox
@@ -75,6 +76,31 @@
                 {{ getLanguageName(email.language_detected) }}
               </el-tag>
             </div>
+            <!-- 悬停操作按钮 -->
+            <div class="hover-actions" @click.stop>
+              <el-tooltip content="回复" placement="top" :show-after="500">
+                <el-button :icon="Back" size="small" circle @click="handleQuickReply(email)" />
+              </el-tooltip>
+              <el-tooltip content="删除" placement="top" :show-after="500">
+                <el-button :icon="Delete" size="small" circle type="danger" plain @click="handleQuickDelete(email)" />
+              </el-tooltip>
+              <el-dropdown trigger="click" @command="(cmd) => handleQuickAction(cmd, email)">
+                <el-button :icon="MoreFilled" size="small" circle />
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="mark-read">
+                      {{ email.is_read ? '标记为未读' : '标记为已读' }}
+                    </el-dropdown-item>
+                    <el-dropdown-item command="toggle-flag">
+                      {{ email.is_flagged ? '取消星标' : '添加星标' }}
+                    </el-dropdown-item>
+                    <el-dropdown-item command="add-label">添加标签</el-dropdown-item>
+                    <el-dropdown-item command="translate" :disabled="email.is_translated">翻译</el-dropdown-item>
+                    <el-dropdown-item command="forward">转发</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
           </div>
           <el-empty v-if="!loading && emails.length === 0" description="暂无邮件" />
         </div>
@@ -102,6 +128,7 @@
               'focused': focusedIndex === index
             }"
             @click="handleEmailClick(email, index)"
+            @contextmenu.prevent="handleEmailContextMenu($event, email, index)"
           >
             <!-- 与左侧完全镜像的结构 -->
             <div class="email-actions" style="visibility: hidden;">
@@ -162,6 +189,31 @@
       :current-labels="labelSelectorCurrentLabels"
       @saved="handleLabelsSaved"
     />
+
+    <!-- 邮件右键菜单 -->
+    <ContextMenu
+      :visible="emailContextMenu.state.visible"
+      :x="emailContextMenu.state.x"
+      :y="emailContextMenu.state.y"
+      :items="contextMenuItems"
+      @select="handleContextMenuSelect"
+      @close="emailContextMenu.hide()"
+    />
+
+    <!-- 文件夹选择对话框 -->
+    <el-dialog
+      v-model="showFolderPicker"
+      title="移至文件夹"
+      width="400px"
+      :close-on-click-modal="true"
+    >
+      <FolderPicker
+        v-if="showFolderPicker"
+        :email-id="folderPickerEmailId"
+        @done="showFolderPicker = false; loadEmails(true)"
+        @cancel="showFolderPicker = false"
+      />
+    </el-dialog>
   </div>
 </template>
 
@@ -169,13 +221,22 @@
 import { ref, onMounted, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
-import { Star, StarFilled, Sort, Paperclip, Message, Document, DocumentCopy } from '@element-plus/icons-vue'
+import {
+  Star, StarFilled, Sort, Paperclip, Message, Document, DocumentCopy,
+  // 右键菜单图标
+  View, Hide, Delete, Folder, PriceTag, EditPen, Promotion, Refresh, Back, DArrowRight,
+  // 悬停按钮图标
+  MoreFilled
+} from '@element-plus/icons-vue'
 import api from '@/api'
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
 import { useKeyboardShortcuts } from '@/composables/useKeyboardShortcuts'
+import { useContextMenu } from '@/composables/useContextMenu'
 import EmailPreview from '@/components/EmailPreview.vue'
 import LabelSelector from '@/components/LabelSelector.vue'
+import ContextMenu from '@/components/ContextMenu.vue'
+import FolderPicker from '@/components/FolderPicker.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -197,6 +258,11 @@ const showLabelSelector = ref(false)  // 标签选择器可见性
 const labelSelectorEmailId = ref(null)  // 当前操作标签的邮件ID
 const labelSelectorCurrentLabels = ref([])  // 当前邮件的标签
 
+// 右键菜单
+const emailContextMenu = useContextMenu()
+const showFolderPicker = ref(false)  // 文件夹选择器
+const folderPickerEmailId = ref(null)  // 当前操作的邮件ID
+
 // 布局模式类名
 const layoutClass = computed(() => {
   const mode = userStore.layoutMode
@@ -215,6 +281,240 @@ const focusedEmail = computed(() => {
   }
   return null
 })
+
+// 右键菜单项
+const contextMenuItems = computed(() => {
+  const email = emailContextMenu.state.data
+  if (!email) return []
+
+  const isMultiple = selectedEmails.value.length > 1
+  const count = isMultiple ? selectedEmails.value.length : 1
+
+  return [
+    {
+      key: 'mark-read',
+      icon: View,
+      label: email.is_read ? '标记为未读' : '标记为已读',
+      shortcut: 'U'
+    },
+    {
+      key: 'toggle-flag',
+      icon: email.is_flagged ? Star : StarFilled,
+      label: email.is_flagged ? '取消星标' : '添加星标',
+      shortcut: 'S'
+    },
+    { divider: true },
+    {
+      key: 'add-label',
+      icon: PriceTag,
+      label: '添加标签...',
+      shortcut: 'L'
+    },
+    {
+      key: 'move-folder',
+      icon: Folder,
+      label: '移至文件夹...'
+    },
+    { divider: true },
+    {
+      key: 'reply',
+      icon: Back,
+      label: '回复',
+      shortcut: 'R',
+      disabled: isMultiple
+    },
+    {
+      key: 'reply-all',
+      icon: Back,
+      label: '全部回复',
+      shortcut: 'A',
+      disabled: isMultiple
+    },
+    {
+      key: 'forward',
+      icon: DArrowRight,
+      label: '转发',
+      shortcut: 'F',
+      disabled: isMultiple
+    },
+    { divider: true },
+    {
+      key: 'translate',
+      icon: Refresh,
+      label: isMultiple ? `翻译 ${count} 封邮件` : '翻译',
+      disabled: email.is_translated && !isMultiple
+    },
+    { divider: true },
+    {
+      key: 'delete',
+      icon: Delete,
+      label: isMultiple ? `删除 ${count} 封邮件` : '删除',
+      shortcut: 'D',
+      danger: true
+    }
+  ]
+})
+
+// 右键菜单事件处理
+function handleEmailContextMenu(event, email, index) {
+  // 如果邮件不在选中列表中，先选中它
+  if (!selectedEmails.value.includes(email.id)) {
+    selectedEmails.value = [email.id]
+  }
+  focusedIndex.value = index
+  emailContextMenu.show(event, email)
+}
+
+// 右键菜单选项处理
+async function handleContextMenuSelect(key) {
+  const email = emailContextMenu.state.data
+  if (!email) return
+
+  // 获取要操作的邮件ID列表
+  const emailIds = selectedEmails.value.length > 0 ? [...selectedEmails.value] : [email.id]
+
+  switch (key) {
+    case 'mark-read':
+      await handleBatchMarkRead(emailIds, !email.is_read)
+      break
+    case 'toggle-flag':
+      await handleBatchToggleFlag(emailIds, !email.is_flagged)
+      break
+    case 'add-label':
+      openLabelSelector(email)
+      break
+    case 'move-folder':
+      openFolderPicker(email.id)
+      break
+    case 'reply':
+      router.push(`/emails/${email.id}?reply=true`)
+      break
+    case 'reply-all':
+      router.push(`/emails/${email.id}?reply=all`)
+      break
+    case 'forward':
+      router.push(`/emails/${email.id}?forward=true`)
+      break
+    case 'translate':
+      await handleBatchTranslate(emailIds)
+      break
+    case 'delete':
+      await handleBatchDelete(emailIds)
+      break
+  }
+}
+
+// 批量标记已读/未读
+async function handleBatchMarkRead(ids, markAsRead) {
+  try {
+    if (markAsRead) {
+      await api.batchMarkAsRead(ids)
+      ElMessage.success(`已将 ${ids.length} 封邮件标记为已读`)
+    } else {
+      await api.batchMarkAsUnread(ids)
+      ElMessage.success(`已将 ${ids.length} 封邮件标记为未读`)
+    }
+    // 更新本地状态
+    ids.forEach(id => {
+      const email = emails.value.find(e => e.id === id)
+      if (email) email.is_read = markAsRead
+    })
+  } catch (e) {
+    ElMessage.error('操作失败')
+  }
+}
+
+// 批量切换星标
+async function handleBatchToggleFlag(ids, flagged) {
+  try {
+    if (flagged) {
+      await api.batchFlag(ids)
+      ElMessage.success(`已为 ${ids.length} 封邮件添加星标`)
+    } else {
+      await api.batchUnflag(ids)
+      ElMessage.success(`已取消 ${ids.length} 封邮件的星标`)
+    }
+    // 更新本地状态
+    ids.forEach(id => {
+      const email = emails.value.find(e => e.id === id)
+      if (email) email.is_flagged = flagged
+    })
+  } catch (e) {
+    ElMessage.error('操作失败')
+  }
+}
+
+// 批量删除
+async function handleBatchDelete(ids) {
+  try {
+    await api.batchDelete(ids)
+    ElMessage.success(`已删除 ${ids.length} 封邮件`)
+    selectedEmails.value = []
+    loadEmails()
+  } catch (e) {
+    ElMessage.error('删除失败')
+  }
+}
+
+// 批量翻译
+async function handleBatchTranslate(ids) {
+  try {
+    ElMessage.info(`正在翻译 ${ids.length} 封邮件...`)
+    for (const id of ids) {
+      await api.translateEmail(id)
+    }
+    ElMessage.success(`${ids.length} 封邮件翻译完成`)
+    loadEmails(true)
+  } catch (e) {
+    ElMessage.error('翻译失败')
+  }
+}
+
+// 打开文件夹选择器
+function openFolderPicker(emailId) {
+  folderPickerEmailId.value = emailId
+  showFolderPicker.value = true
+}
+
+// === 悬停快捷操作 ===
+
+function handleQuickReply(email) {
+  router.push(`/emails/${email.id}?reply=true`)
+}
+
+async function handleQuickDelete(email) {
+  try {
+    await api.deleteEmail(email.id)
+    ElMessage.success('邮件已删除')
+    // 从列表中移除
+    const index = emails.value.findIndex(e => e.id === email.id)
+    if (index > -1) {
+      emails.value.splice(index, 1)
+    }
+  } catch (e) {
+    ElMessage.error('删除失败')
+  }
+}
+
+async function handleQuickAction(command, email) {
+  switch (command) {
+    case 'mark-read':
+      await handleBatchMarkRead([email.id], !email.is_read)
+      break
+    case 'toggle-flag':
+      await handleBatchToggleFlag([email.id], !email.is_flagged)
+      break
+    case 'add-label':
+      openLabelSelector(email)
+      break
+    case 'translate':
+      await handleBatchTranslate([email.id])
+      break
+    case 'forward':
+      router.push(`/emails/${email.id}?forward=true`)
+      break
+  }
+}
 
 // 当聚焦索引变化时，更新预览邮件
 watch(focusedIndex, (newIndex) => {
@@ -329,6 +629,43 @@ useKeyboardShortcuts([
       // 打开标签选择器
       if (focusedEmail.value) {
         openLabelSelector(focusedEmail.value)
+      }
+    }
+  },
+  {
+    key: 'm',
+    handler: async () => {
+      // 标记已读
+      const ids = selectedEmails.value.length > 0
+        ? [...selectedEmails.value]
+        : (focusedEmail.value ? [focusedEmail.value.id] : [])
+
+      if (ids.length > 0) {
+        try {
+          await api.batchMarkAsRead(ids)
+          ElMessage.success(`已将 ${ids.length} 封邮件标记为已读`)
+          loadEmails()
+        } catch (e) {
+          ElMessage.error('操作失败')
+        }
+      }
+    }
+  },
+  {
+    key: 'r',
+    handler: () => {
+      // 回复邮件
+      if (focusedEmail.value) {
+        router.push(`/emails/${focusedEmail.value.id}?reply=true`)
+      }
+    }
+  },
+  {
+    key: 'f',
+    handler: () => {
+      // 转发邮件
+      if (focusedEmail.value) {
+        router.push(`/emails/${focusedEmail.value.id}?forward=true`)
       }
     }
   }
@@ -1078,6 +1415,48 @@ function getTextColor(bgColor) {
   padding: 0 4px;
   height: 18px;
   line-height: 18px;
+}
+
+/* 悬停操作按钮 */
+.hover-actions {
+  display: none;
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  gap: 4px;
+  background: linear-gradient(to right, transparent, #fff 20%, #fff);
+  padding-left: 20px;
+}
+
+.email-item {
+  position: relative;
+}
+
+.email-item:hover .hover-actions {
+  display: flex;
+}
+
+.email-item:hover .email-tags {
+  visibility: hidden;
+}
+
+.email-item.selected .hover-actions {
+  background: linear-gradient(to right, transparent, #ecf5ff 20%, #ecf5ff);
+}
+
+.email-item:hover:not(.selected) .hover-actions {
+  background: linear-gradient(to right, transparent, #f5f7fa 20%, #f5f7fa);
+}
+
+.hover-actions .el-button.is-circle {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+
+.hover-actions .el-button.is-circle .el-icon {
+  font-size: 14px;
 }
 
 /* 翻译列表右侧简化样式（无复选框和星标） */

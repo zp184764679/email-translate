@@ -80,8 +80,19 @@
         </el-avatar>
         <div class="sender-info">
           <div class="sender-primary">
-            <span class="sender-name">{{ email.from_name || email.from_email }}</span>
-            <span class="sender-email" v-if="email.from_name">&lt;{{ email.from_email }}&gt;</span>
+            <span
+              class="sender-name clickable"
+              @contextmenu.prevent="handleSenderContextMenu($event, email.from_email)"
+            >
+              {{ email.from_name || email.from_email }}
+            </span>
+            <span
+              class="sender-email clickable"
+              v-if="email.from_name"
+              @contextmenu.prevent="handleSenderContextMenu($event, email.from_email)"
+            >
+              &lt;{{ email.from_email }}&gt;
+            </span>
           </div>
           <div class="recipient-info">
             <div class="recipient-row">
@@ -125,7 +136,12 @@
           <el-button text size="small" @click="downloadAllAttachments">全部下载</el-button>
         </div>
         <div class="attachments-grid">
-          <div class="attachment-card" v-for="att in email.attachments" :key="att.id">
+          <div
+            class="attachment-card"
+            v-for="att in email.attachments"
+            :key="att.id"
+            @contextmenu.prevent="handleAttachmentContextMenu($event, att)"
+          >
             <div class="attachment-icon">
               <el-icon :size="24"><Document /></el-icon>
             </div>
@@ -170,6 +186,7 @@
             class="split-pane original-pane"
             ref="originalPane"
             @scroll="handleOriginalScroll"
+            @contextmenu.prevent="handleBodyContextMenu"
           >
             <!-- 优先显示纯文本，否则显示 HTML 渲染 -->
             <div class="pane-content" v-if="email.body_original && email.body_original.trim()">
@@ -190,6 +207,7 @@
             class="split-pane translated-pane"
             ref="translatedPane"
             @scroll="handleTranslatedScroll"
+            @contextmenu.prevent="handleBodyContextMenu"
           >
             <!-- 中文邮件或未识别语言：右侧显示原文 -->
             <div class="pane-content" v-if="!email.language_detected || email.language_detected === 'zh' || email.language_detected === 'unknown'">
@@ -430,6 +448,36 @@
       :current-labels="email?.labels || []"
       @saved="handleLabelsSaved"
     />
+
+    <!-- 邮件正文右键菜单 -->
+    <ContextMenu
+      :visible="bodyContextMenu.state.visible"
+      :x="bodyContextMenu.state.x"
+      :y="bodyContextMenu.state.y"
+      :items="bodyContextMenuItems"
+      @select="handleBodyMenuSelect"
+      @close="bodyContextMenu.hide()"
+    />
+
+    <!-- 附件右键菜单 -->
+    <ContextMenu
+      :visible="attachmentContextMenu.state.visible"
+      :x="attachmentContextMenu.state.x"
+      :y="attachmentContextMenu.state.y"
+      :items="attachmentContextMenuItems"
+      @select="handleAttachmentMenuSelect"
+      @close="attachmentContextMenu.hide()"
+    />
+
+    <!-- 发件人右键菜单 -->
+    <ContextMenu
+      :visible="senderContextMenu.state.visible"
+      :x="senderContextMenu.state.x"
+      :y="senderContextMenu.state.y"
+      :items="senderContextMenuItems"
+      @select="handleSenderMenuSelect"
+      @close="senderContextMenu.hide()"
+    />
   </div>
 </template>
 
@@ -438,16 +486,19 @@ import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeft, Back, ChatLineSquare, Right, Delete, Star,
-  Printer, Paperclip, Document, Download, InfoFilled, DocumentCopy, View, ArrowDown, CollectionTag
+  Printer, Paperclip, Document, Download, InfoFilled, DocumentCopy, View, ArrowDown, CollectionTag,
+  CopyDocument, Refresh, Search, Link, Message
 } from '@element-plus/icons-vue'
 import LabelSelector from '@/components/LabelSelector.vue'
 import ExtractionPanel from '@/components/ExtractionPanel.vue'
+import ContextMenu from '@/components/ContextMenu.vue'
 import api, { getStorageKey } from '@/api'
 import dayjs from 'dayjs'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import DOMPurify from 'dompurify'
 import { useUserStore } from '@/stores/user'
 import { useKeyboardShortcuts } from '@/composables/useKeyboardShortcuts'
+import { useContextMenu } from '@/composables/useContextMenu'
 
 const route = useRoute()
 const router = useRouter()
@@ -462,6 +513,14 @@ const submitting = ref(false)
 const downloadingAttachments = ref({})  // 跟踪每个附件的下载状态
 const threadEmails = ref([])  // 邮件线程
 const signatures = ref([])  // 签名列表
+
+// 右键菜单
+const bodyContextMenu = useContextMenu()
+const attachmentContextMenu = useContextMenu()
+const senderContextMenu = useContextMenu()
+const selectedText = ref('')  // 选中的文本
+const translatedSelection = ref('')  // 选中文本的翻译
+const translatingSelection = ref(false)  // 是否正在翻译选中文本
 const showLabelSelector = ref(false)  // 标签选择器可见性
 let isUnmounted = false  // 组件卸载状态标志
 
@@ -529,6 +588,20 @@ const { setEnabled: setShortcutsEnabled } = useKeyboardShortcuts([
     }
   },
   {
+    key: 'm',
+    handler: async () => {
+      if (!showReplyDialog.value && email.value) {
+        try {
+          await api.markAsRead(email.value.id)
+          email.value.is_read = true
+          ElMessage.success('已标记为已读')
+        } catch (e) {
+          ElMessage.error('操作失败')
+        }
+      }
+    }
+  },
+  {
     key: 'Escape',
     handler: () => {
       if (showReplyDialog.value) {
@@ -589,6 +662,211 @@ const { setEnabled: setShortcutsEnabled } = useKeyboardShortcuts([
 watch(showReplyDialog, (val) => {
   // 不完全禁用，只是在 handler 中检查状态
 })
+
+// === 右键菜单 ===
+
+// 邮件正文右键菜单项
+const bodyContextMenuItems = computed(() => {
+  const hasSelection = selectedText.value.length > 0
+  return [
+    {
+      key: 'copy',
+      icon: CopyDocument,
+      label: '复制',
+      disabled: !hasSelection
+    },
+    {
+      key: 'translate-selection',
+      icon: Refresh,
+      label: translatingSelection.value ? '翻译中...' : '翻译选中文本',
+      disabled: !hasSelection || translatingSelection.value
+    },
+    { divider: true },
+    {
+      key: 'search',
+      icon: Search,
+      label: '搜索',
+      disabled: !hasSelection
+    }
+  ]
+})
+
+// 附件右键菜单项
+const attachmentContextMenuItems = computed(() => {
+  const attachment = attachmentContextMenu.state.data
+  if (!attachment) return []
+
+  return [
+    {
+      key: 'download',
+      icon: Download,
+      label: '下载'
+    },
+    {
+      key: 'preview',
+      icon: View,
+      label: '预览',
+      disabled: !canPreviewAttachment(attachment)
+    }
+  ]
+})
+
+// 发件人右键菜单项
+const senderContextMenuItems = computed(() => {
+  const emailAddr = senderContextMenu.state.data
+  if (!emailAddr) return []
+
+  return [
+    {
+      key: 'send-email',
+      icon: Message,
+      label: '发送邮件'
+    },
+    {
+      key: 'copy-email',
+      icon: CopyDocument,
+      label: '复制邮箱地址'
+    }
+  ]
+})
+
+// 检查附件是否可预览
+function canPreviewAttachment(attachment) {
+  if (!attachment) return false
+  const previewableTypes = ['image/', 'text/', 'application/pdf']
+  return previewableTypes.some(type => attachment.content_type?.startsWith(type))
+}
+
+// 邮件正文右键菜单处理
+function handleBodyContextMenu(event) {
+  // 获取选中的文本
+  const selection = window.getSelection()
+  selectedText.value = selection ? selection.toString().trim() : ''
+  translatedSelection.value = ''
+  bodyContextMenu.show(event)
+}
+
+// 邮件正文右键菜单选项处理
+async function handleBodyMenuSelect(key) {
+  switch (key) {
+    case 'copy':
+      await copyToClipboard(selectedText.value)
+      break
+    case 'translate-selection':
+      await translateSelectedText()
+      break
+    case 'search':
+      searchSelectedText()
+      break
+  }
+}
+
+// 复制到剪贴板
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('已复制到剪贴板')
+  } catch (e) {
+    console.error('Copy failed:', e)
+    ElMessage.error('复制失败')
+  }
+}
+
+// 翻译选中文本
+async function translateSelectedText() {
+  if (!selectedText.value) return
+
+  translatingSelection.value = true
+  try {
+    const result = await api.translate(
+      selectedText.value,
+      'zh',  // 翻译为中文
+      email.value?.supplier_id
+    )
+    translatedSelection.value = result.translated_text
+
+    // 显示翻译结果
+    ElMessageBox.alert(
+      `<div style="white-space: pre-wrap; max-height: 300px; overflow-y: auto;">
+        <p style="color: #909399; margin-bottom: 8px;">原文：</p>
+        <p style="margin-bottom: 16px;">${selectedText.value}</p>
+        <p style="color: #909399; margin-bottom: 8px;">翻译：</p>
+        <p>${result.translated_text}</p>
+      </div>`,
+      '翻译结果',
+      {
+        dangerouslyUseHTMLString: true,
+        confirmButtonText: '复制翻译',
+        showCancelButton: true,
+        cancelButtonText: '关闭',
+        callback: (action) => {
+          if (action === 'confirm') {
+            copyToClipboard(result.translated_text)
+          }
+        }
+      }
+    )
+  } catch (e) {
+    console.error('Translation failed:', e)
+    ElMessage.error('翻译失败')
+  } finally {
+    translatingSelection.value = false
+  }
+}
+
+// 搜索选中文本
+function searchSelectedText() {
+  if (!selectedText.value) return
+  // 在新标签页打开搜索
+  window.open(`https://www.google.com/search?q=${encodeURIComponent(selectedText.value)}`, '_blank')
+}
+
+// 附件右键菜单处理
+function handleAttachmentContextMenu(event, attachment) {
+  attachmentContextMenu.show(event, attachment)
+}
+
+// 附件右键菜单选项处理
+async function handleAttachmentMenuSelect(key) {
+  const attachment = attachmentContextMenu.state.data
+  if (!attachment) return
+
+  switch (key) {
+    case 'download':
+      downloadAttachment(attachment)
+      break
+    case 'preview':
+      previewAttachment(attachment)
+      break
+  }
+}
+
+// 预览附件
+function previewAttachment(attachment) {
+  const url = api.getAttachmentUrl(email.value.id, attachment.id)
+  window.open(url, '_blank')
+}
+
+// 发件人右键菜单处理
+function handleSenderContextMenu(event, emailAddr) {
+  senderContextMenu.show(event, emailAddr)
+}
+
+// 发件人右键菜单选项处理
+async function handleSenderMenuSelect(key) {
+  const emailAddr = senderContextMenu.state.data
+  if (!emailAddr) return
+
+  switch (key) {
+    case 'send-email':
+      // TODO: 打开撰写邮件，收件人为该地址
+      ElMessage.info('功能开发中')
+      break
+    case 'copy-email':
+      await copyToClipboard(emailAddr)
+      break
+  }
+}
 
 // Split View 滚动同步
 const originalPane = ref(null)
@@ -848,6 +1126,11 @@ async function loadEmail() {
     if (route.query.reply === 'true') {
       initReplyForm(false)
       showReplyDialog.value = true
+    } else if (route.query.reply === 'all') {
+      initReplyForm(true)
+      showReplyDialog.value = true
+    } else if (route.query.forward === 'true') {
+      handleForward()
     }
 
     // 加载邮件线程
@@ -976,7 +1259,29 @@ function extractEmail(addr) {
 }
 
 function handleForward() {
-  ElMessage.info('转发功能开发中')
+  if (!email.value) return
+
+  // 清空收件人和抄送人（用户自行添加）
+  toList.value = []
+  toInput.value = ''
+  ccList.value = []
+  ccInput.value = ''
+
+  // 主题
+  const originalSubject = email.value.subject_original || ''
+  replyForm.subject = originalSubject.startsWith('Fwd:') ? originalSubject : `Fwd: ${originalSubject}`
+
+  // 构建转发正文 - 使用中文版本（如果有翻译）
+  const forwardHeader = `\n\n---------- 转发的邮件 ----------\n发件人: ${email.value.from_name || ''} <${email.value.from_email || ''}>\n日期: ${formatDateTime(email.value.received_at)}\n主题: ${email.value.subject_translated || email.value.subject_original || ''}\n收件人: ${email.value.to_email || ''}\n`
+
+  // 使用翻译后的正文（如果有）
+  const body = email.value.body_translated || email.value.body_original || ''
+  replyForm.body_chinese = forwardHeader + '\n' + body
+
+  // 清空翻译内容（用户需要重新翻译）
+  replyForm.body_translated = ''
+
+  showReplyDialog.value = true
 }
 
 // AI 提取 - 日程创建成功回调
@@ -1421,6 +1726,14 @@ function sanitizeHtml(html) {
 .sender-email {
   font-size: 13px;
   color: #909399;
+}
+
+.clickable {
+  cursor: pointer;
+}
+
+.clickable:hover {
+  text-decoration: underline;
 }
 
 .recipient-info {
