@@ -145,10 +145,11 @@ onUnmounted(() => {
 })
 </script>
 
-<style scoped>
+<style>
+/* 不使用 scoped，因为 teleport 到 body 时 scoped 样式可能失效 */
 .context-menu {
   position: fixed;
-  z-index: 3000;
+  z-index: 9999;
   background: #fff;
   border: 1px solid #e4e7ed;
   border-radius: 4px;

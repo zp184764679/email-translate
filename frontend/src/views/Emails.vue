@@ -357,12 +357,14 @@ const contextMenuItems = computed(() => {
 
 // 右键菜单事件处理
 function handleEmailContextMenu(event, email, index) {
+  console.log('Context menu triggered:', email.id, event.clientX, event.clientY)
   // 如果邮件不在选中列表中，先选中它
   if (!selectedEmails.value.includes(email.id)) {
     selectedEmails.value = [email.id]
   }
   focusedIndex.value = index
   emailContextMenu.show(event, email)
+  console.log('Context menu state:', emailContextMenu.state)
 }
 
 // 右键菜单选项处理
