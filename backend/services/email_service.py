@@ -52,13 +52,24 @@ class EmailService:
             self.imap_conn = None
 
     def fetch_emails(self, folder: str = "INBOX", since_date: datetime = None,
-                     limit: int = 500) -> List[Dict]:
-        """Fetch emails from mailbox"""
+                     limit: int = 500, existing_message_ids: set = None) -> List[Dict]:
+        """
+        Fetch emails from mailbox
+
+        Args:
+            folder: IMAP folder to fetch from
+            since_date: Only fetch emails since this date
+            limit: Maximum number of emails to fetch
+            existing_message_ids: Set of message IDs already in database (for dedup)
+        """
         if not self.imap_conn:
             if not self.connect_imap():
                 return []
 
         emails = []
+        if existing_message_ids is None:
+            existing_message_ids = set()
+
         try:
             self.imap_conn.select(folder)
 
@@ -75,7 +86,47 @@ class EmailService:
             message_list = message_list[-limit:] if len(message_list) > limit else message_list
             message_list.reverse()
 
-            for num in message_list:
+            print(f"[IMAP] Found {len(message_list)} emails matching criteria")
+
+            # 优化：先获取所有邮件的 MESSAGE-ID，过滤掉已存在的
+            new_emails_uids = []
+            if existing_message_ids:
+                # 归一化已存在的 message_ids（去掉尖括号）
+                normalized_existing = set()
+                for mid in existing_message_ids:
+                    if mid:
+                        # 去掉尖括号，统一格式
+                        normalized = mid.strip().strip('<>').strip()
+                        normalized_existing.add(normalized)
+
+                print(f"[IMAP] Pre-filtering against {len(normalized_existing)} existing emails...")
+                for num in message_list:
+                    try:
+                        # 只获取 MESSAGE-ID 头，非常快
+                        _, header_data = self.imap_conn.fetch(num, "(BODY[HEADER.FIELDS (MESSAGE-ID)])")
+                        if header_data[0]:
+                            header_text = header_data[0][1].decode('utf-8', errors='ignore')
+                            # 提取 MESSAGE-ID（保留原始格式用于对比）
+                            match = re.search(r'Message-ID:\s*(<[^>]+>|[^\s]+)', header_text, re.IGNORECASE)
+                            if match:
+                                raw_msg_id = match.group(1).strip()
+                                # 归一化：去掉尖括号
+                                normalized_msg_id = raw_msg_id.strip('<>').strip()
+                                if normalized_msg_id not in normalized_existing:
+                                    new_emails_uids.append(num)
+                            else:
+                                # 没有 MESSAGE-ID，需要获取
+                                new_emails_uids.append(num)
+                    except Exception as e:
+                        # 出错则保留该邮件进行完整获取
+                        new_emails_uids.append(num)
+
+                print(f"[IMAP] After pre-filter: {len(new_emails_uids)} new emails to fetch")
+            else:
+                new_emails_uids = message_list
+
+            # 只获取新邮件的完整内容
+            for num in new_emails_uids:
                 try:
                     _, msg_data = self.imap_conn.fetch(num, "(RFC822)")
                     email_body = msg_data[0][1]
@@ -523,6 +574,38 @@ class EmailService:
         elif in_reply_to:
             return in_reply_to
         return message_id
+
+    def _clean_text_for_detection(self, html: str) -> str:
+        """
+        从 HTML 中提取纯文本用于语言检测
+
+        移除 HTML 标签、脚本、样式等，只保留文本内容
+        """
+        if not html:
+            return ""
+
+        # 移除 script 和 style 标签及其内容
+        html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+
+        # 移除 HTML 注释
+        html = re.sub(r'<!--.*?-->', '', html, flags=re.DOTALL)
+
+        # 移除所有 HTML 标签
+        html = re.sub(r'<[^>]+>', ' ', html)
+
+        # 解码 HTML 实体
+        html = html.replace('&nbsp;', ' ')
+        html = html.replace('&lt;', '<')
+        html = html.replace('&gt;', '>')
+        html = html.replace('&amp;', '&')
+        html = html.replace('&quot;', '"')
+        html = html.replace('&#39;', "'")
+
+        # 清理多余空白
+        html = re.sub(r'\s+', ' ', html)
+
+        return html.strip()
 
     def _detect_language(self, text: str) -> str:
         """

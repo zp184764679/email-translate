@@ -393,6 +393,17 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
         print(f"[Background] First sync, fetching emails from last {since_days} days")
 
     try:
+        # 先获取数据库中已存在的 message_ids（用于快速过滤）
+        existing_message_ids = set()
+        async with async_session() as db:
+            result = await db.execute(
+                select(Email.message_id)
+                .where(Email.account_id == account.id)
+            )
+            existing_message_ids = {row[0] for row in result.fetchall() if row[0]}
+
+        print(f"[Background] Found {len(existing_message_ids)} existing emails in database")
+
         service = EmailService(
             imap_server=account.imap_server,
             smtp_server=account.smtp_server,
@@ -403,13 +414,17 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
         )
 
         # 在线程池中运行同步的IMAP操作，避免阻塞事件循环
+        # 传入 existing_message_ids 让 IMAP 层预过滤重复邮件
         loop = asyncio.get_event_loop()
         emails = await loop.run_in_executor(
             None,
-            lambda: service.fetch_emails(since_date=since_date)
+            lambda: service.fetch_emails(
+                since_date=since_date,
+                existing_message_ids=existing_message_ids
+            )
         )
 
-        print(f"[Background] Fetched {len(emails)} emails from IMAP")
+        print(f"[Background] Fetched {len(emails)} new emails from IMAP")
 
         # 创建翻译服务（支持智能路由）
         # 智能路由会根据邮件复杂度自动选择引擎：简单→Ollama，复杂→Claude
@@ -427,11 +442,13 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
         saved_count = 0
         translated_count = 0
 
+        skipped_count = 0
         async with async_session() as db:
             for email_data in emails:
                 # 检查是否已存在
                 existing = await crud.get_email_by_message_id(db, email_data["message_id"])
                 if existing:
+                    skipped_count += 1
                     continue
 
                 # 获取或创建供应商
@@ -614,7 +631,7 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
 
         # 在线程池中断开连接
         await loop.run_in_executor(None, service.disconnect_imap)
-        print(f"[Background] Saved {saved_count} emails, auto-translated {translated_count} for {mask_email(account.email)}")
+        print(f"[Background] Fetched {len(emails)} from IMAP, saved {saved_count} new, skipped {skipped_count} existing, auto-translated {translated_count} for {mask_email(account.email)}")
 
     except Exception as e:
         print(f"[Background] Error fetching emails for {mask_email(account.email)}: {e}")
