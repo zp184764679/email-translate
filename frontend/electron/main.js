@@ -489,6 +489,11 @@ ipcMain.handle('get-app-version', () => {
   return app.getVersion()
 })
 
+ipcMain.handle('open-external', async (event, url) => {
+  const { shell } = require('electron')
+  await shell.openExternal(url)
+})
+
 // Auto updater events
 autoUpdater.on('checking-for-update', () => {
   console.log('正在检查更新...')

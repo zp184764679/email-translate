@@ -6,6 +6,9 @@ import { ElMessage } from 'element-plus'
 const isDev = import.meta.env.DEV
 const baseURL = isDev ? 'http://127.0.0.1:2000/api' : 'https://jzchardware.cn:8888/email/api'
 
+// 导出 API 基础地址供其他模块使用
+export const API_BASE_URL = baseURL
+
 // 环境隔离的 localStorage key，开发版和生产版各自独立存储
 const ENV_PREFIX = isDev ? 'dev_' : 'prod_'
 export const getStorageKey = (key) => ENV_PREFIX + key

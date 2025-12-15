@@ -10,6 +10,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // App version
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
 
+  // Open external URL
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
+
   // Updates
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
   installUpdate: () => ipcRenderer.invoke('install-update'),
