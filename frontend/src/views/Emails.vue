@@ -904,6 +904,8 @@ function getTextColor(bgColor) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-height: 18px;  /* 固定高度，避免原文/译文内容不同导致行高不一致 */
+  line-height: 18px;
 }
 
 /* 右侧标签区 */
@@ -1056,6 +1058,8 @@ function getTextColor(bgColor) {
 .email-item.compact .email-preview {
   font-size: 11px;
   color: #a0a0a0;
+  min-height: 16px;
+  line-height: 16px;
 }
 
 .email-item.compact .email-tags {
