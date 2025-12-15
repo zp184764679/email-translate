@@ -38,6 +38,12 @@ instance.interceptors.response.use(
     return response.data
   },
   (error) => {
+    // 忽略被取消的请求（页面刷新、组件卸载等场景）
+    if (error.code === 'ERR_CANCELED' || error.name === 'CanceledError') {
+      console.log('[API] Request cancelled:', error.config?.url)
+      return Promise.reject(error)
+    }
+
     if (error.response) {
       const { status, data } = error.response
 
