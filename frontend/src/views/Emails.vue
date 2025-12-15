@@ -12,9 +12,14 @@
           <span class="pane-count">({{ emails.length }})</span>
         </div>
         <div class="email-list" v-loading="loading">
-          <div
+          <el-dropdown
             v-for="(email, index) in emails"
             :key="'orig-' + email.id"
+            trigger="contextmenu"
+            @command="(cmd) => handleContextMenuCommand(cmd, email)"
+            @visible-change="(visible) => visible && (focusedIndex = index)"
+          >
+          <div
             class="email-item compact"
             :class="{
               'unread': !email.is_read,
@@ -23,7 +28,6 @@
               'focused': focusedIndex === index
             }"
             @click="handleEmailClick(email, index)"
-            @contextmenu.prevent="handleEmailContextMenu($event, email, index)"
           >
             <div class="email-actions">
               <el-checkbox
@@ -102,6 +106,43 @@
               </el-dropdown>
             </div>
           </div>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="mark-read">
+                  <el-icon><View /></el-icon>
+                  {{ email.is_read ? '标记为未读' : '标记为已读' }}
+                </el-dropdown-item>
+                <el-dropdown-item command="toggle-flag">
+                  <el-icon><component :is="email.is_flagged ? Star : StarFilled" /></el-icon>
+                  {{ email.is_flagged ? '取消星标' : '添加星标' }}
+                </el-dropdown-item>
+                <el-dropdown-item divided command="add-label">
+                  <el-icon><PriceTag /></el-icon>
+                  添加标签...
+                </el-dropdown-item>
+                <el-dropdown-item command="move-folder">
+                  <el-icon><Folder /></el-icon>
+                  移至文件夹...
+                </el-dropdown-item>
+                <el-dropdown-item divided command="reply">
+                  <el-icon><Back /></el-icon>
+                  回复
+                </el-dropdown-item>
+                <el-dropdown-item command="forward">
+                  <el-icon><Promotion /></el-icon>
+                  转发
+                </el-dropdown-item>
+                <el-dropdown-item divided command="translate" :disabled="email.is_translated">
+                  <el-icon><Refresh /></el-icon>
+                  翻译
+                </el-dropdown-item>
+                <el-dropdown-item divided command="delete" style="color: #f56c6c;">
+                  <el-icon><Delete /></el-icon>
+                  删除
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
           <el-empty v-if="!loading && emails.length === 0" description="暂无邮件" />
         </div>
       </div>
@@ -117,9 +158,13 @@
           <span class="pane-count" style="visibility: hidden;">({{ emails.length }})</span>
         </div>
         <div class="email-list">
-          <div
+          <el-dropdown
             v-for="(email, index) in emails"
             :key="'trans-' + email.id"
+            trigger="contextmenu"
+            @command="(cmd) => handleContextMenuCommand(cmd, email)"
+          >
+          <div
             class="email-item compact"
             :class="{
               'unread': !email.is_read,
@@ -128,7 +173,6 @@
               'focused': focusedIndex === index
             }"
             @click="handleEmailClick(email, index)"
-            @contextmenu.prevent="handleEmailContextMenu($event, email, index)"
           >
             <!-- 与左侧完全镜像的结构 -->
             <div class="email-actions" style="visibility: hidden;">
@@ -152,6 +196,21 @@
               <div class="email-preview">{{ getTranslatedPreview(email) }}</div>
             </div>
           </div>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="mark-read">
+                  {{ email.is_read ? '标记为未读' : '标记为已读' }}
+                </el-dropdown-item>
+                <el-dropdown-item command="toggle-flag">
+                  {{ email.is_flagged ? '取消星标' : '添加星标' }}
+                </el-dropdown-item>
+                <el-dropdown-item divided command="reply">回复</el-dropdown-item>
+                <el-dropdown-item command="forward">转发</el-dropdown-item>
+                <el-dropdown-item divided command="translate" :disabled="email.is_translated">翻译</el-dropdown-item>
+                <el-dropdown-item divided command="delete" style="color: #f56c6c;">删除</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
           <el-empty v-if="!loading && emails.length === 0" description="暂无邮件" />
         </div>
       </div>
@@ -190,15 +249,6 @@
       @saved="handleLabelsSaved"
     />
 
-    <!-- 邮件右键菜单 -->
-    <ContextMenu
-      :visible="emailContextMenu.state.visible"
-      :x="emailContextMenu.state.x"
-      :y="emailContextMenu.state.y"
-      :items="contextMenuItems"
-      @select="handleContextMenuSelect"
-      @close="emailContextMenu.hide()"
-    />
 
     <!-- 文件夹选择对话框 -->
     <el-dialog
@@ -232,10 +282,8 @@ import api from '@/api'
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
 import { useKeyboardShortcuts } from '@/composables/useKeyboardShortcuts'
-import { useContextMenu } from '@/composables/useContextMenu'
 import EmailPreview from '@/components/EmailPreview.vue'
 import LabelSelector from '@/components/LabelSelector.vue'
-import ContextMenu from '@/components/ContextMenu.vue'
 import FolderPicker from '@/components/FolderPicker.vue'
 
 const route = useRoute()
@@ -258,8 +306,7 @@ const showLabelSelector = ref(false)  // 标签选择器可见性
 const labelSelectorEmailId = ref(null)  // 当前操作标签的邮件ID
 const labelSelectorCurrentLabels = ref([])  // 当前邮件的标签
 
-// 右键菜单
-const emailContextMenu = useContextMenu()
+// 文件夹选择器
 const showFolderPicker = ref(false)  // 文件夹选择器
 const folderPickerEmailId = ref(null)  // 当前操作的邮件ID
 
@@ -282,100 +329,14 @@ const focusedEmail = computed(() => {
   return null
 })
 
-// 右键菜单项
-const contextMenuItems = computed(() => {
-  const email = emailContextMenu.state.data
-  if (!email) return []
-
-  const isMultiple = selectedEmails.value.length > 1
-  const count = isMultiple ? selectedEmails.value.length : 1
-
-  return [
-    {
-      key: 'mark-read',
-      icon: View,
-      label: email.is_read ? '标记为未读' : '标记为已读',
-      shortcut: 'U'
-    },
-    {
-      key: 'toggle-flag',
-      icon: email.is_flagged ? Star : StarFilled,
-      label: email.is_flagged ? '取消星标' : '添加星标',
-      shortcut: 'S'
-    },
-    { divider: true },
-    {
-      key: 'add-label',
-      icon: PriceTag,
-      label: '添加标签...',
-      shortcut: 'L'
-    },
-    {
-      key: 'move-folder',
-      icon: Folder,
-      label: '移至文件夹...'
-    },
-    { divider: true },
-    {
-      key: 'reply',
-      icon: Back,
-      label: '回复',
-      shortcut: 'R',
-      disabled: isMultiple
-    },
-    {
-      key: 'reply-all',
-      icon: Back,
-      label: '全部回复',
-      shortcut: 'A',
-      disabled: isMultiple
-    },
-    {
-      key: 'forward',
-      icon: DArrowRight,
-      label: '转发',
-      shortcut: 'F',
-      disabled: isMultiple
-    },
-    { divider: true },
-    {
-      key: 'translate',
-      icon: Refresh,
-      label: isMultiple ? `翻译 ${count} 封邮件` : '翻译',
-      disabled: email.is_translated && !isMultiple
-    },
-    { divider: true },
-    {
-      key: 'delete',
-      icon: Delete,
-      label: isMultiple ? `删除 ${count} 封邮件` : '删除',
-      shortcut: 'D',
-      danger: true
-    }
-  ]
-})
-
-// 右键菜单事件处理
-function handleEmailContextMenu(event, email, index) {
-  console.log('Context menu triggered:', email.id, event.clientX, event.clientY)
-  // 如果邮件不在选中列表中，先选中它
-  if (!selectedEmails.value.includes(email.id)) {
-    selectedEmails.value = [email.id]
-  }
-  focusedIndex.value = index
-  emailContextMenu.show(event, email)
-  console.log('Context menu state:', emailContextMenu.state)
-}
-
-// 右键菜单选项处理
-async function handleContextMenuSelect(key) {
-  const email = emailContextMenu.state.data
+// 右键菜单命令处理
+async function handleContextMenuCommand(command, email) {
   if (!email) return
 
   // 获取要操作的邮件ID列表
   const emailIds = selectedEmails.value.length > 0 ? [...selectedEmails.value] : [email.id]
 
-  switch (key) {
+  switch (command) {
     case 'mark-read':
       await handleBatchMarkRead(emailIds, !email.is_read)
       break
