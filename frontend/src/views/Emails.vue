@@ -362,41 +362,40 @@ watch(() => userStore.emailRefreshKey, () => {
   loadEmails(true)  // 静默刷新，不显示 loading
 })
 
-// 暴露选中的邮件ID给父组件（Layout.vue）使用
+// 暴露选中的邮件ID给父组件（Layout.vue）使用（通过 Pinia store）
 watch(selectedEmails, (newVal) => {
-  window.__selectedEmailIds = newVal
+  userStore.setSelectedEmailIds(newVal)
 }, { immediate: true })
 
-// 加载锁，防止重复加载
-let loadingPromise = null
+// AbortController 用于取消旧请求，防止竞态条件
+let abortController = null
 
 async function loadEmails(silent = false) {
-  // 如果已有加载任务在进行，直接返回该 Promise
-  if (loadingPromise) {
-    return loadingPromise
+  // 取消之前的请求
+  if (abortController) {
+    abortController.abort()
   }
+  abortController = new AbortController()
+  const signal = abortController.signal
 
   // 非静默模式才显示 loading 状态
   if (!silent) {
     loading.value = true
   }
 
-  loadingPromise = (async () => {
-    try {
-      const params = {
-        limit: pageSize.value,
-        offset: (currentPage.value - 1) * pageSize.value,
-        sort_by: sortBy.value
-      }
+  try {
+    const params = {
+      limit: pageSize.value,
+      offset: (currentPage.value - 1) * pageSize.value,
+      sort_by: sortBy.value
+    }
 
-      // 如果是文件夹视图，调用文件夹API
-      if (route.query.folder_id) {
-        const result = await api.getFolderEmails(route.query.folder_id, params)
-        emails.value = result.emails
-        total.value = result.total
-        return
-      }
+    let result
 
+    // 如果是文件夹视图，调用文件夹API
+    if (route.query.folder_id) {
+      result = await api.getFolderEmails(route.query.folder_id, params, { signal })
+    } else {
       // 默认显示收件箱（inbound），除非明确指定了其他方向
       if (route.query.direction) {
         params.direction = route.query.direction
@@ -413,18 +412,26 @@ async function loadEmails(silent = false) {
         params.supplier_id = route.query.supplier_id
       }
 
-      const result = await api.getEmails(params)
+      result = await api.getEmails(params, { signal })
+    }
+
+    // 只有当请求未被取消时才更新数据
+    if (!signal.aborted) {
       emails.value = result.emails
       total.value = result.total
-    } catch (e) {
-      console.error('Failed to load emails:', e)
-    } finally {
-      loading.value = false
-      loadingPromise = null
     }
-  })()
-
-  return loadingPromise
+  } catch (e) {
+    // 忽略取消请求的错误
+    if (e.name === 'CanceledError' || e.name === 'AbortError') {
+      console.log('[Emails] Request was cancelled')
+      return
+    }
+    console.error('Failed to load emails:', e)
+  } finally {
+    if (!signal.aborted) {
+      loading.value = false
+    }
+  }
 }
 
 function handleEmailClick(email, index) {

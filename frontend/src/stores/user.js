@@ -13,6 +13,7 @@ export const useUserStore = defineStore('user', () => {
   const lastFetchTime = ref(null)  // 上次拉取时间
   const autoFetchTimer = ref(null)  // 自动拉取定时器
   const isFetching = ref(false)  // 是否正在拉取
+  const selectedEmailIds = ref([])  // 当前选中的邮件ID列表
 
   // 布局设置：list（列表）, right（右侧预览）, bottom（底部预览）
   const layoutMode = ref(localStorage.getItem(getStorageKey('layoutMode')) || 'list')
@@ -40,6 +41,11 @@ export const useUserStore = defineStore('user', () => {
   }
 
   function logout() {
+    // 停止自动拉取定时器
+    stopAutoFetch()
+    // 清除选中的邮件
+    selectedEmailIds.value = []
+
     token.value = ''
     email.value = ''
     accountId.value = null
@@ -130,6 +136,11 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
+  // 设置选中的邮件ID
+  function setSelectedEmailIds(ids) {
+    selectedEmailIds.value = ids
+  }
+
   return {
     token,
     email,
@@ -139,11 +150,13 @@ export const useUserStore = defineStore('user', () => {
     isFetching,
     isLoggedIn,
     layoutMode,
+    selectedEmailIds,
     login,
     logout,
     fetchAccountInfo,
     triggerEmailRefresh,
     setLayoutMode,
+    setSelectedEmailIds,
     autoFetchEmails,
     startAutoFetch,
     stopAutoFetch,

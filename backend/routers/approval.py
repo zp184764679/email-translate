@@ -275,11 +275,16 @@ async def delete_draft(
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """删除草稿"""
+    """删除草稿
+
+    权限检查：
+    - 草稿作者可以删除自己的草稿
+    - 审批人可以删除待自己审批的草稿（相当于驳回）
+    - 已发送的邮件无法删除
+    """
+    # 先获取草稿，不加权限条件
     result = await db.execute(
-        select(Draft)
-        .join(Email, Draft.reply_to_email_id == Email.id)
-        .where(Draft.id == draft_id, Email.account_id == account.id)
+        select(Draft).where(Draft.id == draft_id)
     )
     draft = result.scalar_one_or_none()
 
@@ -288,6 +293,13 @@ async def delete_draft(
 
     if draft.status == "sent":
         raise HTTPException(status_code=400, detail="已发送的邮件无法删除")
+
+    # 检查权限：作者 or 审批人
+    is_author = draft.author_id == account.id
+    is_approver = draft.approver_id == account.id if draft.approver_id else False
+
+    if not is_author and not is_approver:
+        raise HTTPException(status_code=403, detail="没有权限删除此草稿")
 
     await db.execute(delete(Draft).where(Draft.id == draft_id))
     await db.commit()

@@ -38,8 +38,13 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElNotification } from 'element-plus'
 import wsManager from './utils/websocket'
+import { useUserStore } from './stores/user'
+
+const router = useRouter()
+const userStore = useUserStore()
 
 const showDownloadProgress = ref(false)
 const downloadVersion = ref('')
@@ -63,7 +68,27 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
 }
 
+// 处理认证过期事件
+function handleAuthExpired(event) {
+  const { message } = event.detail || {}
+
+  // 通过 store 正确清理状态（会停止定时器等）
+  userStore.logout()
+
+  // 断开 WebSocket
+  wsManager.disconnect()
+
+  // 跳转到登录页
+  router.push('/login')
+
+  // 显示消息
+  ElMessage.error(message || '登录已过期，请重新登录')
+}
+
 onMounted(() => {
+  // 监听认证过期事件
+  window.addEventListener('auth:expired', handleAuthExpired)
+
   // Listen for update events from Electron
   if (window.electronAPI) {
     window.electronAPI.onUpdateAvailable((version) => {
@@ -232,6 +257,9 @@ function initWebSocket() {
 }
 
 onUnmounted(() => {
+  // 清理认证过期事件监听器
+  window.removeEventListener('auth:expired', handleAuthExpired)
+
   // 清理 WebSocket 监听器
   wsUnsubscribes.forEach(unsub => unsub())
   wsManager.disconnect()

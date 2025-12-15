@@ -71,7 +71,14 @@ class WebSocketManager {
         if (!this.isManualClose && this.reconnectAttempts < this.maxReconnectAttempts) {
           this.reconnectAttempts++
           console.log(`[WS] Reconnecting (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`)
-          setTimeout(() => this.connect(this.accountId), this.reconnectDelay)
+          // 延迟后再次检查是否仍需要重连（避免用户退出后仍尝试重连）
+          setTimeout(() => {
+            if (!this.isManualClose) {
+              this.connect(this.accountId)
+            } else {
+              console.log('[WS] Reconnect cancelled (manual close)')
+            }
+          }, this.reconnectDelay)
         }
       }
 

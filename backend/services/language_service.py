@@ -3,11 +3,23 @@ Ollama 语言检测服务
 
 使用本地 Ollama 模型进行语言检测，替代 langdetect 库
 提供更高的准确率，特别是对于英德混淆等问题
+
+检测策略：
+1. 先用快速规则检测（基于字符特征）
+2. 规则不确定时，调用 Ollama
+3. Ollama 失败时，回退到规则结果或 unknown
 """
 
 import httpx
 import re
 from functools import lru_cache
+
+# 预编译正则表达式（性能优化）
+_CHINESE_PATTERN = re.compile(r'[\u4e00-\u9fff]')
+_JAPANESE_PATTERN = re.compile(r'[\u3040-\u309f\u30a0-\u30ff]')  # 平假名+片假名
+_KOREAN_PATTERN = re.compile(r'[\uac00-\ud7af\u1100-\u11ff]')
+_CYRILLIC_PATTERN = re.compile(r'[\u0400-\u04ff]')  # 俄语等斯拉夫语言
+_VALID_CODES = frozenset({"zh", "en", "ja", "ko", "de", "fr", "es", "pt", "ru", "it", "nl"})
 
 
 @lru_cache()
@@ -17,18 +29,24 @@ def get_language_service():
 
 
 class LanguageService:
-    """使用 Ollama 进行语言检测"""
+    """使用 Ollama 进行语言检测，带规则回退"""
 
     def __init__(self):
         from config import get_settings
         settings = get_settings()
         self.ollama_base_url = settings.ollama_base_url
         self.ollama_model = settings.ollama_model
-        self.http_client = httpx.Client(timeout=30.0)
+        # 使用较短超时，避免长时间阻塞
+        self.http_client = httpx.Client(timeout=15.0)
 
     def detect_language(self, text: str) -> str:
         """
         检测文本语言，返回语言代码
+
+        检测策略：
+        1. 先用快速规则检测（基于字符特征）
+        2. 规则不确定时，调用 Ollama
+        3. Ollama 失败时，回退到规则结果或 unknown
 
         Args:
             text: 要检测的文本
@@ -44,8 +62,71 @@ class LanguageService:
         if len(clean_text.strip()) < 20:
             return "unknown"
 
-        # 截取前500字符进行检测（足够判断语言，又不会太长）
-        sample = clean_text[:500].strip()
+        # 1. 先尝试快速规则检测
+        quick_result = self._quick_detect(clean_text)
+        if quick_result != "unknown":
+            print(f"[LanguageService] Quick detect: {quick_result}")
+            return quick_result
+
+        # 2. 规则不确定，尝试 Ollama
+        ollama_result = self._ollama_detect(clean_text)
+        if ollama_result != "unknown":
+            return ollama_result
+
+        # 3. Ollama 也失败，返回 unknown
+        return "unknown"
+
+    def _quick_detect(self, text: str) -> str:
+        """
+        基于字符特征的快速语言检测
+
+        适用于明显的语言特征（如中文字符、日文假名等）
+        对于拉丁字母语言（英德法等）返回 unknown，交给 Ollama
+        """
+        # 统计各类字符数量
+        chinese_count = len(_CHINESE_PATTERN.findall(text))
+        japanese_count = len(_JAPANESE_PATTERN.findall(text))
+        korean_count = len(_KOREAN_PATTERN.findall(text))
+        cyrillic_count = len(_CYRILLIC_PATTERN.findall(text))
+
+        total_len = len(text)
+        if total_len == 0:
+            return "unknown"
+
+        # 计算比例
+        chinese_ratio = chinese_count / total_len
+        japanese_ratio = japanese_count / total_len
+        korean_ratio = korean_count / total_len
+        cyrillic_ratio = cyrillic_count / total_len
+
+        # 中文：汉字占比 > 20%（考虑到可能夹杂英文）
+        if chinese_ratio > 0.2:
+            # 检查是否为日语（日语也有汉字，但会有假名）
+            if japanese_ratio > 0.05:
+                return "ja"
+            return "zh"
+
+        # 日语：有假名
+        if japanese_ratio > 0.1:
+            return "ja"
+
+        # 韩语：有韩文字符
+        if korean_ratio > 0.1:
+            return "ko"
+
+        # 俄语：有西里尔字符
+        if cyrillic_ratio > 0.2:
+            return "ru"
+
+        # 拉丁字母语言无法通过字符判断，交给 Ollama
+        return "unknown"
+
+    def _ollama_detect(self, text: str) -> str:
+        """
+        使用 Ollama 进行语言检测
+        """
+        # 截取前500字符
+        sample = text[:500].strip()
 
         prompt = f"""你是语言识别专家。识别以下文本的主要语言。
 
@@ -76,8 +157,8 @@ class LanguageService:
                     "prompt": prompt,
                     "stream": False,
                     "options": {
-                        "temperature": 0.1,  # 低温度，更确定性的输出
-                        "num_predict": 16    # 只需要输出语言代码
+                        "temperature": 0.1,
+                        "num_predict": 16
                     }
                 }
             )
@@ -85,12 +166,16 @@ class LanguageService:
             result = response.json()
             raw_response = result.get("response", "").strip()
 
-            # 解析语言代码（处理可能的 /think 输出或额外内容）
             lang_code = self._parse_language_code(raw_response)
-
-            print(f"[LanguageService] Detected: {lang_code} (raw: {raw_response[:50]}...)")
+            print(f"[LanguageService] Ollama detect: {lang_code} (raw: {raw_response[:50]}...)")
             return lang_code
 
+        except httpx.TimeoutException:
+            print("[LanguageService] Ollama timeout, using fallback")
+            return "unknown"
+        except httpx.ConnectError:
+            print("[LanguageService] Ollama connection failed, using fallback")
+            return "unknown"
         except Exception as e:
             print(f"[LanguageService] Ollama detection failed: {e}")
             return "unknown"
@@ -112,7 +197,8 @@ class LanguageService:
         解析 Ollama 返回的语言代码
         处理可能的 /think 模式输出或额外内容
         """
-        valid_codes = {"zh", "en", "ja", "ko", "de", "fr", "es", "pt", "ru", "it", "nl"}
+        # 使用全局预定义的有效代码集合
+        valid_codes = _VALID_CODES
 
         # 1. 首先尝试直接匹配（最简单情况）
         response_lower = response.lower().strip()

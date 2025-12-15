@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from typing import List, Optional
@@ -296,15 +296,23 @@ async def update_folder(
 @router.delete("/{folder_id}")
 async def delete_folder(
     folder_id: int,
+    force: bool = False,  # 是否强制删除（即使有关联邮件）
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """删除文件夹"""
+    """删除文件夹
+
+    Args:
+        folder_id: 文件夹ID
+        force: 如果为 True，即使有关联邮件也会删除（邮件不会被删除，只解除关联）
+    """
     result = await db.execute(
-        select(EmailFolder).where(
+        select(EmailFolder)
+        .where(
             EmailFolder.id == folder_id,
             EmailFolder.account_id == account.id
         )
+        .options(selectinload(EmailFolder.emails))
     )
     folder = result.scalar_one_or_none()
     if not folder:
@@ -313,9 +321,28 @@ async def delete_folder(
     if folder.is_system:
         raise HTTPException(status_code=400, detail="系统文件夹不可删除")
 
+    # 检查是否有子文件夹
+    child_result = await db.execute(
+        select(func.count(EmailFolder.id)).where(EmailFolder.parent_id == folder_id)
+    )
+    child_count = child_result.scalar() or 0
+    if child_count > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"该文件夹包含 {child_count} 个子文件夹，请先删除子文件夹"
+        )
+
+    # 检查是否有关联邮件
+    email_count = len(folder.emails) if folder.emails else 0
+    if email_count > 0 and not force:
+        raise HTTPException(
+            status_code=400,
+            detail=f"该文件夹包含 {email_count} 封邮件，请使用 force=true 强制删除（邮件不会被删除）"
+        )
+
     await db.delete(folder)
     await db.commit()
-    return {"message": "文件夹已删除"}
+    return {"message": f"文件夹已删除" + (f"（已解除 {email_count} 封邮件的关联）" if email_count > 0 else "")}
 
 
 # ============ 邮件-文件夹关联 API ============

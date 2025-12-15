@@ -387,37 +387,130 @@ class EmailService:
                                 is_attachment = True
 
                 if is_attachment and filename:
-                    # 避免重复附件
-                    if filename in seen_filenames:
+                    # 避免重复附件（使用清理后的文件名）
+                    safe_filename = self._sanitize_filename(filename)
+                    if safe_filename in seen_filenames:
                         continue
-                    seen_filenames.add(filename)
+                    seen_filenames.add(safe_filename)
 
                     try:
+                        # _save_attachment 内部会获取 payload 并进行安全检查
+                        file_path = self._save_attachment(part, message_id, filename)
                         payload = part.get_payload(decode=True)
-                        if payload:
-                            file_path = self._save_attachment(part, message_id, filename)
-                            attachments.append({
-                                "filename": filename,
-                                "file_path": file_path,
-                                "file_size": len(payload),
-                                "mime_type": content_type
-                            })
-                            print(f"[Attachment] Found: {filename} ({content_type}, {len(payload)} bytes)")
-                    except Exception as e:
+                        file_size = len(payload) if payload else 0
+                        attachments.append({
+                            "filename": safe_filename,
+                            "file_path": file_path,
+                            "file_size": file_size,
+                            "mime_type": content_type
+                        })
+                        print(f"[Attachment] Saved: {safe_filename} ({content_type}, {file_size} bytes)")
+                    except ValueError as e:
+                        # 大小限制或空内容
+                        print(f"[Attachment] Skipped {filename}: {e}")
+                    except IOError as e:
+                        # 磁盘空间或权限问题
                         print(f"[Attachment] Error saving {filename}: {e}")
+                    except Exception as e:
+                        print(f"[Attachment] Unexpected error for {filename}: {e}")
 
         return attachments
 
+    # 附件大小限制：100MB
+    MAX_ATTACHMENT_SIZE = 100 * 1024 * 1024
+
+    def _sanitize_filename(self, filename: str) -> str:
+        """
+        清理文件名，防止路径遍历攻击
+
+        - 移除路径分隔符
+        - 移除危险字符
+        - 处理空文件名
+        """
+        if not filename:
+            return "attachment"
+
+        # 获取基名，移除任何路径
+        filename = os.path.basename(filename)
+
+        # 移除危险字符
+        filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', filename)
+
+        # 移除开头的点（防止隐藏文件）
+        filename = filename.lstrip('.')
+
+        # 如果文件名为空，使用默认名
+        if not filename or filename.isspace():
+            return "attachment"
+
+        # 限制文件名长度
+        if len(filename) > 200:
+            name, ext = os.path.splitext(filename)
+            filename = name[:200-len(ext)] + ext
+
+        return filename
+
     def _save_attachment(self, part, message_id: str, filename: str) -> str:
-        """Save attachment to disk"""
-        # Create directory for this email
+        """
+        Save attachment to disk
+
+        安全措施：
+        - 文件名清理（防止路径遍历）
+        - 大小限制（100MB）
+        - 磁盘空间检查
+        """
+        import shutil
+
+        # 1. 清理文件名
+        safe_filename = self._sanitize_filename(filename)
+
+        # 2. 获取附件内容
+        payload = part.get_payload(decode=True)
+        if not payload:
+            raise ValueError(f"附件 {safe_filename} 内容为空")
+
+        # 3. 检查大小限制
+        if len(payload) > self.MAX_ATTACHMENT_SIZE:
+            raise ValueError(
+                f"附件 {safe_filename} 超过大小限制 "
+                f"({len(payload) / 1024 / 1024:.1f}MB > 100MB)"
+            )
+
+        # 4. 创建目录
         safe_id = re.sub(r'[<>:"/\\|?*]', "_", message_id)
         dir_path = os.path.join(self.attachment_dir, safe_id)
-        os.makedirs(dir_path, exist_ok=True)
 
-        file_path = os.path.join(dir_path, filename)
-        with open(file_path, "wb") as f:
-            f.write(part.get_payload(decode=True))
+        try:
+            os.makedirs(dir_path, exist_ok=True)
+        except (OSError, PermissionError) as e:
+            raise IOError(f"无法创建附件目录: {e}")
+
+        # 5. 检查磁盘空间（需要至少 2 倍文件大小的空间）
+        try:
+            stat = shutil.disk_usage(self.attachment_dir)
+            if stat.free < len(payload) * 2:
+                raise IOError(
+                    f"磁盘空间不足，无法保存附件 {safe_filename} "
+                    f"(需要 {len(payload) * 2 / 1024 / 1024:.1f}MB)"
+                )
+        except (OSError, AttributeError):
+            # 某些系统可能不支持 disk_usage，忽略检查
+            pass
+
+        # 6. 保存文件
+        file_path = os.path.join(dir_path, safe_filename)
+
+        # 验证最终路径在目标目录内（双重检查）
+        abs_dir = os.path.abspath(dir_path)
+        abs_file = os.path.abspath(file_path)
+        if not abs_file.startswith(abs_dir):
+            raise ValueError(f"非法文件路径: {safe_filename}")
+
+        try:
+            with open(file_path, "wb") as f:
+                f.write(payload)
+        except (IOError, OSError) as e:
+            raise IOError(f"无法保存附件 {safe_filename}: {e}")
 
         return file_path
 

@@ -551,11 +551,9 @@ async function deleteSelected() {
   }
 }
 
-// 获取选中的邮件ID（由 Emails.vue 通过 provide/inject 提供）
+// 获取选中的邮件ID（通过 Pinia store 共享）
 function getSelectedEmailIds() {
-  // 通过事件总线或 store 获取选中的邮件
-  // 暂时返回空数组，需要在 Emails.vue 中实现选中状态共享
-  return window.__selectedEmailIds || []
+  return userStore.selectedEmailIds || []
 }
 
 function onEmailSent() {

@@ -39,11 +39,15 @@ instance.interceptors.response.use(
       const { status, data } = error.response
 
       if (status === 401) {
+        // 使用自定义事件通知应用进行清理，而不是直接操作 localStorage
+        // 这样可以确保 store 状态、定时器、WebSocket 等都被正确清理
+        window.dispatchEvent(new CustomEvent('auth:expired', {
+          detail: { message: '登录已过期，请重新登录' }
+        }))
+        // 同时清理 localStorage 作为后备
         localStorage.removeItem(getStorageKey('token'))
         localStorage.removeItem(getStorageKey('email'))
         localStorage.removeItem(getStorageKey('accountId'))
-        window.location.href = '/#/login'
-        ElMessage.error('登录已过期，请重新登录')
       } else if (status === 403) {
         ElMessage.error(data.detail || '没有权限执行此操作')
       } else if (status === 404) {
@@ -74,8 +78,8 @@ const api = {
   },
 
   // Emails
-  async getEmails(params = {}) {
-    return instance.get('/emails', { params })
+  async getEmails(params = {}, options = {}) {
+    return instance.get('/emails', { params, signal: options.signal })
   },
 
   async getEmail(id) {
@@ -436,8 +440,8 @@ const api = {
     return instance.delete(`/folders/${folderId}/emails/${emailId}`)
   },
 
-  async getFolderEmails(folderId, params = {}) {
-    return instance.get(`/folders/${folderId}/emails`, { params })
+  async getFolderEmails(folderId, params = {}, options = {}) {
+    return instance.get(`/folders/${folderId}/emails`, { params, signal: options.signal })
   },
 
   // Calendar - 日历事件

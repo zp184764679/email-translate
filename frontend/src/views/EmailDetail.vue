@@ -1109,7 +1109,11 @@ async function translateEmail() {
     .then(translatedEmail => {
       // 翻译完成后更新（如果用户还在此页面且是同一封邮件）
       if (!isUnmounted && email.value.id === currentEmailId) {
-        email.value = translatedEmail
+        // 只更新翻译相关字段，避免覆盖用户可能正在编辑的其他状态
+        email.value.subject_translated = translatedEmail.subject_translated
+        email.value.body_translated = translatedEmail.body_translated
+        email.value.is_translated = translatedEmail.is_translated
+        email.value.translation_status = translatedEmail.translation_status
         ElMessage.success('翻译完成')
       } else {
         console.log('Translation completed in background, data saved to server')

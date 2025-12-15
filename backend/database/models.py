@@ -90,6 +90,8 @@ class Email(Base):
     is_translated = Column(Boolean, default=False)
     is_read = Column(Boolean, default=False)
     is_flagged = Column(Boolean, default=False)
+    # 翻译状态：none(未翻译), translating(翻译中), completed(已完成), failed(失败)
+    translation_status = Column(String(20), default="none", index=True)
 
     received_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)

@@ -103,6 +103,8 @@ class EmailResponse(BaseModel):
     is_translated: bool
     is_read: bool = False
     is_flagged: bool = False
+    # 翻译状态：none(未翻译), translating(翻译中), completed(已完成), failed(失败)
+    translation_status: Optional[str] = "none"
     received_at: datetime
     supplier_id: Optional[int]
 
@@ -167,6 +169,9 @@ async def get_emails(
 
     # 搜索功能：搜索主题、正文、发件人
     if search:
+        # 限制搜索字符串长度，防止性能问题
+        if len(search) > 500:
+            search = search[:500]
         search_pattern = f"%{search}%"
         base_conditions.append(or_(
             Email.subject_original.ilike(search_pattern),
@@ -570,20 +575,25 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                             # 只有当翻译结果非空时才标记为已翻译
                             new_email.is_translated = bool(subject_translated or pure_body_translated)
 
-                            # 保存到共享翻译表（保存完整翻译，含历史引用，供后续邮件复用）
+                            # 保存到共享翻译表（使用 upsert 防止并发插入冲突）
                             if subject_translated or display_body_translated:
-                                shared_entry = SharedEmailTranslation(
+                                from sqlalchemy.dialects.mysql import insert as mysql_insert
+                                stmt = mysql_insert(SharedEmailTranslation).values(
                                     message_id=email_data["message_id"],
                                     subject_original=email_data.get("subject_original"),
                                     subject_translated=subject_translated,
                                     body_original=email_data.get("body_original"),
-                                    body_translated=display_body_translated,  # 完整翻译，含历史
+                                    body_translated=display_body_translated,
                                     source_lang=lang,
                                     target_lang="zh",
                                     translated_by=account.id
+                                ).on_duplicate_key_update(
+                                    subject_translated=subject_translated,
+                                    body_translated=display_body_translated,
+                                    translated_by=account.id
                                 )
-                                db.add(shared_entry)
-                                print(f"[AutoTranslate] Translated ({provider_used}) and saved: {email_data['message_id'][:30]}")
+                                await db.execute(stmt)
+                                print(f"[AutoTranslate] Translated ({provider_used}) and saved (upsert): {email_data['message_id'][:30]}")
                             else:
                                 print(f"[AutoTranslate] Skip saving (empty translation): {email_data['message_id'][:30]}")
 
@@ -893,9 +903,16 @@ async def download_attachment(
     if not attachment.file_path or not os.path.exists(attachment.file_path):
         raise HTTPException(status_code=404, detail="附件文件不存在")
 
+    # 安全检查：确保文件路径在允许的附件目录内（防止目录遍历攻击）
+    attachment_base_dir = os.path.abspath("data/attachments")
+    real_path = os.path.abspath(attachment.file_path)
+    if not real_path.startswith(attachment_base_dir):
+        print(f"[Security] Blocked directory traversal attempt: {attachment.file_path}")
+        raise HTTPException(status_code=403, detail="访问被拒绝")
+
     # 返回文件
     return FileResponse(
-        path=attachment.file_path,
+        path=real_path,  # 使用经过验证的绝对路径
         filename=attachment.filename,
         media_type=attachment.mime_type or "application/octet-stream"
     )
@@ -1183,10 +1200,6 @@ async def batch_unflag_emails(
     return {"message": f"已为 {result.rowcount} 封邮件取消星标"}
 
 
-# 翻译锁：防止同一邮件被同时翻译
-_translating_emails = set()
-
-
 @router.post("/{email_id}/translate", response_model=EmailResponse)
 async def translate_email(
     email_id: int,
@@ -1197,13 +1210,10 @@ async def translate_email(
     from database.models import SharedEmailTranslation, TranslationCache
     from services.translate_service import TranslateService
     from config import get_settings
+    from sqlalchemy import and_
     import hashlib
 
     settings = get_settings()
-
-    # 检查是否正在翻译中
-    if email_id in _translating_emails:
-        raise HTTPException(status_code=409, detail="该邮件正在翻译中，请稍候")
 
     result = await db.execute(
         select(Email).where(Email.id == email_id, Email.account_id == account.id)
@@ -1213,12 +1223,31 @@ async def translate_email(
     if not email:
         raise HTTPException(status_code=404, detail="邮件不存在")
 
+    # 检查翻译状态（使用数据库锁，支持多进程/多worker）
+    if email.translation_status == "translating":
+        raise HTTPException(status_code=409, detail="该邮件正在翻译中，请稍候")
+
     # 只有当已翻译且翻译内容确实存在时才跳过
     if email.is_translated and email.body_translated:
         return email
 
-    # 添加到翻译中集合（防止重复翻译）
-    _translating_emails.add(email_id)
+    # 使用数据库乐观锁：只有 translation_status != 'translating' 时才能开始翻译
+    update_result = await db.execute(
+        update(Email)
+        .where(
+            and_(
+                Email.id == email_id,
+                Email.translation_status != "translating"
+            )
+        )
+        .values(translation_status="translating")
+    )
+    await db.commit()
+
+    # 如果没有更新任何行，说明其他进程已经在翻译了
+    if update_result.rowcount == 0:
+        raise HTTPException(status_code=409, detail="该邮件正在翻译中，请稍候")
+
     print(f"[Translate] Starting translation for email {email_id}")
 
     try:
@@ -1377,21 +1406,27 @@ async def translate_email(
         email.subject_translated = subject_translated
         email.body_translated = display_body_translated  # 显示用（含历史引用）
         email.is_translated = True
+        email.translation_status = "completed"  # 更新翻译状态
 
-        # 5. 保存到共享翻译表（保存完整翻译，含历史引用，供后续邮件复用）
+        # 5. 保存到共享翻译表（使用 upsert 防止并发插入冲突）
         if email.message_id:
-            shared_entry = SharedEmailTranslation(
+            from sqlalchemy.dialects.mysql import insert as mysql_insert
+            stmt = mysql_insert(SharedEmailTranslation).values(
                 message_id=email.message_id,
                 subject_original=email.subject_original,
                 subject_translated=subject_translated,
                 body_original=email.body_original,
-                body_translated=display_body_translated,  # 完整翻译，含历史
+                body_translated=display_body_translated,
                 source_lang=source_lang,
                 target_lang="zh",
                 translated_by=account.id
+            ).on_duplicate_key_update(
+                subject_translated=subject_translated,
+                body_translated=display_body_translated,
+                translated_by=account.id
             )
-            db.add(shared_entry)
-            print(f"[SharedTranslation SAVE] message_id={email.message_id} (full translation with history)")
+            await db.execute(stmt)
+            print(f"[SharedTranslation SAVE] message_id={email.message_id} (upsert)")
 
         await db.commit()
         await db.refresh(email)
@@ -1400,12 +1435,17 @@ async def translate_email(
 
     except Exception as e:
         print(f"[Translate] Error translating email {email_id}: {e}")
-        await db.rollback()
+        # 翻译失败时，将状态设为 failed
+        try:
+            await db.execute(
+                update(Email)
+                .where(Email.id == email_id)
+                .values(translation_status="failed")
+            )
+            await db.commit()
+        except Exception:
+            pass  # 状态更新失败不影响错误抛出
         raise HTTPException(status_code=500, detail=f"翻译失败: {str(e)}")
-
-    finally:
-        # 始终移除翻译锁
-        _translating_emails.discard(email_id)
 
 
 # ============ 发送邮件 API ============
