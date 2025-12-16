@@ -43,6 +43,10 @@ jobs:
             fi
             ./venv/bin/pip install -r requirements.txt -q
 
+            # 运行数据库迁移（如有新迁移）
+            echo "Running database migrations..."
+            ./venv/bin/python -m migrations.add_sent_email_mapping 2>/dev/null || echo "Migration already applied or not needed"
+
             # 检查 .env 配置
             if [ ! -f ".env" ]; then
               echo "WARNING: .env file not found! Please create /www/email-translate/backend/.env"
