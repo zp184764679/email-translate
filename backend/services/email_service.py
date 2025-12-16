@@ -618,16 +618,45 @@ class EmailService:
         return language_service.detect_language(text)
 
     def send_email(self, to: str, subject: str, body: str, cc: str = None,
-                   attachments: List[str] = None, is_html: bool = False) -> bool:
-        """Send email via SMTP"""
+                   attachments: List[str] = None, is_html: bool = False,
+                   in_reply_to: str = None, references: str = None) -> tuple:
+        """
+        Send email via SMTP
+
+        Args:
+            to: 收件人地址
+            subject: 邮件主题
+            body: 邮件正文
+            cc: 抄送地址
+            attachments: 附件路径列表
+            is_html: 是否为 HTML 格式
+            in_reply_to: 回复邮件的 Message-ID（用于邮件线程）
+            references: 引用的 Message-ID 列表
+
+        Returns:
+            (success: bool, message_id: str or None)
+        """
+        from email.utils import make_msgid
+
         try:
             msg = MIMEMultipart()
+
+            # 生成唯一的 Message-ID
+            domain = self.email_address.split('@')[1] if '@' in self.email_address else 'local'
+            message_id = make_msgid(domain=domain)
+            msg["Message-ID"] = message_id
+
             msg["From"] = self.email_address
             msg["To"] = to
             msg["Subject"] = subject
 
             if cc:
                 msg["Cc"] = cc
+
+            # 添加回复线程头信息
+            if in_reply_to:
+                msg["In-Reply-To"] = in_reply_to
+                msg["References"] = references or in_reply_to
 
             # Add body
             if is_html:
@@ -667,8 +696,8 @@ class EmailService:
                     server.login(self.email_address, self.password)
                     server.sendmail(self.email_address, recipients, msg.as_string())
 
-            return True
+            return True, message_id
 
         except Exception as e:
             print(f"Error sending email: {e}")
-            return False
+            return False, None

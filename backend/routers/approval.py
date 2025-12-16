@@ -7,7 +7,7 @@ from typing import List, Optional
 from datetime import datetime
 
 from database.database import get_db
-from database.models import Draft, Email, EmailAccount, ApproverGroup, ApproverGroupMember
+from database.models import Draft, Email, EmailAccount, ApproverGroup, ApproverGroupMember, SentEmailMapping
 from services.email_service import EmailService
 from routers.users import get_current_account
 from utils.crypto import decrypt_password
@@ -470,14 +470,42 @@ async def approve_draft(
             if subject and not subject.lower().startswith("re:"):
                 subject = f"Re: {subject}"
 
-        success = service.send_email(
+        # 确定实际发送的内容
+        body_to_send = draft.body_translated or draft.body_chinese
+
+        success, sent_message_id = service.send_email(
             to=to_addr,
             cc=draft.cc_address,
             subject=subject or "",
-            body=draft.body_translated or draft.body_chinese
+            body=body_to_send
         )
 
         if success:
+            # 判断是否经过翻译
+            # 如果 body_chinese 和 body_translated 都存在且不同，则是翻译后发送
+            was_translated = bool(
+                draft.body_chinese and draft.body_translated
+                and draft.body_chinese.strip() != draft.body_translated.strip()
+            )
+
+            # 保存发送邮件映射（用于后续回复时还原引用内容）
+            if sent_message_id:
+                mapping = SentEmailMapping(
+                    message_id=sent_message_id,
+                    draft_id=draft.id,
+                    account_id=author.id,
+                    subject_original=draft.subject,
+                    subject_sent=subject or "",
+                    body_original=draft.body_chinese or draft.body_translated,  # 用户写的原文
+                    body_sent=body_to_send,  # 实际发送的
+                    was_translated=was_translated,
+                    to_email=to_addr
+                )
+                db.add(mapping)
+
+                # 更新草稿的 sent_message_id
+                draft.sent_message_id = sent_message_id
+
             draft.status = "sent"
             draft.sent_at = datetime.utcnow()
             await db.commit()

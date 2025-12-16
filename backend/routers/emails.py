@@ -11,7 +11,7 @@ import os
 
 from database.database import get_db
 from database import crud
-from database.models import Email, EmailAccount, Attachment, EmailLabel
+from database.models import Email, EmailAccount, Attachment, EmailLabel, SentEmailMapping
 from services.email_service import EmailService
 from routers.users import get_current_account
 from config import get_settings
@@ -533,13 +533,27 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                                 in_reply_to = email_data.get("in_reply_to")
                                 body_original = email_data["body_original"]
 
-                                # 1. 提取邮件链结构
-                                new_content, quoted_content, quote_start = extract_new_content_from_reply(body_original)
-                                has_quote = quote_start != -1
+                                # 1. 先检查引用内容是否是用户自己发送的邮件
+                                new_content, quoted_content, user_original, was_translated = await restore_user_original_in_quotes(
+                                    body_original, in_reply_to, db
+                                )
+                                has_quote = bool(quoted_content)
 
-                                # 2. 查找历史翻译（如果有引用）
+                                # 2. 如果找到用户发送的原文，特殊处理
+                                user_quote_display = None
+                                if user_original:
+                                    if was_translated:
+                                        # 场景A：用户写的是中文，翻译后发送，显示中文原文
+                                        user_quote_display = f"\n\n--- 以下为引用内容（您的原文）---\n{user_original}"
+                                        print(f"[RestoreUserOriginal] Will show user's Chinese original")
+                                    else:
+                                        # 场景B：用户直接写的英文，标记为原文不翻译
+                                        user_quote_display = f"\n\n--- 以下为引用内容（您发送的原文）---\n{user_original}"
+                                        print(f"[RestoreUserOriginal] Will show user's English original")
+
+                                # 3. 查找历史翻译（如果有引用且不是用户发送的）
                                 quoted_translation = None
-                                if has_quote and in_reply_to:
+                                if has_quote and in_reply_to and not user_original:
                                     shared_result = await db.execute(
                                         select(SharedEmailTranslation).where(
                                             SharedEmailTranslation.message_id == in_reply_to
@@ -580,7 +594,10 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                                 # 5. 组合历史翻译（仅用于显示）
                                 display_body_translated = body_translated
                                 if has_quote:
-                                    if quoted_translation:
+                                    if user_quote_display:
+                                        # 引用的是用户自己发送的邮件，显示用户原文
+                                        display_body_translated += user_quote_display
+                                    elif quoted_translation:
                                         display_body_translated += f"\n\n--- 以下为引用内容（已翻译）---\n{quoted_translation}"
                                     else:
                                         # 没有找到历史翻译，显示原文摘要
@@ -707,6 +724,45 @@ def extract_new_content_from_reply(body: str) -> tuple[str, str, int]:
     quoted_content = '\n'.join(lines[quote_start:]).strip()
 
     return new_content, quoted_content, quote_start
+
+
+async def restore_user_original_in_quotes(
+    body: str, in_reply_to: str, db
+) -> tuple[str, str, str, bool]:
+    """
+    检查引用内容是否是用户自己发送的邮件，如果是则返回用户的原文
+
+    Args:
+        body: 邮件正文
+        in_reply_to: In-Reply-To 头（回复的邮件 Message-ID）
+        db: 数据库会话
+
+    Returns:
+        (new_content, quoted_content, user_original, was_translated)
+        - new_content: 新内容部分
+        - quoted_content: 引用内容部分
+        - user_original: 用户发送的原文（如果找到映射），None 表示不是用户发送的
+        - was_translated: 是否经过翻译（True=中文翻译后发送，False=直接发送英文）
+    """
+    # 先提取引用内容
+    new_content, quoted_content, quote_start = extract_new_content_from_reply(body)
+
+    if quote_start == -1 or not in_reply_to:
+        return new_content, quoted_content, None, False
+
+    # 查找发送邮件映射
+    result = await db.execute(
+        select(SentEmailMapping).where(
+            SentEmailMapping.message_id == in_reply_to
+        )
+    )
+    mapping = result.scalar_one_or_none()
+
+    if mapping and mapping.body_original:
+        print(f"[RestoreUserOriginal] Found mapping for {in_reply_to[:30]}..., was_translated={mapping.was_translated}")
+        return new_content, quoted_content, mapping.body_original, mapping.was_translated
+
+    return new_content, quoted_content, None, False
 
 
 async def translate_with_cache_async(db, translate_service, text: str, source_lang: str, target_lang: str) -> str:
@@ -1372,10 +1428,21 @@ async def translate_email(
 
             if use_smart_routing:
                 # 智能路由翻译（根据复杂度自动选择引擎）
-                # 先检测引用内容，只翻译新内容
-                new_content, quoted_content, quote_start = extract_new_content_from_reply(body_to_translate)
+                # 先检查引用内容是否是用户自己发送的邮件
+                new_content, quoted_content, user_original, was_translated = await restore_user_original_in_quotes(
+                    body_to_translate, email.in_reply_to, db
+                )
+                has_quote = bool(quoted_content)
 
-                content_to_translate = new_content if quote_start != -1 else body_to_translate
+                # 如果找到用户发送的原文，准备显示
+                user_quote_display = None
+                if user_original:
+                    if was_translated:
+                        user_quote_display = f"\n\n--- 以下为引用内容（您的原文）---\n{user_original}"
+                    else:
+                        user_quote_display = f"\n\n--- 以下为引用内容（您发送的原文）---\n{user_original}"
+
+                content_to_translate = new_content if has_quote else body_to_translate
 
                 result = service.translate_with_smart_routing(
                     text=content_to_translate,
@@ -1392,9 +1459,12 @@ async def translate_email(
 
                 # 组合显示翻译（用于 Email.body_translated）
                 display_body_translated = pure_body_translated
-                if quote_start != -1 and quoted_content:
-                    # 尝试查找引用内容的已有翻译
-                    if email.in_reply_to:
+                if has_quote and quoted_content:
+                    if user_quote_display:
+                        # 引用的是用户自己发送的邮件
+                        display_body_translated += user_quote_display
+                    elif email.in_reply_to:
+                        # 尝试查找引用内容的已有翻译
                         shared_result = await db.execute(
                             select(SharedEmailTranslation).where(
                                 SharedEmailTranslation.message_id == email.in_reply_to
@@ -1489,7 +1559,7 @@ async def send_email(
             smtp_port=account.smtp_port
         )
 
-        success = service.send_email(
+        success, message_id = service.send_email(
             to=request.to,
             subject=request.subject,
             body=request.body,
@@ -1497,6 +1567,22 @@ async def send_email(
         )
 
         if success:
+            # 直接发送的邮件也保存映射（用于回复时还原）
+            if message_id:
+                mapping = SentEmailMapping(
+                    message_id=message_id,
+                    draft_id=None,  # 直接发送没有关联草稿
+                    account_id=account.id,
+                    subject_original=request.subject,
+                    subject_sent=request.subject,
+                    body_original=request.body,
+                    body_sent=request.body,
+                    was_translated=False,  # 直接发送视为未翻译
+                    to_email=request.to
+                )
+                db.add(mapping)
+                await db.commit()
+
             return {"status": "sent", "message": "邮件发送成功"}
         else:
             raise HTTPException(status_code=500, detail="邮件发送失败")

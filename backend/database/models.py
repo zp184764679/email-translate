@@ -145,6 +145,7 @@ class Draft(Base):
 
     status = Column(String(20), default="draft")  # draft, pending, sent, rejected
     sent_at = Column(DateTime)
+    sent_message_id = Column(String(255), index=True)  # 发送后的 Message-ID
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -497,6 +498,43 @@ class EmailRule(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
+
+
+class SentEmailMapping(Base):
+    """发送邮件映射表 - 保存发送邮件的 Message-ID 与原文的关联
+
+    用途：收到回复时，通过 In-Reply-To 查找用户发送的原文
+    场景A：用户写中文 → 翻译成英文发送 → 收到回复时还原中文原文
+    场景B：用户直接写英文发送 → 收到回复时标记为"您的原文"
+    """
+    __tablename__ = "sent_email_mappings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    message_id = Column(String(255), unique=True, index=True)  # 发送邮件的 Message-ID
+
+    draft_id = Column(Integer, ForeignKey("drafts.id", ondelete="SET NULL"), nullable=True)
+    account_id = Column(Integer, ForeignKey("email_accounts.id"), nullable=False)
+
+    # 内容字段（支持两种场景）
+    subject_original = Column(Text)         # 用户写的主题（可能是中文或英文）
+    subject_sent = Column(Text)             # 实际发送的主题
+    body_original = Column(MEDIUMTEXT)      # 用户写的正文（可能是中文或英文）
+    body_sent = Column(MEDIUMTEXT)          # 实际发送的正文
+
+    # 标记是否经过翻译
+    was_translated = Column(Boolean, default=False)  # True=中文翻译后发送，False=直接发送
+
+    to_email = Column(String(500))
+    sent_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # 关系
+    draft = relationship("Draft")
+    account = relationship("EmailAccount")
 
     __table_args__ = (
         {'mysql_engine': 'InnoDB'},
