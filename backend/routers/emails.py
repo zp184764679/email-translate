@@ -549,15 +549,9 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                             new_email.is_translated = True
                             print(f"[AutoTranslate] Used shared translation (with dynamic quote assembly) for {email_data['message_id'][:30]}")
                         else:
-                            # 翻译主题（主题通常很短，直接用普通翻译）
-                            subject_translated = ""
-                            if email_data.get("subject_original"):
-                                subject_translated = await translate_with_cache_async(
-                                    db, translate_service,
-                                    email_data["subject_original"], lang, "zh"
-                                )
-
                             # 智能翻译正文（检测引用 + 智能路由 + 历史翻译复用）
+                            # 标题与正文一起翻译，提高上下文理解深度
+                            subject_translated = ""
                             body_translated = ""
                             provider_used = "ollama"
                             complexity_info = None
@@ -601,19 +595,28 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                                 text_to_translate = new_content if has_quote else body_original
 
                                 if use_smart_routing:
-                                    # 智能路由翻译（只翻译新内容）
+                                    # 智能路由翻译（标题+正文一起翻译，提高上下文理解深度）
                                     result = translate_service.translate_with_smart_routing(
                                         text=text_to_translate,
                                         subject=email_data.get("subject_original", ""),
                                         target_lang="zh",
-                                        source_lang=lang
+                                        source_lang=lang,
+                                        translate_subject=True  # 标题与正文一起翻译
                                     )
                                     body_translated = result["translated_text"]
                                     provider_used = result["provider_used"]
                                     complexity_info = result["complexity"]
-                                    print(f"[SmartRouting] Email {email_data['message_id'][:20]}... "
-                                          f"→ {provider_used} (complexity: {complexity_info['level']}, "
-                                          f"score: {complexity_info['score']})")
+
+                                    # 使用智能路由返回的标题翻译（如果有）
+                                    if result.get("subject_translated"):
+                                        subject_translated = result["subject_translated"]
+                                        print(f"[SmartRouting] Email {email_data['message_id'][:20]}... "
+                                              f"→ {provider_used} (complexity: {complexity_info['level']}, "
+                                              f"score: {complexity_info['score']}, subject+body combined)")
+                                    else:
+                                        print(f"[SmartRouting] Email {email_data['message_id'][:20]}... "
+                                              f"→ {provider_used} (complexity: {complexity_info['level']}, "
+                                              f"score: {complexity_info['score']})")
                                 else:
                                     # 普通翻译（只翻译新内容）
                                     body_translated = await translate_with_cache_async(
@@ -621,10 +624,17 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                                         text_to_translate, lang, "zh"
                                     )
 
-                                # 4. 保存纯翻译结果（不含历史引用，避免递归叠加）
+                                # 4. 如果标题翻译为空但有原始标题，单独翻译标题
+                                if not subject_translated and email_data.get("subject_original"):
+                                    subject_translated = await translate_with_cache_async(
+                                        db, translate_service,
+                                        email_data["subject_original"], lang, "zh"
+                                    )
+
+                                # 5. 保存纯翻译结果（不含历史引用，避免递归叠加）
                                 pure_body_translated = body_translated  # 仅新内容的翻译
 
-                                # 5. 组合历史翻译（仅用于显示）
+                                # 6. 组合历史翻译（仅用于显示）
                                 display_body_translated = body_translated
                                 if has_quote:
                                     if user_quote_display:
@@ -1619,9 +1629,8 @@ async def translate_email(
         # 3. 执行翻译
         source_lang = email.language_detected or "auto"
 
-        subject_translated = await translate_with_cache(
-            email.subject_original, source_lang, "zh"
-        ) if email.subject_original else ""
+        # 标题翻译将与正文一起进行（提高上下文理解深度）
+        subject_translated = ""
 
         # 获取要翻译的正文内容：优先纯文本，其次从 HTML 提取
         body_to_translate = email.body_original
@@ -1669,14 +1678,23 @@ async def translate_email(
                     text=content_to_translate,
                     subject=email.subject_original or "",
                     target_lang="zh",
-                    source_lang=source_lang
+                    source_lang=source_lang,
+                    translate_subject=True  # 标题与正文一起翻译，提高上下文理解
                 )
                 pure_body_translated = result["translated_text"]
                 provider_used = result["provider_used"]
                 complexity_info = result["complexity"]
-                print(f"[ManualTranslate SmartRouting] Email {email.id} "
-                      f"→ {provider_used} (complexity: {complexity_info['level']}, "
-                      f"score: {complexity_info['score']})")
+
+                # 使用智能路由返回的标题翻译（如果有）
+                if result.get("subject_translated"):
+                    subject_translated = result["subject_translated"]
+                    print(f"[ManualTranslate SmartRouting] Email {email.id} "
+                          f"→ {provider_used} (complexity: {complexity_info['level']}, "
+                          f"score: {complexity_info['score']}, subject+body combined)")
+                else:
+                    print(f"[ManualTranslate SmartRouting] Email {email.id} "
+                          f"→ {provider_used} (complexity: {complexity_info['level']}, "
+                          f"score: {complexity_info['score']})")
 
                 # 组合显示翻译（用于 Email.body_translated）
                 display_body_translated = pure_body_translated
@@ -1700,6 +1718,13 @@ async def translate_email(
                     else:
                         truncated = quoted_content[:500] + ('...' if len(quoted_content) > 500 else '')
                         display_body_translated += f"\n\n--- 以下为引用内容（原文）---\n{truncated}"
+
+                # 如果标题翻译为空但有原始标题，单独翻译标题
+                if not subject_translated and email.subject_original:
+                    subject_translated = await translate_with_cache(
+                        email.subject_original, source_lang, "zh"
+                    )
+
             else:
                 # 普通智能翻译（检测引用，只翻译新内容）
                 translate_result = await smart_translate_email_body(
@@ -1709,6 +1734,12 @@ async def translate_email(
                 pure_body_translated = translate_result['pure']
                 display_body_translated = translate_result['display']
                 provider_used = settings.translate_provider
+
+                # 非智能路由模式下，单独翻译标题
+                if email.subject_original:
+                    subject_translated = await translate_with_cache(
+                        email.subject_original, source_lang, "zh"
+                    )
 
         # 4. 更新邮件记录
         email.subject_translated = subject_translated

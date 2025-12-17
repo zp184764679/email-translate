@@ -1048,19 +1048,26 @@ Please check the following items:
     def translate_with_smart_routing(self, text: str, subject: str = "",
                                       target_lang: str = "zh",
                                       glossary: List[Dict] = None,
-                                      source_lang: str = None) -> Dict:
+                                      source_lang: str = None,
+                                      translate_subject: bool = True) -> Dict:
         """
         智能路由翻译 - 基于复杂度选择最优引擎
 
         策略：
         1. Ollama 快速评估复杂度（规则优先，必要时用LLM）
         2. 根据复杂度选择引擎：
-           - 简单/中等(≤50分): Ollama 直接翻译（免费，质量好）
-           - 复杂(>50): Claude（正文）+ Ollama（签名）
+           - 简单/中等(≤70分): Ollama 直接翻译（免费，质量好）
+           - 复杂(>70): Claude（正文）+ Ollama（签名）
+
+        Args:
+            text: 邮件正文
+            subject: 邮件标题（用于复杂度分析和联合翻译）
+            translate_subject: 是否同时翻译标题（标题+正文一起翻译提高理解深度）
 
         Returns:
             {
-                "translated_text": str,
+                "translated_text": str,          # 正文翻译
+                "subject_translated": str,       # 标题翻译（如果 translate_subject=True）
                 "provider_used": str,
                 "complexity": {"level", "score"},
                 "fallback_reason": str | None
@@ -1089,44 +1096,161 @@ Please check the following items:
         if score <= OLLAMA_THRESHOLD:
             # 简单/中等邮件：Ollama 直接翻译（免费，有提示词理解上下文）
             print(f"[SmartRouting] Score {score} <= {OLLAMA_THRESHOLD} (SIMPLE/MEDIUM) -> Ollama")
-            return self._translate_simple(text, target_lang, source_lang, glossary, score)
+            return self._translate_simple(text, target_lang, source_lang, glossary, score,
+                                          subject if translate_subject else None)
         else:
             # 复杂邮件：Claude（正文）+ Ollama（签名）
             print(f"[SmartRouting] Score {score} > {OLLAMA_THRESHOLD} (COMPLEX) -> Claude+Ollama")
-            return self._translate_complex(text, subject, target_lang, source_lang, glossary, score)
+            return self._translate_complex(text, subject, target_lang, source_lang, glossary, score,
+                                           translate_subject)
+
+    def _parse_combined_translation(self, translated: str, original_subject: str,
+                                      original_body: str) -> Tuple[str, str]:
+        """
+        解析联合翻译结果，分离标题和正文翻译
+
+        Args:
+            translated: 模型输出的翻译结果（可能包含 [SUBJECT]...[/SUBJECT] 和 [BODY]...[/BODY]）
+            original_subject: 原始标题（用于回退）
+            original_body: 原始正文（用于长度估算）
+
+        Returns:
+            (subject_translated, body_translated)
+        """
+        # 方法1：尝试解析标记格式
+        subject_match = re.search(r'\[SUBJECT\]\s*(.*?)\s*\[/SUBJECT\]', translated, re.DOTALL)
+        body_match = re.search(r'\[BODY\]\s*(.*?)\s*\[/BODY\]', translated, re.DOTALL)
+
+        if subject_match and body_match:
+            return subject_match.group(1).strip(), body_match.group(1).strip()
+
+        # 方法2：如果模型没有保留标记，尝试用换行分割
+        # 假设第一段是标题翻译，其余是正文
+        lines = translated.strip().split('\n', 1)
+        if len(lines) == 2:
+            first_line = lines[0].strip()
+            rest = lines[1].strip()
+
+            # 检查第一行是否像标题（较短，不包含段落标记）
+            if len(first_line) < 200 and '\n\n' not in first_line:
+                return first_line, rest
+
+        # 方法3：使用原始标题长度比例估算
+        # 假设翻译前后长度比例相似
+        if original_subject and original_body:
+            subject_ratio = len(original_subject) / (len(original_subject) + len(original_body))
+            estimated_subject_len = int(len(translated) * subject_ratio * 1.2)  # 给一些余量
+
+            # 在估算位置附近找换行符
+            search_start = max(0, estimated_subject_len - 50)
+            search_end = min(len(translated), estimated_subject_len + 50)
+
+            newline_pos = translated.find('\n', search_start, search_end)
+            if newline_pos != -1:
+                return translated[:newline_pos].strip(), translated[newline_pos:].strip()
+
+        # 方法4：回退 - 单独翻译标题
+        print("[SmartRouting] Failed to parse combined translation, translating subject separately")
+        try:
+            subject_translated = self.translate_with_ollama(
+                original_subject, "zh", None, None
+            )
+            # 整个翻译结果当作正文
+            return subject_translated, translated
+        except Exception as e:
+            print(f"[SmartRouting] Fallback subject translation failed: {e}")
+            # 最终回退：返回原始标题
+            return original_subject, translated
 
     def _translate_simple(self, text: str, target_lang: str, source_lang: str,
-                          glossary: List[Dict], score: int) -> Dict:
+                          glossary: List[Dict], score: int, subject: str = None) -> Dict:
         """简单邮件翻译 - Ollama 直接翻译
 
         注意：邮件链处理（提取新内容、复用历史翻译）已在 emails.py 中完成，
         这里只负责翻译传入的文本。
+
+        Args:
+            subject: 如果提供，则与正文一起翻译（提高标题翻译的上下文理解）
         """
         try:
-            print(f"[SmartRouting] Simple email -> Ollama ({len(text)} chars, score={score})")
-            # 传递复杂度分数，让 Ollama 根据复杂度决定是否启用 think 模式
-            translated = self.translate_with_ollama(text, target_lang, source_lang, glossary,
-                                                     complexity_score=score)
+            subject_translated = None
 
-            return {
-                "translated_text": translated,
+            if subject:
+                # 标题+正文联合翻译，提高理解深度
+                # 使用明确的分隔标记，便于解析
+                combined = f"[SUBJECT]\n{subject}\n[/SUBJECT]\n\n[BODY]\n{text}\n[/BODY]"
+                print(f"[SmartRouting] Simple email -> Ollama (subject+body, {len(combined)} chars, score={score})")
+
+                translated_combined = self.translate_with_ollama(
+                    combined, target_lang, source_lang, glossary,
+                    complexity_score=score
+                )
+
+                # 解析翻译结果，分离标题和正文
+                subject_translated, body_translated = self._parse_combined_translation(
+                    translated_combined, subject, text
+                )
+            else:
+                print(f"[SmartRouting] Simple email -> Ollama ({len(text)} chars, score={score})")
+                body_translated = self.translate_with_ollama(text, target_lang, source_lang, glossary,
+                                                              complexity_score=score)
+
+            result = {
+                "translated_text": body_translated,
                 "provider_used": "ollama",
                 "complexity": {"level": "simple", "score": score},
                 "fallback_reason": None
             }
+            if subject_translated:
+                result["subject_translated"] = subject_translated
+
+            return result
+
         except Exception as e:
             print(f"[SmartRouting] Ollama failed: {e}, falling back to Claude")
             return self._translate_with_fallback(text, target_lang, source_lang, glossary,
                                                   {"level": "simple", "score": score})
 
     def _translate_complex(self, text: str, subject: str, target_lang: str,
-                           source_lang: str, glossary: List[Dict], score: int) -> Dict:
+                           source_lang: str, glossary: List[Dict], score: int,
+                           translate_subject: bool = True) -> Dict:
         """
         复杂邮件翻译 - 拆分翻译策略
 
         正文用 Claude（理解能力强），问候语/签名用 Ollama（免费）
+
+        Args:
+            translate_subject: 是否同时翻译标题
         """
         from services.email_analyzer import get_email_analyzer
+
+        subject_translated = None
+
+        # 如果需要翻译标题，与正文一起用 Claude 翻译（提高上下文理解）
+        if translate_subject and subject:
+            try:
+                # 对于复杂邮件，标题也用 Claude 翻译（与正文一起提供上下文）
+                combined = f"[SUBJECT]\n{subject}\n[/SUBJECT]\n\n[BODY]\n{text}\n[/BODY]"
+                print(f"[SmartRouting] Complex email -> Claude with subject+body")
+
+                translated_combined = self._translate_body_with_claude(
+                    combined, target_lang, source_lang, glossary
+                )
+                subject_translated, text_translated = self._parse_combined_translation(
+                    translated_combined, subject, text
+                )
+
+                result = {
+                    "translated_text": text_translated,
+                    "subject_translated": subject_translated,
+                    "provider_used": "claude",
+                    "complexity": {"level": "complex", "score": score},
+                    "fallback_reason": None
+                }
+                return result
+            except Exception as e:
+                print(f"[SmartRouting] Combined subject+body translation failed: {e}")
+                # 继续使用分拆策略
 
         try:
             # 获取完整分析（包含结构拆分）
@@ -1164,7 +1288,7 @@ Please check the following items:
                     except:
                         translated_parts.append(analysis.structure.signature)
 
-                return {
+                result = {
                     "translated_text": "\n\n".join(translated_parts),
                     "provider_used": "claude+ollama",
                     "complexity": {"level": "complex", "score": score},
@@ -1172,12 +1296,32 @@ Please check the following items:
                     "split_translation": True
                 }
 
+                # 如果需要翻译标题，单独用 Ollama 翻译
+                if translate_subject and subject and not subject_translated:
+                    try:
+                        subject_translated = self.translate_with_ollama(subject, target_lang, source_lang)
+                        result["subject_translated"] = subject_translated
+                    except Exception as e:
+                        print(f"[SmartRouting] Subject translation failed: {e}")
+
+                return result
+
         except Exception as e:
             print(f"[SmartRouting] Split translation failed: {e}")
 
         # 拆分失败，整体用 Claude 翻译
-        return self._translate_with_claude_fallback(text, target_lang, source_lang, glossary,
-                                                     {"level": "complex", "score": score})
+        result = self._translate_with_claude_fallback(text, target_lang, source_lang, glossary,
+                                                       {"level": "complex", "score": score})
+
+        # 如果需要翻译标题，单独用 Ollama 翻译
+        if translate_subject and subject:
+            try:
+                subject_translated = self.translate_with_ollama(subject, target_lang, source_lang)
+                result["subject_translated"] = subject_translated
+            except Exception as e:
+                print(f"[SmartRouting] Subject translation failed: {e}")
+
+        return result
 
     def _translate_with_ollama_or_fallback(self, text: str, target_lang: str,
                                             source_lang: str, glossary: List[Dict] = None) -> str:
