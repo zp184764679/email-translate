@@ -242,6 +242,45 @@ class NotificationManager:
             "email_count": email_count
         })
 
+    async def notify_email_status_changed(
+        self,
+        account_id: int,
+        email_ids: List[int],
+        changes: Dict[str, Any]
+    ):
+        """
+        通知邮件状态变更（已读/未读/星标等）
+
+        用于多标签页/多用户场景下的状态同步
+
+        Args:
+            account_id: 账户ID
+            email_ids: 邮件ID列表
+            changes: 变更内容，如 {"is_read": True} 或 {"is_flagged": False}
+        """
+        await self.broadcast(account_id, "email_status_changed", {
+            "email_ids": email_ids,
+            "changes": changes,
+            "timestamp": datetime.utcnow().isoformat()
+        })
+
+    async def notify_email_deleted(
+        self,
+        account_id: int,
+        email_ids: List[int]
+    ):
+        """
+        通知邮件被删除
+
+        Args:
+            account_id: 账户ID
+            email_ids: 被删除的邮件ID列表
+        """
+        await self.broadcast(account_id, "email_deleted", {
+            "email_ids": email_ids,
+            "timestamp": datetime.utcnow().isoformat()
+        })
+
 
 # 全局通知管理器实例
 notification_manager = NotificationManager()

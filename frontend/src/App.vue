@@ -42,6 +42,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElNotification } from 'element-plus'
 import wsManager from './utils/websocket'
 import { useUserStore } from './stores/user'
+import { getStorageKey } from './api'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -138,8 +139,8 @@ onMounted(() => {
 const wsUnsubscribes = []
 
 function initWebSocket() {
-  // 获取账户ID
-  const accountId = localStorage.getItem('accountId')
+  // 获取账户ID（使用环境前缀避免开发/生产环境冲突）
+  const accountId = localStorage.getItem(getStorageKey('accountId'))
   if (!accountId) {
     console.log('[App] No accountId, WebSocket not connected')
     return
@@ -252,6 +253,24 @@ function initWebSocket() {
         duration: 5000
       })
       window.dispatchEvent(new CustomEvent('batch-complete', { detail: data }))
+    })
+  )
+
+  // 监听邮件状态变更（已读/未读/星标等）
+  wsUnsubscribes.push(
+    wsManager.on('email_status_changed', (data) => {
+      console.log('[WS] Email status changed:', data)
+      // 触发全局事件供其他组件更新状态
+      window.dispatchEvent(new CustomEvent('email-status-changed', { detail: data }))
+    })
+  )
+
+  // 监听邮件删除
+  wsUnsubscribes.push(
+    wsManager.on('email_deleted', (data) => {
+      console.log('[WS] Emails deleted:', data)
+      // 触发全局事件供其他组件刷新列表
+      window.dispatchEvent(new CustomEvent('email-deleted', { detail: data }))
     })
   )
 

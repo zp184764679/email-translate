@@ -13,6 +13,7 @@ from database.database import get_db
 from database import crud
 from database.models import Email, EmailAccount, Attachment, EmailLabel, SentEmailMapping
 from services.email_service import EmailService
+from services.notification_service import notification_manager
 from routers.users import get_current_account
 from config import get_settings
 from utils.crypto import decrypt_password, mask_email
@@ -510,11 +511,43 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                         shared = shared_result.scalar_one_or_none()
 
                         if shared:
-                            # 使用共享翻译
+                            # 使用共享翻译（存储的是纯翻译，需要动态组合引用）
                             new_email.subject_translated = shared.subject_translated
-                            new_email.body_translated = shared.body_translated
+
+                            # 动态组合引用翻译
+                            display_translated = shared.body_translated or ""
+                            in_reply_to = email_data.get("in_reply_to")
+                            body_original = email_data.get("body_original", "")
+
+                            if body_original and in_reply_to:
+                                # 检测引用内容
+                                _, quoted_content, user_original, was_translated = await restore_user_original_in_quotes(
+                                    body_original, in_reply_to, db
+                                )
+                                if quoted_content:
+                                    if user_original:
+                                        # 引用的是用户自己发送的邮件
+                                        if was_translated:
+                                            display_translated += f"\n\n--- 以下为引用内容（您的原文）---\n{user_original}"
+                                        else:
+                                            display_translated += f"\n\n--- 以下为引用内容（您发送的原文）---\n{user_original}"
+                                    else:
+                                        # 查找引用邮件的翻译
+                                        quoted_shared_result = await db.execute(
+                                            select(SharedEmailTranslation).where(
+                                                SharedEmailTranslation.message_id == in_reply_to
+                                            )
+                                        )
+                                        quoted_shared = quoted_shared_result.scalar_one_or_none()
+                                        if quoted_shared and quoted_shared.body_translated:
+                                            display_translated += f"\n\n--- 以下为引用内容（已翻译）---\n{quoted_shared.body_translated}"
+                                        else:
+                                            truncated = quoted_content[:500] + ('...' if len(quoted_content) > 500 else '')
+                                            display_translated += f"\n\n--- 以下为引用内容（原文）---\n{truncated}"
+
+                            new_email.body_translated = display_translated
                             new_email.is_translated = True
-                            print(f"[AutoTranslate] Used shared translation for {email_data['message_id'][:30]}")
+                            print(f"[AutoTranslate] Used shared translation (with dynamic quote assembly) for {email_data['message_id'][:30]}")
                         else:
                             # 翻译主题（主题通常很短，直接用普通翻译）
                             subject_translated = ""
@@ -610,24 +643,24 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                             new_email.is_translated = bool(subject_translated or pure_body_translated)
 
                             # 保存到共享翻译表（使用 upsert 防止并发插入冲突）
-                            if subject_translated or display_body_translated:
+                            # 重要：只存储 pure_body_translated（纯翻译，不含引用标记）
+                            # 其他用户复用时会动态组合引用翻译，避免 display 版本的时间点问题
+                            if subject_translated or pure_body_translated:
                                 from sqlalchemy.dialects.mysql import insert as mysql_insert
                                 stmt = mysql_insert(SharedEmailTranslation).values(
                                     message_id=email_data["message_id"],
-                                    subject_original=email_data.get("subject_original"),
                                     subject_translated=subject_translated,
-                                    body_original=email_data.get("body_original"),
-                                    body_translated=display_body_translated,
+                                    body_translated=pure_body_translated,  # 存储纯翻译，不含引用
                                     source_lang=lang,
                                     target_lang="zh",
                                     translated_by=account.id
                                 ).on_duplicate_key_update(
                                     subject_translated=subject_translated,
-                                    body_translated=display_body_translated,
+                                    body_translated=pure_body_translated,  # 存储纯翻译，不含引用
                                     translated_by=account.id
                                 )
                                 await db.execute(stmt)
-                                print(f"[AutoTranslate] Translated ({provider_used}) and saved (upsert): {email_data['message_id'][:30]}")
+                                print(f"[AutoTranslate] Translated ({provider_used}) and saved pure translation: {email_data['message_id'][:30]}")
                             else:
                                 print(f"[AutoTranslate] Skip saving (empty translation): {email_data['message_id'][:30]}")
 
@@ -1069,6 +1102,11 @@ async def mark_email_as_read(
     email.is_read = True
     await db.commit()
 
+    # WebSocket 通知其他客户端
+    await notification_manager.notify_email_status_changed(
+        account.id, [email_id], {"is_read": True}
+    )
+
     # 重新查询以加载关系字段（避免 MissingGreenlet 错误）
     result = await db.execute(
         select(Email)
@@ -1095,6 +1133,11 @@ async def mark_email_as_unread(
 
     email.is_read = False
     await db.commit()
+
+    # WebSocket 通知其他客户端
+    await notification_manager.notify_email_status_changed(
+        account.id, [email_id], {"is_read": False}
+    )
 
     # 重新查询以加载关系字段（避免 MissingGreenlet 错误）
     result = await db.execute(
@@ -1123,6 +1166,11 @@ async def flag_email(
     email.is_flagged = True
     await db.commit()
 
+    # WebSocket 通知其他客户端
+    await notification_manager.notify_email_status_changed(
+        account.id, [email_id], {"is_flagged": True}
+    )
+
     # 重新查询以加载关系字段（避免 MissingGreenlet 错误）
     result = await db.execute(
         select(Email)
@@ -1150,6 +1198,11 @@ async def unflag_email(
     email.is_flagged = False
     await db.commit()
 
+    # WebSocket 通知其他客户端
+    await notification_manager.notify_email_status_changed(
+        account.id, [email_id], {"is_flagged": False}
+    )
+
     # 重新查询以加载关系字段（避免 MissingGreenlet 错误）
     result = await db.execute(
         select(Email)
@@ -1176,6 +1229,10 @@ async def delete_email(
 
     await db.delete(email)
     await db.commit()
+
+    # WebSocket 通知其他客户端
+    await notification_manager.notify_email_deleted(account.id, [email_id])
+
     return {"message": "邮件已删除"}
 
 
@@ -1190,16 +1247,43 @@ async def batch_mark_as_read(
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """批量标记邮件为已读"""
+    """批量标记邮件为已读，返回详细结果"""
     from sqlalchemy import update
 
-    result = await db.execute(
-        update(Email)
-        .where(Email.id.in_(request.email_ids), Email.account_id == account.id)
-        .values(is_read=True)
+    # 先查询哪些 ID 存在且属于当前用户
+    existing_result = await db.execute(
+        select(Email.id).where(
+            Email.id.in_(request.email_ids),
+            Email.account_id == account.id
+        )
     )
-    await db.commit()
-    return {"message": f"已将 {result.rowcount} 封邮件标记为已读"}
+    existing_ids = set(row[0] for row in existing_result.fetchall())
+    requested_ids = set(request.email_ids)
+
+    # 执行更新
+    if existing_ids:
+        await db.execute(
+            update(Email)
+            .where(Email.id.in_(existing_ids))
+            .values(is_read=True)
+        )
+        await db.commit()
+
+        # WebSocket 通知
+        await notification_manager.notify_email_status_changed(
+            account.id, list(existing_ids), {"is_read": True}
+        )
+
+    # 计算失败的 ID
+    failed_ids = requested_ids - existing_ids
+
+    return {
+        "message": f"已将 {len(existing_ids)} 封邮件标记为已读",
+        "count": len(existing_ids),
+        "success": list(existing_ids),
+        "failed": list(failed_ids),
+        "failed_reason": "邮件不存在或无权限" if failed_ids else None
+    }
 
 
 @router.post("/batch/unread")
@@ -1208,16 +1292,43 @@ async def batch_mark_as_unread(
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """批量标记邮件为未读"""
+    """批量标记邮件为未读，返回详细结果"""
     from sqlalchemy import update
 
-    result = await db.execute(
-        update(Email)
-        .where(Email.id.in_(request.email_ids), Email.account_id == account.id)
-        .values(is_read=False)
+    # 先查询哪些 ID 存在且属于当前用户
+    existing_result = await db.execute(
+        select(Email.id).where(
+            Email.id.in_(request.email_ids),
+            Email.account_id == account.id
+        )
     )
-    await db.commit()
-    return {"message": f"已将 {result.rowcount} 封邮件标记为未读"}
+    existing_ids = set(row[0] for row in existing_result.fetchall())
+    requested_ids = set(request.email_ids)
+
+    # 执行更新
+    if existing_ids:
+        await db.execute(
+            update(Email)
+            .where(Email.id.in_(existing_ids))
+            .values(is_read=False)
+        )
+        await db.commit()
+
+        # WebSocket 通知
+        await notification_manager.notify_email_status_changed(
+            account.id, list(existing_ids), {"is_read": False}
+        )
+
+    # 计算失败的 ID
+    failed_ids = requested_ids - existing_ids
+
+    return {
+        "message": f"已将 {len(existing_ids)} 封邮件标记为未读",
+        "count": len(existing_ids),
+        "success": list(existing_ids),
+        "failed": list(failed_ids),
+        "failed_reason": "邮件不存在或无权限" if failed_ids else None
+    }
 
 
 @router.post("/batch/delete")
@@ -1226,15 +1337,39 @@ async def batch_delete_emails(
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """批量删除邮件"""
+    """批量删除邮件，返回详细结果"""
     from sqlalchemy import delete as sql_delete
 
-    result = await db.execute(
-        sql_delete(Email)
-        .where(Email.id.in_(request.email_ids), Email.account_id == account.id)
+    # 先查询哪些 ID 存在且属于当前用户
+    existing_result = await db.execute(
+        select(Email.id).where(
+            Email.id.in_(request.email_ids),
+            Email.account_id == account.id
+        )
     )
-    await db.commit()
-    return {"message": f"已删除 {result.rowcount} 封邮件"}
+    existing_ids = set(row[0] for row in existing_result.fetchall())
+    requested_ids = set(request.email_ids)
+
+    # 执行删除
+    if existing_ids:
+        await db.execute(
+            sql_delete(Email).where(Email.id.in_(existing_ids))
+        )
+        await db.commit()
+
+        # WebSocket 通知
+        await notification_manager.notify_email_deleted(account.id, list(existing_ids))
+
+    # 计算失败的 ID
+    failed_ids = requested_ids - existing_ids
+
+    return {
+        "message": f"已删除 {len(existing_ids)} 封邮件",
+        "count": len(existing_ids),
+        "success": list(existing_ids),
+        "failed": list(failed_ids),
+        "failed_reason": "邮件不存在或无权限" if failed_ids else None
+    }
 
 
 @router.post("/batch/flag")
@@ -1243,16 +1378,43 @@ async def batch_flag_emails(
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """批量添加星标"""
+    """批量添加星标，返回详细结果"""
     from sqlalchemy import update
 
-    result = await db.execute(
-        update(Email)
-        .where(Email.id.in_(request.email_ids), Email.account_id == account.id)
-        .values(is_flagged=True)
+    # 先查询哪些 ID 存在且属于当前用户
+    existing_result = await db.execute(
+        select(Email.id).where(
+            Email.id.in_(request.email_ids),
+            Email.account_id == account.id
+        )
     )
-    await db.commit()
-    return {"message": f"已为 {result.rowcount} 封邮件添加星标"}
+    existing_ids = set(row[0] for row in existing_result.fetchall())
+    requested_ids = set(request.email_ids)
+
+    # 执行更新
+    if existing_ids:
+        await db.execute(
+            update(Email)
+            .where(Email.id.in_(existing_ids))
+            .values(is_flagged=True)
+        )
+        await db.commit()
+
+        # WebSocket 通知
+        await notification_manager.notify_email_status_changed(
+            account.id, list(existing_ids), {"is_flagged": True}
+        )
+
+    # 计算失败的 ID
+    failed_ids = requested_ids - existing_ids
+
+    return {
+        "message": f"已为 {len(existing_ids)} 封邮件添加星标",
+        "count": len(existing_ids),
+        "success": list(existing_ids),
+        "failed": list(failed_ids),
+        "failed_reason": "邮件不存在或无权限" if failed_ids else None
+    }
 
 
 @router.post("/batch/unflag")
@@ -1261,16 +1423,43 @@ async def batch_unflag_emails(
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """批量取消星标"""
+    """批量取消星标，返回详细结果"""
     from sqlalchemy import update
 
-    result = await db.execute(
-        update(Email)
-        .where(Email.id.in_(request.email_ids), Email.account_id == account.id)
-        .values(is_flagged=False)
+    # 先查询哪些 ID 存在且属于当前用户
+    existing_result = await db.execute(
+        select(Email.id).where(
+            Email.id.in_(request.email_ids),
+            Email.account_id == account.id
+        )
     )
-    await db.commit()
-    return {"message": f"已为 {result.rowcount} 封邮件取消星标"}
+    existing_ids = set(row[0] for row in existing_result.fetchall())
+    requested_ids = set(request.email_ids)
+
+    # 执行更新
+    if existing_ids:
+        await db.execute(
+            update(Email)
+            .where(Email.id.in_(existing_ids))
+            .values(is_flagged=False)
+        )
+        await db.commit()
+
+        # WebSocket 通知
+        await notification_manager.notify_email_status_changed(
+            account.id, list(existing_ids), {"is_flagged": False}
+        )
+
+    # 计算失败的 ID
+    failed_ids = requested_ids - existing_ids
+
+    return {
+        "message": f"已为 {len(existing_ids)} 封邮件取消星标",
+        "count": len(existing_ids),
+        "success": list(existing_ids),
+        "failed": list(failed_ids),
+        "failed_reason": "邮件不存在或无权限" if failed_ids else None
+    }
 
 
 @router.post("/{email_id}/translate", response_model=EmailResponse)
@@ -1335,10 +1524,42 @@ async def translate_email(
             if shared:
                 print(f"[SharedTranslation HIT] message_id={email.message_id}")
                 email.subject_translated = shared.subject_translated
-                email.body_translated = shared.body_translated
+
+                # 动态组合引用翻译（存储的是纯翻译）
+                display_translated = shared.body_translated or ""
+                body_original = email.body_original
+
+                if body_original and email.in_reply_to:
+                    # 检测引用内容
+                    _, quoted_content, user_original, was_translated = await restore_user_original_in_quotes(
+                        body_original, email.in_reply_to, db
+                    )
+                    if quoted_content:
+                        if user_original:
+                            # 引用的是用户自己发送的邮件
+                            if was_translated:
+                                display_translated += f"\n\n--- 以下为引用内容（您的原文）---\n{user_original}"
+                            else:
+                                display_translated += f"\n\n--- 以下为引用内容（您发送的原文）---\n{user_original}"
+                        else:
+                            # 查找引用邮件的翻译
+                            quoted_shared_result = await db.execute(
+                                select(SharedEmailTranslation).where(
+                                    SharedEmailTranslation.message_id == email.in_reply_to
+                                )
+                            )
+                            quoted_shared = quoted_shared_result.scalar_one_or_none()
+                            if quoted_shared and quoted_shared.body_translated:
+                                display_translated += f"\n\n--- 以下为引用内容（已翻译）---\n{quoted_shared.body_translated}"
+                            else:
+                                truncated = quoted_content[:500] + ('...' if len(quoted_content) > 500 else '')
+                                display_translated += f"\n\n--- 以下为引用内容（原文）---\n{truncated}"
+
+                email.body_translated = display_translated
                 email.is_translated = True
                 await db.commit()
                 await db.refresh(email)
+                print(f"[SharedTranslation] Used with dynamic quote assembly for {email.message_id}")
                 return email
 
         # 2. 翻译辅助函数（带缓存，L1 Redis → L2 MySQL）
@@ -1496,24 +1717,24 @@ async def translate_email(
         email.translation_status = "completed"  # 更新翻译状态
 
         # 5. 保存到共享翻译表（使用 upsert 防止并发插入冲突）
-        if email.message_id:
+        # 重要：只存储 pure_body_translated（纯翻译，不含引用标记）
+        # 其他用户复用时会动态组合引用翻译，避免 display 版本的时间点问题
+        if email.message_id and (subject_translated or pure_body_translated):
             from sqlalchemy.dialects.mysql import insert as mysql_insert
             stmt = mysql_insert(SharedEmailTranslation).values(
                 message_id=email.message_id,
-                subject_original=email.subject_original,
                 subject_translated=subject_translated,
-                body_original=email.body_original,
-                body_translated=display_body_translated,
+                body_translated=pure_body_translated,  # 存储纯翻译，不含引用
                 source_lang=source_lang,
                 target_lang="zh",
                 translated_by=account.id
             ).on_duplicate_key_update(
                 subject_translated=subject_translated,
-                body_translated=display_body_translated,
+                body_translated=pure_body_translated,  # 存储纯翻译，不含引用
                 translated_by=account.id
             )
             await db.execute(stmt)
-            print(f"[SharedTranslation SAVE] message_id={email.message_id} (upsert)")
+            print(f"[SharedTranslation SAVE] message_id={email.message_id} (pure translation)")
 
         await db.commit()
         await db.refresh(email)

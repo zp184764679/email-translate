@@ -987,4 +987,7 @@ git tag -d v1.0.5 && git push origin :refs/tags/v1.0.5
 ```bash
 # 需要执行的迁移（添加 translation_status 字段）
 python -m migrations.add_translation_status
+
+# 可选：清理冗余数据（移除共享翻译表中的原文字段，节省存储空间）
+python -m migrations.remove_shared_translation_originals
 ```

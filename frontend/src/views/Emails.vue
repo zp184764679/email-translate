@@ -268,7 +268,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch, computed } from 'vue'
+import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import {
@@ -309,6 +309,9 @@ const labelSelectorCurrentLabels = ref([])  // 当前邮件的标签
 // 文件夹选择器
 const showFolderPicker = ref(false)  // 文件夹选择器
 const folderPickerEmailId = ref(null)  // 当前操作的邮件ID
+
+// 操作锁：防止快速双击导致竞态
+const pendingFlagOps = ref(new Set())  // 正在进行星标操作的邮件 ID
 
 // 布局模式类名
 const layoutClass = computed(() => {
@@ -369,13 +372,14 @@ async function handleContextMenuCommand(command, email) {
 
 // 批量标记已读/未读
 async function handleBatchMarkRead(ids, markAsRead) {
+  const action = markAsRead ? '标记为已读' : '标记为未读'
   try {
     if (markAsRead) {
       await api.batchMarkAsRead(ids)
-      ElMessage.success(`已将 ${ids.length} 封邮件标记为已读`)
+      ElMessage.success(`已将 ${ids.length} 封邮件${action}`)
     } else {
       await api.batchMarkAsUnread(ids)
-      ElMessage.success(`已将 ${ids.length} 封邮件标记为未读`)
+      ElMessage.success(`已将 ${ids.length} 封邮件${action}`)
     }
     // 更新本地状态
     ids.forEach(id => {
@@ -383,19 +387,23 @@ async function handleBatchMarkRead(ids, markAsRead) {
       if (email) email.is_read = markAsRead
     })
   } catch (e) {
-    ElMessage.error('操作失败')
+    ElMessage.error(`批量${action}失败，请重试`)
+    // 刷新数据获取服务端真实状态
+    loadEmails(true)
+    console.error('Batch mark read failed:', e)
   }
 }
 
 // 批量切换星标
 async function handleBatchToggleFlag(ids, flagged) {
+  const action = flagged ? '添加星标' : '取消星标'
   try {
     if (flagged) {
       await api.batchFlag(ids)
-      ElMessage.success(`已为 ${ids.length} 封邮件添加星标`)
+      ElMessage.success(`已为 ${ids.length} 封邮件${action}`)
     } else {
       await api.batchUnflag(ids)
-      ElMessage.success(`已取消 ${ids.length} 封邮件的星标`)
+      ElMessage.success(`已${action} ${ids.length} 封邮件`)
     }
     // 更新本地状态
     ids.forEach(id => {
@@ -403,7 +411,10 @@ async function handleBatchToggleFlag(ids, flagged) {
       if (email) email.is_flagged = flagged
     })
   } catch (e) {
-    ElMessage.error('操作失败')
+    ElMessage.error(`批量${action}失败，请重试`)
+    // 刷新数据获取服务端真实状态
+    loadEmails(true)
+    console.error('Batch toggle flag failed:', e)
   }
 }
 
@@ -646,7 +657,52 @@ function scrollToFocused() {
 onMounted(async () => {
   // 确保在组件挂载后立即加载邮件
   await loadEmails()
+
+  // 监听 WebSocket 邮件状态变更事件
+  window.addEventListener('email-status-changed', handleRemoteStatusChange)
+  window.addEventListener('email-deleted', handleRemoteDelete)
+  window.addEventListener('ws:reconnected', handleWsReconnected)
 })
+
+// 清理事件监听器
+onUnmounted(() => {
+  window.removeEventListener('email-status-changed', handleRemoteStatusChange)
+  window.removeEventListener('email-deleted', handleRemoteDelete)
+  window.removeEventListener('ws:reconnected', handleWsReconnected)
+})
+
+// 处理远程邮件状态变更（来自其他客户端的 WebSocket 通知）
+function handleRemoteStatusChange(event) {
+  const { email_ids, changes } = event.detail
+  if (!email_ids || !changes) return
+
+  // 更新本地邮件状态
+  email_ids.forEach(emailId => {
+    const email = emails.value.find(e => e.id === emailId)
+    if (email) {
+      Object.keys(changes).forEach(key => {
+        email[key] = changes[key]
+      })
+    }
+  })
+}
+
+// 处理远程邮件删除
+function handleRemoteDelete(event) {
+  const { email_ids } = event.detail
+  if (!email_ids) return
+
+  // 从列表中移除被删除的邮件
+  emails.value = emails.value.filter(e => !email_ids.includes(e.id))
+  // 从选中列表中移除
+  selectedEmails.value = selectedEmails.value.filter(id => !email_ids.includes(id))
+}
+
+// 处理 WebSocket 重连后刷新数据
+function handleWsReconnected() {
+  console.log('[Emails] WebSocket reconnected, refreshing data...')
+  loadEmails(true)  // 静默刷新
+}
 
 // 监听路由变化（不包括首次加载，因为 onMounted 已经处理）
 watch(() => route.query, (newQuery, oldQuery) => {
@@ -848,8 +904,15 @@ function toggleSelect(id) {
 }
 
 async function toggleFlag(email) {
+  // 防止快速双击：如果该邮件正在操作中，忽略请求
+  if (pendingFlagOps.value.has(email.id)) {
+    return
+  }
+
   const originalState = email.is_flagged
-  email.is_flagged = !email.is_flagged
+  const action = !originalState ? '添加星标' : '取消星标'
+  email.is_flagged = !email.is_flagged  // 乐观更新
+  pendingFlagOps.value.add(email.id)  // 加锁
 
   try {
     if (email.is_flagged) {
@@ -858,9 +921,12 @@ async function toggleFlag(email) {
       await api.unflagEmail(email.id)
     }
   } catch (e) {
-    // 恢复原状态
+    // 恢复原状态并提示用户
     email.is_flagged = originalState
+    ElMessage.error(`${action}失败，请重试`)
     console.error('Failed to toggle flag:', e)
+  } finally {
+    pendingFlagOps.value.delete(email.id)  // 释放锁
   }
 }
 
@@ -908,8 +974,15 @@ async function handleEmailDelete(email) {
 }
 
 async function handleEmailFlag(email) {
+  // 防止快速双击：如果该邮件正在操作中，忽略请求
+  if (pendingFlagOps.value.has(email.id)) {
+    return
+  }
+
   const originalState = email.is_flagged
-  email.is_flagged = !email.is_flagged
+  const action = !originalState ? '添加星标' : '取消星标'
+  email.is_flagged = !email.is_flagged  // 乐观更新
+  pendingFlagOps.value.add(email.id)  // 加锁
 
   try {
     if (email.is_flagged) {
@@ -923,8 +996,12 @@ async function handleEmailFlag(email) {
       emailInList.is_flagged = email.is_flagged
     }
   } catch (e) {
+    // 恢复原状态并提示用户
     email.is_flagged = originalState
+    ElMessage.error(`${action}失败，请重试`)
     console.error('Failed to toggle flag:', e)
+  } finally {
+    pendingFlagOps.value.delete(email.id)  // 释放锁
   }
 }
 

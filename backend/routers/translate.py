@@ -18,15 +18,43 @@ settings = get_settings()
 
 
 # ============ 缓存工具函数 ============
-def compute_cache_key(text: str, source_lang: str, target_lang: str) -> str:
-    """计算缓存键（SHA256）"""
+def compute_glossary_hash(glossary: List[dict]) -> str:
+    """计算术语表 hash
+
+    基于术语表内容生成唯一标识，当术语表更新时 hash 会变化
+    """
+    if not glossary:
+        return ""
+    # 对术语排序确保顺序一致性
+    sorted_terms = sorted(glossary, key=lambda x: x.get("source", ""))
+    content = "|".join(f"{t.get('source', '')}:{t.get('target', '')}" for t in sorted_terms)
+    return hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]  # 取前16位即可
+
+
+def compute_cache_key(text: str, source_lang: str, target_lang: str,
+                      glossary_hash: str = None) -> str:
+    """计算缓存键（SHA256）
+
+    Args:
+        text: 源文本
+        source_lang: 源语言
+        target_lang: 目标语言
+        glossary_hash: 术语表 hash（可选，用于区分不同术语表的翻译结果）
+
+    术语表 hash 的作用：
+    - 当术语表更新后，生成新的 hash，导致缓存键变化
+    - 旧缓存自然失效，新翻译会使用更新后的术语
+    """
     content = f"{text}|{source_lang or 'auto'}|{target_lang}"
+    if glossary_hash:
+        content += f"|g:{glossary_hash}"
     return hashlib.sha256(content.encode('utf-8')).hexdigest()
 
 
-async def get_cached_translation(db: AsyncSession, text: str, source_lang: str, target_lang: str) -> Optional[str]:
+async def get_cached_translation(db: AsyncSession, text: str, source_lang: str, target_lang: str,
+                                  glossary_hash: str = None) -> Optional[str]:
     """从缓存获取翻译结果（L1 Redis → L2 MySQL）"""
-    cache_key = compute_cache_key(text, source_lang, target_lang)
+    cache_key = compute_cache_key(text, source_lang, target_lang, glossary_hash)
     redis_key = f"trans:{cache_key}"
 
     # L1: 先查 Redis（毫秒级）
@@ -53,9 +81,10 @@ async def get_cached_translation(db: AsyncSession, text: str, source_lang: str, 
     return None
 
 
-async def save_to_cache(db: AsyncSession, text: str, translated: str, source_lang: str, target_lang: str):
+async def save_to_cache(db: AsyncSession, text: str, translated: str, source_lang: str, target_lang: str,
+                        glossary_hash: str = None):
     """保存翻译结果到缓存（L1 Redis + L2 MySQL）"""
-    cache_key = compute_cache_key(text, source_lang, target_lang)
+    cache_key = compute_cache_key(text, source_lang, target_lang, glossary_hash)
     redis_key = f"trans:{cache_key}"
 
     # L1: 写入 Redis（热点缓存，1小时过期）

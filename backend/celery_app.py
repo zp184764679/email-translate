@@ -104,6 +104,11 @@ celery_app.conf.update(
             "task": "tasks.reminder_tasks.check_event_reminders",
             "schedule": 60.0,
         },
+        # 清理卡死的翻译状态 - 每5分钟
+        "cleanup-stuck-translations": {
+            "task": "tasks.maintenance_tasks.cleanup_stuck_translations",
+            "schedule": 300.0,  # 5分钟
+        },
     },
 )
 

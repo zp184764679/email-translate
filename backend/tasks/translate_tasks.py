@@ -152,8 +152,8 @@ def translate_email_task(self, email_id: int, account_id: int, force: bool = Fal
         }
 
     except SoftTimeLimitExceeded:
-        # 软超时，尝试重试
-        self.retry(countdown=10, max_retries=2)
+        # 软超时，尝试重试（使用指数退避：10s, 20s, 40s）
+        raise self.retry(countdown=10 * (2 ** self.request.retries))
     except Exception as e:
         db.rollback()
         print(f"[TranslateTask] Error translating email {email_id}: {e}")
@@ -170,53 +170,82 @@ def translate_email_task(self, email_id: int, account_id: int, force: bool = Fal
         db.close()
 
 
-@celery_app.task(bind=True, max_retries=2, soft_time_limit=300, time_limit=360)
-def batch_translate_task(self, email_ids: list, account_id: int):
+@celery_app.task(bind=True, max_retries=2, soft_time_limit=600, time_limit=660)
+def batch_translate_task(self, email_ids: list, account_id: int, batch_size: int = 20):
     """
-    批量翻译邮件
+    批量翻译邮件（分批处理，避免队列爆炸）
 
     Args:
         email_ids: 邮件ID列表
         account_id: 账户ID
+        batch_size: 每批处理的邮件数量（默认20，防止内存溢出）
 
     Returns:
         dict: 批量翻译结果
     """
     from celery import group
+    import time
 
     total = len(email_ids)
     completed = 0
     failed = 0
 
-    # 创建子任务组
-    tasks = group(
-        translate_email_task.s(email_id, account_id)
-        for email_id in email_ids
-    )
+    print(f"[BatchTranslate] Starting batch translation: {total} emails, batch_size={batch_size}")
 
-    # 执行并等待所有任务完成
-    result = tasks.apply_async()
+    # 分批处理
+    for batch_start in range(0, total, batch_size):
+        batch_end = min(batch_start + batch_size, total)
+        batch_ids = email_ids[batch_start:batch_end]
+        batch_num = batch_start // batch_size + 1
+        total_batches = (total + batch_size - 1) // batch_size
 
-    try:
-        # 等待所有任务完成（最长等待5分钟）
-        results = result.get(timeout=300)
+        print(f"[BatchTranslate] Processing batch {batch_num}/{total_batches} ({len(batch_ids)} emails)")
 
-        for r in results:
-            if r.get("success"):
-                completed += 1
-            else:
-                failed += 1
+        # 创建当前批次的子任务组
+        tasks = group(
+            translate_email_task.s(email_id, account_id)
+            for email_id in batch_ids
+        )
 
-    except Exception as e:
-        print(f"[BatchTranslate] Error: {e}")
-        failed = total - completed
+        # 执行当前批次
+        result = tasks.apply_async()
 
-    # 发送批量完成通知
+        try:
+            # 等待当前批次完成（每批最长等待3分钟）
+            batch_results = result.get(timeout=180)
+
+            for r in batch_results:
+                if r.get("success"):
+                    completed += 1
+                else:
+                    failed += 1
+
+        except Exception as e:
+            print(f"[BatchTranslate] Batch {batch_num} error: {e}")
+            # 当前批次失败，记录失败数量
+            failed += len(batch_ids) - (completed - (batch_start - failed))
+
+        # 批次间短暂休息，避免过度占用资源
+        if batch_end < total:
+            time.sleep(1)
+
+        # 发送进度通知（每批完成后）
+        notify_completion(account_id, "batch_translation_progress", {
+            "total": total,
+            "processed": batch_end,
+            "completed": completed,
+            "failed": failed,
+            "progress": int(batch_end / total * 100)
+        })
+
+    # 发送最终完成通知
     notify_completion(account_id, "batch_translation_complete", {
         "total": total,
         "completed": completed,
         "failed": failed
     })
+
+    print(f"[BatchTranslate] Completed: {completed}/{total} success, {failed} failed")
 
     return {
         "success": True,

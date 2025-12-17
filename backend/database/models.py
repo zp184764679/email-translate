@@ -112,6 +112,7 @@ class Attachment(Base):
     file_path = Column(String(500))
     file_size = Column(Integer)
     mime_type = Column(String(100))
+    content_hash = Column(String(64), index=True)  # SHA256 hash，用于检测重复内容
     created_at = Column(DateTime, default=datetime.utcnow)
 
     email = relationship("Email", back_populates="attachments")
@@ -277,14 +278,16 @@ class TranslationCache(Base):
 
 
 class SharedEmailTranslation(Base):
-    """邮件翻译共享表 - 基于 message_id 跨用户共享翻译结果"""
+    """邮件翻译共享表 - 基于 message_id 跨用户共享翻译结果
+
+    注意：只存储翻译结果，不存储原文（原文已在各用户的 emails 表中）
+    匹配逻辑：相同 message_id = 相同邮件内容，直接复用翻译结果
+    """
     __tablename__ = "shared_email_translations"
 
     id = Column(Integer, primary_key=True, index=True)
     message_id = Column(String(255), unique=True, index=True)  # 邮件的 RFC Message-ID
-    subject_original = Column(Text)
     subject_translated = Column(Text)
-    body_original = Column(Text)
     body_translated = Column(Text)
     source_lang = Column(String(10))
     target_lang = Column(String(10), default="zh")

@@ -291,6 +291,52 @@ def reset_monthly_quota(self):
 
 
 @celery_app.task(bind=True)
+def cleanup_stuck_translations(self):
+    """
+    清理卡死的翻译状态
+
+    将超过 10 分钟仍处于 "translating" 状态的邮件重置为可翻译状态
+    防止因进程崩溃或异常导致邮件永远无法被重新翻译
+    """
+    from database.models import Email
+    from sqlalchemy import and_
+
+    db = get_db_session()
+
+    try:
+        # 10 分钟超时阈值
+        cutoff = datetime.utcnow() - timedelta(minutes=10)
+
+        # 查找卡死的翻译任务
+        stuck_count = db.query(Email).filter(
+            and_(
+                Email.translation_status == "translating",
+                Email.updated_at < cutoff
+            )
+        ).update({
+            "translation_status": "failed"
+        }, synchronize_session=False)
+
+        db.commit()
+
+        if stuck_count > 0:
+            print(f"[TranslationCleanup] Reset {stuck_count} stuck translations")
+
+        return {
+            "success": True,
+            "reset_count": stuck_count,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+    except Exception as e:
+        db.rollback()
+        print(f"[TranslationCleanup] Error: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True)
 def batch_language_detection(self, email_ids: list):
     """
     批量语言检测

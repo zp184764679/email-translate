@@ -359,24 +359,32 @@ class TranslateService:
         # 统一换行符
         body = body.replace('\r\n', '\n').replace('\r', '\n')
 
-        # 常见引用标记模式
-        patterns = [
-            # Gmail: "On Mon, Nov 26, 2025 at 11:26 PM xxx wrote:"（可能跨两行）
-            r'\nOn .+?\n?wrote:\n',
+        # 可靠的引用标记模式（高置信度，不容易误匹配）
+        reliable_patterns = [
+            # Gmail: "On Mon, Nov 26, 2025 at 11:26 PM xxx wrote:"
+            r'\nOn .{10,80} wrote:\s*\n',
             # Outlook: "-----Original Message-----"
             r'\n-{3,}Original Message-{3,}\n',
-            # 中文客户端: "发件人：xxx" 或 "*发件人：*xxx"
-            r'\n\*?发件人[：:]\*?.+\n',
-            # From: 行（英文客户端）
-            r'\nFrom: .+\n',
+            # Outlook 完整引用头（From: + Sent: 或 Date:）
+            r'\nFrom: .+\n(?:Sent|Date): .+\n',
+            # 中文客户端完整引用头（发件人：+ 发送时间：或 日期：）
+            r'\n\*?发件人[：:].+\n(?:\*?(?:发送时间|日期)[：:].+\n)',
+            # 日文引用标记
+            r'\n-{3,}元のメッセージ-{3,}\n',
         ]
 
         earliest_pos = len(body)
 
-        for pattern in patterns:
+        # 优先检测可靠的引用标记
+        for pattern in reliable_patterns:
             match = re.search(pattern, body, re.IGNORECASE)
             if match and match.start() < earliest_pos:
                 earliest_pos = match.start()
+
+        # 检测连续的 > 引用符号（至少3行连续以 > 开头）
+        quote_block_match = re.search(r'\n(>[^\n]*\n){3,}', body)
+        if quote_block_match and quote_block_match.start() < earliest_pos:
+            earliest_pos = quote_block_match.start()
 
         # 如果找到引用标记，分割内容
         if earliest_pos < len(body):
@@ -637,7 +645,8 @@ Container: 40ft Blue Ring
 
     # ============ Ollama Translation ============
     def translate_with_ollama(self, text: str, target_lang: str = "zh",
-                               source_lang: str = None, glossary: List[Dict] = None) -> str:
+                               source_lang: str = None, glossary: List[Dict] = None,
+                               complexity_score: int = None) -> str:
         """
         Translate text using local Ollama model
 
@@ -646,13 +655,29 @@ Container: 40ft Blue Ring
             target_lang: Target language (zh, en, ja)
             source_lang: Source language (auto-detect if None)
             glossary: List of term mappings for context
+            complexity_score: Optional complexity score (0-100) from smart routing
         """
         text_len = len(text)
         # 短文本（<100字符且无换行）使用简化的严格 prompt，防止 LLM 过度扩展
         is_short_text = text_len < 100 and '\n' not in text
-        # 长文本（>8000字符）禁用 think mode，避免模型过度思考导致摘要
+        # 长文本判断
         is_long_text = text_len > 8000
-        use_think = not is_short_text and not is_long_text
+
+        # think 模式决策逻辑（基于复杂度而非单纯长度）
+        # - 短文本：不需要 think（太简单）
+        # - 长文本 + 低复杂度（<= 50）：不需要 think（如简单通知、新闻邮件）
+        # - 长文本 + 高复杂度（> 50）：需要 think（如技术文档、合同条款）
+        # - 正常文本：需要 think
+        if is_short_text:
+            use_think = False
+        elif is_long_text:
+            # 长文本根据复杂度决定：高复杂度仍启用 think
+            # 如果没有传入复杂度分数，保守地禁用 think
+            use_think = complexity_score is not None and complexity_score > 50
+            if use_think:
+                print(f"[Ollama] Long text ({text_len} chars) with high complexity ({complexity_score}) -> enabling think mode")
+        else:
+            use_think = True
 
         prompt = self._build_translation_prompt(text, target_lang, source_lang, glossary,
                                                  use_think=use_think,
@@ -1053,17 +1078,21 @@ Please check the following items:
             complexity = ComplexityLevel.MEDIUM
             score = 50
 
-        # 2. 根据复杂度选择策略（新策略：≤50用Ollama，>50用Claude+腾讯）
-        # 不再使用 DeepL，因为商务邮件需要上下文理解
-        OLLAMA_THRESHOLD = 50  # 50分以下用 Ollama
+        # 2. 根据复杂度选择策略
+        # 阈值与 email_analyzer.py 中的复杂度等级对齐：
+        #   - SIMPLE: <= 30 分
+        #   - MEDIUM: 31-70 分
+        #   - COMPLEX: > 70 分
+        # SIMPLE 和 MEDIUM 使用 Ollama（免费），COMPLEX 使用 Claude（更强但付费）
+        OLLAMA_THRESHOLD = 70  # 70分以下用 Ollama（覆盖 SIMPLE + MEDIUM）
 
         if score <= OLLAMA_THRESHOLD:
-            # 简单+中等偏下邮件：Ollama 直接翻译（免费，有提示词理解上下文）
-            print(f"[SmartRouting] Score {score} <= {OLLAMA_THRESHOLD} -> Ollama")
+            # 简单/中等邮件：Ollama 直接翻译（免费，有提示词理解上下文）
+            print(f"[SmartRouting] Score {score} <= {OLLAMA_THRESHOLD} (SIMPLE/MEDIUM) -> Ollama")
             return self._translate_simple(text, target_lang, source_lang, glossary, score)
         else:
-            # 中等偏上+复杂邮件：Claude（正文）+ Ollama（签名）
-            print(f"[SmartRouting] Score {score} > {OLLAMA_THRESHOLD} -> Claude+Ollama")
+            # 复杂邮件：Claude（正文）+ Ollama（签名）
+            print(f"[SmartRouting] Score {score} > {OLLAMA_THRESHOLD} (COMPLEX) -> Claude+Ollama")
             return self._translate_complex(text, subject, target_lang, source_lang, glossary, score)
 
     def _translate_simple(self, text: str, target_lang: str, source_lang: str,
@@ -1074,8 +1103,10 @@ Please check the following items:
         这里只负责翻译传入的文本。
         """
         try:
-            print(f"[SmartRouting] Simple email -> Ollama ({len(text)} chars)")
-            translated = self.translate_with_ollama(text, target_lang, source_lang, glossary)
+            print(f"[SmartRouting] Simple email -> Ollama ({len(text)} chars, score={score})")
+            # 传递复杂度分数，让 Ollama 根据复杂度决定是否启用 think 模式
+            translated = self.translate_with_ollama(text, target_lang, source_lang, glossary,
+                                                     complexity_score=score)
 
             return {
                 "translated_text": translated,
@@ -1219,7 +1250,10 @@ Please check the following items:
         # 1. Ollama 优先（免费，质量好）
         if self.ollama_base_url:
             try:
-                translated = self.translate_with_ollama(text_to_translate, target_lang, source_lang, glossary)
+                # 传递复杂度分数，决定是否启用 think 模式
+                complexity_score = complexity.get("score") if complexity else None
+                translated = self.translate_with_ollama(text_to_translate, target_lang, source_lang, glossary,
+                                                         complexity_score=complexity_score)
 
                 # 如果有引用，拼接回去
                 if has_quote:

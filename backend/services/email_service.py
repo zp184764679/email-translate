@@ -14,6 +14,26 @@ from datetime import datetime
 from services.language_service import get_language_service
 
 
+def normalize_message_id(message_id: str) -> str:
+    """
+    统一归一化 message_id 格式
+
+    - 去除首尾空白
+    - 去除尖括号 < >
+    - 确保格式一致，便于数据库查询和去重
+
+    Args:
+        message_id: 原始 message_id（可能带尖括号）
+
+    Returns:
+        归一化后的 message_id
+    """
+    if not message_id:
+        return ""
+    # 统一处理：去除所有空白字符和尖括号
+    return message_id.strip().strip('<>').strip()
+
+
 class EmailService:
     """Service for receiving and sending emails via IMAP/SMTP"""
 
@@ -29,18 +49,70 @@ class EmailService:
         self.imap_conn = None
         self.attachment_dir = "data/attachments"
 
-    def connect_imap(self) -> bool:
-        """Connect to IMAP server"""
+    def connect_imap(self, timeout: int = 30) -> bool:
+        """Connect to IMAP server
+
+        Args:
+            timeout: 连接超时时间（秒），默认30秒
+
+        Features:
+            - 带超时的连接
+            - 连接失败自动重试（最多3次）
+        """
+        import socket
+        max_retries = 3
+        retry_delay = 2
+
+        for attempt in range(max_retries):
+            try:
+                # 设置默认 socket 超时
+                socket.setdefaulttimeout(timeout)
+
+                if self.use_ssl:
+                    self.imap_conn = imaplib.IMAP4_SSL(self.imap_server, self.imap_port)
+                else:
+                    self.imap_conn = imaplib.IMAP4(self.imap_server, self.imap_port)
+
+                self.imap_conn.login(self.email_address, self.password)
+                print(f"[IMAP] 连接成功: {self.imap_server}:{self.imap_port}")
+                return True
+
+            except (socket.timeout, socket.gaierror, ConnectionError, OSError) as e:
+                # 网络错误，可重试
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (2 ** attempt)
+                    print(f"[IMAP] 连接失败（尝试 {attempt + 1}/{max_retries}），{wait_time}s 后重试: {e}")
+                    import time
+                    time.sleep(wait_time)
+                else:
+                    print(f"[IMAP] 连接失败，已达最大重试次数: {e}")
+                    return False
+
+            except imaplib.IMAP4.error as e:
+                # IMAP 协议错误（如认证失败），不重试
+                print(f"[IMAP] 认证失败: {e}")
+                return False
+
+            except Exception as e:
+                print(f"[IMAP] 连接错误: {e}")
+                return False
+
+        return False
+
+    def _ensure_connection(self) -> bool:
+        """确保 IMAP 连接有效，必要时自动重连"""
+        if self.imap_conn is None:
+            return self.connect_imap()
+
         try:
-            if self.use_ssl:
-                self.imap_conn = imaplib.IMAP4_SSL(self.imap_server, self.imap_port)
-            else:
-                self.imap_conn = imaplib.IMAP4(self.imap_server, self.imap_port)
-            self.imap_conn.login(self.email_address, self.password)
+            # 发送 NOOP 命令检查连接是否存活
+            self.imap_conn.noop()
             return True
-        except Exception as e:
-            print(f"IMAP connection error: {e}")
-            return False
+        except Exception:
+            # 连接已断开，尝试重连
+            print("[IMAP] 连接已断开，尝试重连...")
+            self.imap_conn = None
+            return self.connect_imap()
 
     def disconnect_imap(self):
         """Disconnect from IMAP server"""
@@ -62,9 +134,9 @@ class EmailService:
             limit: Maximum number of emails to fetch
             existing_message_ids: Set of message IDs already in database (for dedup)
         """
-        if not self.imap_conn:
-            if not self.connect_imap():
-                return []
+        # 确保连接有效（必要时自动重连）
+        if not self._ensure_connection():
+            return []
 
         emails = []
         if existing_message_ids is None:
@@ -91,13 +163,10 @@ class EmailService:
             # 优化：先获取所有邮件的 MESSAGE-ID，过滤掉已存在的
             new_emails_uids = []
             if existing_message_ids:
-                # 归一化已存在的 message_ids（去掉尖括号）
-                normalized_existing = set()
-                for mid in existing_message_ids:
-                    if mid:
-                        # 去掉尖括号，统一格式
-                        normalized = mid.strip().strip('<>').strip()
-                        normalized_existing.add(normalized)
+                # 归一化已存在的 message_ids（使用统一函数）
+                normalized_existing = set(
+                    normalize_message_id(mid) for mid in existing_message_ids if mid
+                )
 
                 print(f"[IMAP] Pre-filtering against {len(normalized_existing)} existing emails...")
                 for num in message_list:
@@ -106,12 +175,12 @@ class EmailService:
                         _, header_data = self.imap_conn.fetch(num, "(BODY[HEADER.FIELDS (MESSAGE-ID)])")
                         if header_data[0]:
                             header_text = header_data[0][1].decode('utf-8', errors='ignore')
-                            # 提取 MESSAGE-ID（保留原始格式用于对比）
+                            # 提取 MESSAGE-ID
                             match = re.search(r'Message-ID:\s*(<[^>]+>|[^\s]+)', header_text, re.IGNORECASE)
                             if match:
-                                raw_msg_id = match.group(1).strip()
-                                # 归一化：去掉尖括号
-                                normalized_msg_id = raw_msg_id.strip('<>').strip()
+                                raw_msg_id = match.group(1)
+                                # 使用统一的归一化函数
+                                normalized_msg_id = normalize_message_id(raw_msg_id)
                                 if normalized_msg_id not in normalized_existing:
                                     new_emails_uids.append(num)
                             else:
@@ -233,11 +302,11 @@ class EmailService:
         """Parse raw email data"""
         msg = email.message_from_bytes(raw_email)
 
-        # Get Message-ID
-        message_id = msg.get("Message-ID", "")
+        # Get Message-ID（归一化处理）
+        message_id = normalize_message_id(msg.get("Message-ID", ""))
 
-        # Get thread info
-        in_reply_to = msg.get("In-Reply-To", "")
+        # Get thread info（归一化 in_reply_to，references 保留原格式用于线程识别）
+        in_reply_to = normalize_message_id(msg.get("In-Reply-To", ""))
         references = msg.get("References", "")
 
         # Parse from
@@ -263,12 +332,9 @@ class EmailService:
         # Parse subject
         subject = self._decode_header(msg.get("Subject", ""))
 
-        # Parse date
+        # Parse date（多格式支持）
         date_str = msg.get("Date", "")
-        try:
-            received_at = parsedate_to_datetime(date_str)
-        except Exception:
-            received_at = datetime.utcnow()
+        received_at = self._parse_email_date(date_str)
 
         # Parse body
         body_text, body_html = self._get_body(msg)
@@ -338,6 +404,56 @@ class EmailService:
         if match:
             return match.group(1)
         return header.strip()
+
+    def _parse_email_date(self, date_str: str) -> datetime:
+        """解析邮件日期，支持多种格式
+
+        Args:
+            date_str: 日期字符串
+
+        Returns:
+            datetime 对象，解析失败时返回当前时间并记录警告
+        """
+        if not date_str:
+            return datetime.utcnow()
+
+        # 1. 首先尝试标准解析
+        try:
+            return parsedate_to_datetime(date_str)
+        except Exception:
+            pass
+
+        # 2. 尝试常见的非标准格式
+        from dateutil import parser as dateutil_parser
+
+        # 清理日期字符串（移除多余空格和括号注释）
+        cleaned = re.sub(r'\([^)]*\)', '', date_str).strip()  # 移除括号内容如 (CST)
+        cleaned = re.sub(r'\s+', ' ', cleaned)  # 合并多余空格
+
+        try:
+            return dateutil_parser.parse(cleaned)
+        except Exception:
+            pass
+
+        # 3. 尝试一些已知的特殊格式
+        special_formats = [
+            "%Y-%m-%d %H:%M:%S",
+            "%d %b %Y %H:%M:%S",
+            "%Y/%m/%d %H:%M:%S",
+            "%d/%m/%Y %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S",
+            "%a %b %d %H:%M:%S %Y",
+        ]
+
+        for fmt in special_formats:
+            try:
+                return datetime.strptime(cleaned, fmt)
+            except ValueError:
+                continue
+
+        # 解析失败，记录警告并返回当前时间
+        print(f"[Date] 无法解析日期格式: '{date_str}', 使用当前时间")
+        return datetime.utcnow()
 
     def _get_body(self, msg) -> Tuple[Optional[str], Optional[str]]:
         """Extract text and HTML body from email"""
@@ -449,13 +565,19 @@ class EmailService:
                         file_path = self._save_attachment(part, message_id, filename)
                         payload = part.get_payload(decode=True)
                         file_size = len(payload) if payload else 0
+
+                        # 计算文件内容 hash（用于检测重复内容）
+                        import hashlib
+                        content_hash = hashlib.sha256(payload).hexdigest() if payload else ""
+
                         attachments.append({
                             "filename": safe_filename,
                             "file_path": file_path,
                             "file_size": file_size,
-                            "mime_type": content_type
+                            "mime_type": content_type,
+                            "content_hash": content_hash  # 用于未来去重和完整性校验
                         })
-                        print(f"[Attachment] Saved: {safe_filename} ({content_type}, {file_size} bytes)")
+                        print(f"[Attachment] Saved: {safe_filename} ({content_type}, {file_size} bytes, hash={content_hash[:16]}...)")
                     except ValueError as e:
                         # 大小限制或空内容
                         print(f"[Attachment] Skipped {filename}: {e}")
@@ -566,14 +688,24 @@ class EmailService:
         return file_path
 
     def _get_thread_id(self, message_id: str, in_reply_to: str, references: str) -> str:
-        """Determine thread ID for email"""
+        """Determine thread ID for email
+
+        使用 References 头的第一个有效 Message-ID 作为线程 ID
+        Message-ID 格式: <xxx@yyy>
+        """
         if references:
-            # First reference is usually the original email
-            refs = references.split()
-            return refs[0] if refs else message_id
-        elif in_reply_to:
-            return in_reply_to
-        return message_id
+            # 使用正则提取所有有效的 Message-ID（格式：<xxx@yyy>）
+            # 比简单 split() 更健壮，能处理各种分隔符和格式异常
+            message_id_pattern = r'<[^<>\s]+@[^<>\s]+>'
+            refs = re.findall(message_id_pattern, references)
+            if refs:
+                # 第一个 reference 通常是原始邮件（线程起点）
+                return refs[0].strip('<>')
+        if in_reply_to:
+            # 归一化 in_reply_to（移除尖括号）
+            return in_reply_to.strip('<>')
+        # 没有回复/引用信息，使用自身 message_id 作为线程 ID
+        return message_id.strip('<>') if message_id else ""
 
     def _clean_text_for_detection(self, html: str) -> str:
         """
@@ -685,19 +817,43 @@ class EmailService:
                 cc_addrs = getaddresses([cc])
                 recipients.extend([addr for name, addr in cc_addrs if addr])
 
-            # Send
-            if self.use_ssl:
-                with smtplib.SMTP_SSL(self.smtp_server, self.smtp_port) as server:
-                    server.login(self.email_address, self.password)
-                    server.sendmail(self.email_address, recipients, msg.as_string())
-            else:
-                with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
-                    server.starttls()
-                    server.login(self.email_address, self.password)
-                    server.sendmail(self.email_address, recipients, msg.as_string())
+            # Send（带重试机制）
+            import time
+            max_retries = 3
+            retry_delay = 2  # 初始延迟秒数
 
-            return True, message_id
+            for attempt in range(max_retries):
+                try:
+                    if self.use_ssl:
+                        with smtplib.SMTP_SSL(self.smtp_server, self.smtp_port, timeout=30) as server:
+                            server.login(self.email_address, self.password)
+                            server.sendmail(self.email_address, recipients, msg.as_string())
+                    else:
+                        with smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=30) as server:
+                            server.starttls()
+                            server.login(self.email_address, self.password)
+                            server.sendmail(self.email_address, recipients, msg.as_string())
+
+                    return True, message_id
+
+                except (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError,
+                        ConnectionError, TimeoutError, OSError) as e:
+                    # 临时网络错误，可重试
+                    if attempt < max_retries - 1:
+                        wait_time = retry_delay * (2 ** attempt)  # 指数退避：2s, 4s, 8s
+                        print(f"[SMTP] 发送失败（尝试 {attempt + 1}/{max_retries}），{wait_time}s 后重试: {e}")
+                        time.sleep(wait_time)
+                    else:
+                        print(f"[SMTP] 发送失败，已达最大重试次数: {e}")
+                        return False, None
+
+                except (smtplib.SMTPAuthenticationError, smtplib.SMTPRecipientsRefused) as e:
+                    # 认证或收件人错误，不重试
+                    print(f"[SMTP] 发送失败（不可重试）: {e}")
+                    return False, None
+
+            return False, None
 
         except Exception as e:
-            print(f"Error sending email: {e}")
+            print(f"[SMTP] 邮件构建失败: {e}")
             return False, None

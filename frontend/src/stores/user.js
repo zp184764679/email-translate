@@ -46,6 +46,12 @@ export const useUserStore = defineStore('user', () => {
     // 清除选中的邮件
     selectedEmailIds.value = []
 
+    // 重置邮件 store（需要延迟导入避免循环依赖）
+    import('./emails').then(({ useEmailStore }) => {
+      const emailStore = useEmailStore()
+      emailStore.reset()
+    })
+
     token.value = ''
     email.value = ''
     accountId.value = null

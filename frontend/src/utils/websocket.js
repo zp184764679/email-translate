@@ -45,11 +45,19 @@ class WebSocketManager {
       this.ws = new WebSocket(wsUrl)
 
       this.ws.onopen = () => {
-        console.log('[WS] Connected')
+        const wasReconnecting = this.reconnectAttempts > 0
+        console.log('[WS] Connected' + (wasReconnecting ? ' (reconnected)' : ''))
         this.isConnecting = false
         this.reconnectAttempts = 0
         this.startHeartbeat()
         this.emit('connected', { accountId })
+
+        // 如果是重连成功，触发额外的重连事件供组件刷新数据
+        if (wasReconnecting) {
+          this.emit('reconnected', { accountId })
+          // 同时触发全局事件
+          window.dispatchEvent(new CustomEvent('ws:reconnected'))
+        }
       }
 
       this.ws.onmessage = (event) => {

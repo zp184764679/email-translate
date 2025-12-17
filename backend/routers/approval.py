@@ -450,7 +450,33 @@ async def approve_draft(
     )
     original = email_result.scalar_one_or_none()
 
+    # 准备发送参数
+    to_addr = draft.to_address
+    if not to_addr and original:
+        to_addr = original.from_email
+
+    subject = draft.subject
+    if not subject and original:
+        subject = original.subject_original
+        if subject and not subject.lower().startswith("re:"):
+            subject = f"Re: {subject}"
+
+    body_to_send = draft.body_translated or draft.body_chinese
+
+    # 判断是否经过翻译
+    was_translated = bool(
+        draft.body_chinese and draft.body_translated
+        and draft.body_chinese.strip() != draft.body_translated.strip()
+    )
+
+    # 先标记为"发送中"状态，防止重复发送
+    draft.status = "sending"
+    await db.commit()
+
     # 发送邮件（使用作者的账户发送）
+    sent_message_id = None
+    send_error = None
+
     try:
         service = EmailService(
             imap_server=author.imap_server,
@@ -460,19 +486,6 @@ async def approve_draft(
             smtp_port=author.smtp_port
         )
 
-        to_addr = draft.to_address
-        if not to_addr and original:
-            to_addr = original.from_email
-
-        subject = draft.subject
-        if not subject and original:
-            subject = original.subject_original
-            if subject and not subject.lower().startswith("re:"):
-                subject = f"Re: {subject}"
-
-        # 确定实际发送的内容
-        body_to_send = draft.body_translated or draft.body_chinese
-
         success, sent_message_id = service.send_email(
             to=to_addr,
             cc=draft.cc_address,
@@ -480,41 +493,59 @@ async def approve_draft(
             body=body_to_send
         )
 
-        if success:
-            # 判断是否经过翻译
-            # 如果 body_chinese 和 body_translated 都存在且不同，则是翻译后发送
-            was_translated = bool(
-                draft.body_chinese and draft.body_translated
-                and draft.body_chinese.strip() != draft.body_translated.strip()
+        if not success:
+            send_error = "SMTP 发送失败"
+
+    except Exception as e:
+        send_error = str(e)
+        print(f"[Approval] Email send error for draft {draft_id}: {e}")
+
+    # 无论数据库操作是否成功，邮件发送结果已确定
+    # 更新数据库状态
+    try:
+        if send_error:
+            # 发送失败，回退状态
+            draft.status = "pending"
+            await db.commit()
+            raise HTTPException(status_code=500, detail=f"邮件发送失败: {send_error}")
+
+        # 发送成功，保存映射和更新状态
+        if sent_message_id:
+            mapping = SentEmailMapping(
+                message_id=sent_message_id,
+                draft_id=draft.id,
+                account_id=author.id,
+                subject_original=draft.subject,
+                subject_sent=subject or "",
+                body_original=draft.body_chinese or draft.body_translated,
+                body_sent=body_to_send,
+                was_translated=was_translated,
+                to_email=to_addr
             )
+            db.add(mapping)
+            draft.sent_message_id = sent_message_id
 
-            # 保存发送邮件映射（用于后续回复时还原引用内容）
-            if sent_message_id:
-                mapping = SentEmailMapping(
-                    message_id=sent_message_id,
-                    draft_id=draft.id,
-                    account_id=author.id,
-                    subject_original=draft.subject,
-                    subject_sent=subject or "",
-                    body_original=draft.body_chinese or draft.body_translated,  # 用户写的原文
-                    body_sent=body_to_send,  # 实际发送的
-                    was_translated=was_translated,
-                    to_email=to_addr
-                )
-                db.add(mapping)
+        draft.status = "sent"
+        draft.sent_at = datetime.utcnow()
+        await db.commit()
 
-                # 更新草稿的 sent_message_id
-                draft.sent_message_id = sent_message_id
+        return {"status": "sent", "message": "审批通过，邮件已发送"}
 
+    except HTTPException:
+        raise
+    except Exception as db_error:
+        # 关键：邮件已发送但数据库更新失败
+        # 记录日志以便手动修复
+        print(f"[CRITICAL] Email sent but DB update failed! draft_id={draft_id}, message_id={sent_message_id}, error={db_error}")
+        # 尝试至少更新状态
+        try:
             draft.status = "sent"
             draft.sent_at = datetime.utcnow()
             await db.commit()
-            return {"status": "sent", "message": "审批通过，邮件已发送"}
-        else:
-            raise HTTPException(status_code=500, detail="邮件发送失败")
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"发送失败: {str(e)}")
+        except Exception:
+            pass
+        # 返回成功（因为邮件确实已发送）
+        return {"status": "sent", "message": "邮件已发送（注意：发送记录可能未完整保存）"}
 
 
 @router.post("/{draft_id}/reject")

@@ -45,7 +45,9 @@ jobs:
 
             # 运行数据库迁移（如有新迁移）
             echo "Running database migrations..."
-            ./venv/bin/python -m migrations.add_sent_email_mapping 2>/dev/null || echo "Migration already applied or not needed"
+            ./venv/bin/python -m migrations.add_sent_email_mapping 2>/dev/null || echo "Migration: add_sent_email_mapping skipped"
+            ./venv/bin/python -m migrations.add_attachment_hash 2>/dev/null || echo "Migration: add_attachment_hash skipped"
+            ./venv/bin/python -m migrations.remove_shared_translation_originals 2>/dev/null || echo "Migration: remove_shared_translation_originals skipped"
 
             # 检查 .env 配置
             if [ ! -f ".env" ]; then
