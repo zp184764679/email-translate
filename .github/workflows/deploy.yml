@@ -62,6 +62,11 @@ jobs:
             ./venv/bin/python -m migrations.add_sent_email_mapping 2>/dev/null || echo "Migration: add_sent_email_mapping skipped"
             ./venv/bin/python -m migrations.add_attachment_hash 2>/dev/null || echo "Migration: add_attachment_hash skipped"
             ./venv/bin/python -m migrations.add_batch_account_id 2>/dev/null || echo "Migration: add_batch_account_id skipped"
+            # 新功能迁移
+            ./venv/bin/python -m migrations.add_rule_executions 2>/dev/null || echo "Migration: add_rule_executions skipped"
+            ./venv/bin/python -m migrations.add_label_sort_order 2>/dev/null || echo "Migration: add_label_sort_order skipped"
+            ./venv/bin/python -m migrations.add_signature_fields 2>/dev/null || echo "Migration: add_signature_fields skipped"
+            ./venv/bin/python -m migrations.add_translation_feedback 2>/dev/null || echo "Migration: add_translation_feedback skipped"
             # 数据清理迁移（最后执行）
             ./venv/bin/python -m migrations.remove_shared_translation_originals 2>/dev/null || echo "Migration: remove_shared_translation_originals skipped"
             # 密码加密迁移（敏感操作，最后执行）
