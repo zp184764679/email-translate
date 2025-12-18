@@ -105,3 +105,8 @@ backend/data/
 
 # ===== 生产环境配置 (敏感信息) =====
 backend/.env.production
+
+# ===== 敏感文档 (禁止提交) =====
+DEPLOYMENT.md
+**/emails_bilingual.md
+*_bilingual.md
