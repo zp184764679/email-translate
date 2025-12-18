@@ -29,10 +29,53 @@
 """
 
 import re
+import signal
+import threading
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
+
+
+# 正则匹配超时设置（秒）
+REGEX_TIMEOUT = 0.5  # 500ms
+
+
+def regex_match_with_timeout(pattern: str, text: str, timeout: float = REGEX_TIMEOUT) -> bool:
+    """
+    带超时保护的正则匹配
+
+    Args:
+        pattern: 正则表达式模式
+        text: 待匹配文本
+        timeout: 超时时间（秒）
+
+    Returns:
+        是否匹配成功（超时返回 False）
+    """
+    result = [False]
+    exception = [None]
+
+    def do_match():
+        try:
+            result[0] = bool(re.search(pattern, text, re.IGNORECASE))
+        except Exception as e:
+            exception[0] = e
+
+    thread = threading.Thread(target=do_match)
+    thread.daemon = True
+    thread.start()
+    thread.join(timeout)
+
+    if thread.is_alive():
+        print(f"[RuleEngine] Regex timeout ({timeout}s): pattern={pattern[:50]}...")
+        return False
+
+    if exception[0]:
+        print(f"[RuleEngine] Regex error: {exception[0]}")
+        return False
+
+    return result[0]
 
 
 class RuleEngine:
@@ -133,11 +176,8 @@ class RuleEngine:
         elif operator == "ends_with":
             return email_value_str.endswith(value_lower)
         elif operator == "regex":
-            try:
-                return bool(re.search(value, str(email_value), re.IGNORECASE))
-            except re.error:
-                print(f"[RuleEngine] Invalid regex pattern: {value}")
-                return False
+            # 使用超时保护的正则匹配，防止 ReDoS 攻击
+            return regex_match_with_timeout(value, str(email_value))
         elif operator == "not_contains":
             return value_lower not in email_value_str
         elif operator == "not_equals":
@@ -145,9 +185,9 @@ class RuleEngine:
 
         return False
 
-    async def apply_actions(self, email_id: int, actions: list) -> Dict[str, Any]:
+    async def apply_actions(self, email_id: int, actions: list, use_savepoint: bool = True) -> Dict[str, Any]:
         """
-        对邮件执行动作
+        对邮件执行动作（带事务保护）
 
         动作格式：
         [
@@ -156,19 +196,35 @@ class RuleEngine:
             {"type": "mark_read"},
             {"type": "mark_flagged"}
         ]
+
+        Args:
+            email_id: 邮件ID
+            actions: 动作列表
+            use_savepoint: 是否使用保存点（用于回滚部分失败）
         """
         from database.models import Email, email_folder_mappings, email_label_mappings
 
         result = {
             "success": True,
             "actions_applied": [],
-            "skip_translate": False
+            "skip_translate": False,
+            "error_message": None
         }
 
-        for action in actions:
-            action_type = action.get("type", "")
-
+        # 使用 savepoint 实现原子性操作
+        # 如果任何动作失败，可以回滚到 savepoint
+        savepoint = None
+        if use_savepoint:
             try:
+                savepoint = await self.db.begin_nested()
+            except Exception:
+                # 某些情况下无法创建 nested transaction，继续执行
+                savepoint = None
+
+        try:
+            for action in actions:
+                action_type = action.get("type", "")
+
                 if action_type == "move_to_folder":
                     folder_id = action.get("folder_id")
                     if folder_id:
@@ -207,9 +263,23 @@ class RuleEngine:
                     result["skip_translate"] = True
                     result["actions_applied"].append("skip_translate")
 
-            except Exception as e:
-                print(f"[RuleEngine] Failed to apply action {action_type}: {e}")
-                result["success"] = False
+            # 所有动作成功，提交 savepoint
+            if savepoint:
+                await savepoint.commit()
+
+        except Exception as e:
+            error_msg = f"Failed to apply action: {e}"
+            print(f"[RuleEngine] {error_msg}")
+            result["success"] = False
+            result["error_message"] = str(e)
+
+            # 回滚到 savepoint
+            if savepoint:
+                try:
+                    await savepoint.rollback()
+                    print(f"[RuleEngine] Rolled back actions for email {email_id}")
+                except Exception:
+                    pass
 
         return result
 
@@ -288,27 +358,65 @@ class RuleEngine:
             )
         )
 
-    async def process_email(self, email_data: dict, email_id: int) -> Dict[str, Any]:
+    async def _log_execution(
+        self,
+        rule_id: int,
+        email_id: int,
+        matched: bool,
+        actions_applied: List[str],
+        actions_success: bool,
+        error_message: str = None,
+        matched_conditions: dict = None
+    ):
+        """记录规则执行日志"""
+        from database.models import RuleExecution
+
+        try:
+            execution = RuleExecution(
+                rule_id=rule_id,
+                email_id=email_id,
+                account_id=self.account_id,
+                matched=matched,
+                actions_applied=actions_applied,
+                actions_success=actions_success,
+                error_message=error_message,
+                matched_conditions=matched_conditions
+            )
+            self.db.add(execution)
+            # 不立即 commit，让调用者决定何时 commit
+        except Exception as e:
+            print(f"[RuleEngine] Failed to log execution: {e}")
+
+    async def process_email(self, email_data: dict, email_id: int, log_executions: bool = True) -> Dict[str, Any]:
         """
         处理单封邮件，返回应用的规则信息
+
+        Args:
+            email_data: 邮件数据字典
+            email_id: 邮件ID
+            log_executions: 是否记录执行日志
 
         Returns:
             {
                 "applied_rules": ["规则1", "规则2"],
                 "skip_translate": False,
-                "actions_applied": ["move_to_folder:5", "add_label:3"]
+                "actions_applied": ["move_to_folder:5", "add_label:3"],
+                "execution_logs": [...]
             }
         """
         result = {
             "applied_rules": [],
             "skip_translate": False,
-            "actions_applied": []
+            "actions_applied": [],
+            "execution_logs": []
         }
 
         for rule in self.rules:
             try:
                 # 评估条件
-                if self.evaluate_conditions(email_data, rule.conditions):
+                matched = self.evaluate_conditions(email_data, rule.conditions)
+
+                if matched:
                     # 执行动作
                     action_result = await self.apply_actions(email_id, rule.actions)
 
@@ -322,6 +430,26 @@ class RuleEngine:
                     # 更新规则统计
                     await self._update_rule_stats(rule.id)
 
+                    # 记录执行日志
+                    if log_executions:
+                        await self._log_execution(
+                            rule_id=rule.id,
+                            email_id=email_id,
+                            matched=True,
+                            actions_applied=action_result.get("actions_applied", []),
+                            actions_success=action_result.get("success", True),
+                            error_message=action_result.get("error_message"),
+                            matched_conditions={"rule_name": rule.name, "conditions": rule.conditions}
+                        )
+
+                    result["execution_logs"].append({
+                        "rule_id": rule.id,
+                        "rule_name": rule.name,
+                        "matched": True,
+                        "actions_applied": action_result.get("actions_applied", []),
+                        "success": action_result.get("success", True)
+                    })
+
                     print(f"[RuleEngine] Rule '{rule.name}' matched email {email_id}")
 
                     # 如果设置了停止处理，跳出循环
@@ -330,7 +458,19 @@ class RuleEngine:
                         break
 
             except Exception as e:
-                print(f"[RuleEngine] Error processing rule '{rule.name}': {e}")
+                error_msg = str(e)
+                print(f"[RuleEngine] Error processing rule '{rule.name}': {error_msg}")
+
+                # 即使失败也记录日志
+                if log_executions:
+                    await self._log_execution(
+                        rule_id=rule.id,
+                        email_id=email_id,
+                        matched=False,
+                        actions_applied=[],
+                        actions_success=False,
+                        error_message=error_msg
+                    )
 
         return result
 

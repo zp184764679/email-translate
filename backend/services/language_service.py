@@ -43,9 +43,10 @@ class LanguageService:
         """
         检测文本语言，返回语言代码
 
-        检测策略：统一使用 Ollama 检测（保持一致性）
-        - Ollama 可用：所有语言正确检测
-        - Ollama 不可用：返回 unknown，不翻译
+        检测策略（带降级方案）：
+        1. 先用快速规则检测（中/日/韩/俄等非拉丁语言）
+        2. 规则不确定时（返回 unknown），调用 Ollama
+        3. Ollama 失败时，回退到规则结果
 
         Args:
             text: 要检测的文本
@@ -61,9 +62,46 @@ class LanguageService:
         if len(clean_text.strip()) < 20:
             return "unknown"
 
-        # 统一使用 Ollama 检测
+        # 1. 先用快速规则检测（对于明显的非拉丁语言字符非常准确）
+        quick_result = self._quick_detect(clean_text)
+        if quick_result != "unknown":
+            print(f"[LanguageService] Quick detect: {quick_result}")
+            return quick_result
+
+        # 2. 规则不确定（可能是拉丁语言），尝试 Ollama
         ollama_result = self._ollama_detect(clean_text)
-        return ollama_result
+        if ollama_result != "unknown":
+            return ollama_result
+
+        # 3. Ollama 也失败了，尝试一些启发式规则
+        # 对于拉丁字母文本，默认假设是英语（因为这是最常见的商务语言）
+        latin_text = re.sub(r'[^a-zA-ZäöüßÄÖÜàâçéèêëïîôùûüÿœæÀÂÇÉÈÊËÏÎÔÙÛÜŸŒÆñÑáéíóúüÁÉÍÓÚÜ]', '', clean_text)
+        if len(latin_text) > len(clean_text) * 0.3:
+            # 大部分是拉丁字母，可能是英语、德语、法语等
+            # 检查一些常见的德语特征
+            german_chars = len(re.findall(r'[äöüßÄÖÜ]', clean_text))
+            if german_chars > 3:
+                print("[LanguageService] Fallback to German (found umlauts)")
+                return "de"
+
+            # 检查法语特征
+            french_chars = len(re.findall(r'[àâçéèêëïîôùûüÿœæÀÂÇÉÈÊËÏÎÔÙÛÜŸŒÆ]', clean_text))
+            if french_chars > 3:
+                print("[LanguageService] Fallback to French (found accents)")
+                return "fr"
+
+            # 检查西班牙语特征
+            spanish_chars = len(re.findall(r'[ñÑáéíóúüÁÉÍÓÚÜ¿¡]', clean_text))
+            if spanish_chars > 3:
+                print("[LanguageService] Fallback to Spanish (found Spanish chars)")
+                return "es"
+
+            # 默认英语
+            print("[LanguageService] Fallback to English (default for Latin text)")
+            return "en"
+
+        print("[LanguageService] Could not detect language")
+        return "unknown"
 
     def _quick_detect(self, text: str) -> str:
         """

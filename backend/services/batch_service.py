@@ -31,6 +31,10 @@ class BatchTranslationService:
 
     BATCH_API_URL = "https://api.anthropic.com/v1/messages/batches"
 
+    # 分片配置
+    MAX_BATCH_SIZE = 100  # 每批次最大项数（避免超时）
+    MAX_TEXT_LENGTH = 50000  # 单个文本最大长度（防止单项过大）
+
     def __init__(self, api_key: str = None, model: str = None):
         self.api_key = api_key or os.environ.get("CLAUDE_API_KEY")
         self.model = model or os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-20250514")
@@ -95,12 +99,107 @@ class BatchTranslationService:
             }
         }
 
-    async def create_batch(self, items: List[Dict]) -> Dict:
+    async def create_sharded_batches(self, items: List[Dict]) -> Dict:
         """
-        创建批次并提交到 Claude
+        创建分片批次 - 自动拆分大批次
+
+        当项数超过 MAX_BATCH_SIZE 时，自动分片创建多个批次。
+        这可以避免单个批次过大导致的超时问题。
 
         Args:
             items: 待翻译项列表 [{"email_id": int, "text": str, "source_lang": str}, ...]
+
+        Returns:
+            {
+                "total_items": int,
+                "batches_created": int,
+                "batches": [
+                    {"batch_id": str, "db_batch_id": int, "items": int},
+                    ...
+                ],
+                "skipped": [{"email_id": int, "reason": str}, ...]  # 被跳过的项
+            }
+        """
+        if not items:
+            return {"error": "No items to translate", "total_items": 0}
+
+        # 预处理：过滤过长的文本
+        valid_items = []
+        skipped = []
+
+        for item in items:
+            text_len = len(item.get('text', ''))
+            if text_len > self.MAX_TEXT_LENGTH:
+                skipped.append({
+                    "email_id": item.get('email_id'),
+                    "reason": f"Text too long ({text_len} > {self.MAX_TEXT_LENGTH} chars)"
+                })
+            elif text_len == 0:
+                skipped.append({
+                    "email_id": item.get('email_id'),
+                    "reason": "Empty text"
+                })
+            else:
+                valid_items.append(item)
+
+        if not valid_items:
+            return {
+                "total_items": len(items),
+                "batches_created": 0,
+                "batches": [],
+                "skipped": skipped,
+                "message": "All items were skipped"
+            }
+
+        # 分片
+        batches_results = []
+        for i in range(0, len(valid_items), self.MAX_BATCH_SIZE):
+            chunk = valid_items[i:i + self.MAX_BATCH_SIZE]
+            shard_num = i // self.MAX_BATCH_SIZE + 1
+            total_shards = (len(valid_items) + self.MAX_BATCH_SIZE - 1) // self.MAX_BATCH_SIZE
+
+            print(f"[BatchService] Creating shard {shard_num}/{total_shards} ({len(chunk)} items)")
+
+            try:
+                result = await self.create_batch(chunk)
+                if "error" not in result:
+                    batches_results.append({
+                        "batch_id": result.get("batch_id"),
+                        "db_batch_id": result.get("db_batch_id"),
+                        "items": len(chunk),
+                        "shard": shard_num
+                    })
+                else:
+                    # 批次创建失败，将项目标记为跳过
+                    for item in chunk:
+                        skipped.append({
+                            "email_id": item.get('email_id'),
+                            "reason": f"Batch creation failed: {result.get('error')}"
+                        })
+            except Exception as e:
+                print(f"[BatchService] Shard {shard_num} failed: {e}")
+                for item in chunk:
+                    skipped.append({
+                        "email_id": item.get('email_id'),
+                        "reason": f"Exception: {str(e)}"
+                    })
+
+        return {
+            "total_items": len(items),
+            "batches_created": len(batches_results),
+            "batches": batches_results,
+            "skipped": skipped
+        }
+
+    async def create_batch(self, items: List[Dict]) -> Dict:
+        """
+        创建单个批次并提交到 Claude
+
+        注意：对于大量项目，请使用 create_sharded_batches() 方法自动分片。
+
+        Args:
+            items: 待翻译项列表 [{"email_id": int, "text": str, "source_lang": str}, ...]
+                   建议不超过 MAX_BATCH_SIZE (100) 项
 
         Returns:
             {
@@ -456,6 +555,8 @@ class BatchTranslationService:
         """
         执行一次批量翻译（收集 + 提交）
 
+        对于大量邮件，自动分片创建多个批次（每批最多 MAX_BATCH_SIZE 项）。
+
         Args:
             limit: 最多处理邮件数
 
@@ -467,7 +568,8 @@ class BatchTranslationService:
         if not items:
             return {"message": "No untranslated emails found"}
 
-        return await self.create_batch(items)
+        # 使用分片批次处理大量邮件
+        return await self.create_sharded_batches(items)
 
     async def poll_and_process_batches(self) -> Dict:
         """

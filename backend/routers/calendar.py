@@ -2,6 +2,7 @@
 日历事件 API 路由
 支持创建、编辑、删除日历事件，以及从邮件创建事件
 支持重复事件（RRULE 格式）
+支持时区处理
 """
 
 from datetime import datetime, timedelta
@@ -20,6 +21,10 @@ from routers.users import get_current_account
 
 router = APIRouter(prefix="/api/calendar", tags=["calendar"])
 
+# 重复事件展开限制（防止无限期事件返回过多实例）
+MAX_RECURRING_INSTANCES = 100
+MAX_RECURRING_DAYS = 365  # 最多展开一年
+
 
 # ============ Pydantic Schemas ============
 
@@ -36,6 +41,8 @@ class EventCreate(BaseModel):
     # 重复事件字段
     recurrence_rule: Optional[str] = None  # RRULE 格式
     recurrence_end: Optional[datetime] = None
+    # 时区（客户端时区，用于显示）
+    timezone: Optional[str] = "Asia/Shanghai"
 
 
 class EventUpdate(BaseModel):
@@ -49,6 +56,7 @@ class EventUpdate(BaseModel):
     reminder_minutes: Optional[int] = None
     recurrence_rule: Optional[str] = None
     recurrence_end: Optional[datetime] = None
+    timezone: Optional[str] = None
 
 
 class EventResponse(BaseModel):
@@ -66,6 +74,9 @@ class EventResponse(BaseModel):
     recurrence_end: Optional[datetime] = None
     parent_event_id: Optional[int] = None
     is_recurring: bool = False  # 前端用于区分普通事件和重复事件
+    is_instance: bool = False  # 是否为重复事件的虚拟实例
+    instance_date: Optional[str] = None  # 实例日期
+    timezone: Optional[str] = "Asia/Shanghai"
     created_at: datetime
     updated_at: datetime
 
@@ -83,14 +94,20 @@ class EventFromEmailCreate(BaseModel):
 
 # ============ Helper Functions ============
 
-def expand_recurring_event(event: CalendarEvent, start: datetime, end: datetime) -> List[dict]:
+def expand_recurring_event(
+    event: CalendarEvent,
+    start: datetime,
+    end: datetime,
+    max_instances: int = MAX_RECURRING_INSTANCES
+) -> List[dict]:
     """
-    展开重复事件到指定时间范围内的所有实例
+    展开重复事件到指定时间范围内的所有实例（带性能保护）
 
     Args:
         event: 带有 recurrence_rule 的事件
         start: 范围开始
         end: 范围结束
+        max_instances: 最大实例数限制
 
     Returns:
         展开后的事件列表（字典）
@@ -108,15 +125,35 @@ def expand_recurring_event(event: CalendarEvent, start: datetime, end: datetime)
         # 计算事件持续时间
         duration = event.end_time - event.start_time
 
+        # 限制查询范围（防止无限期事件导致性能问题）
+        effective_end = min(end, event.recurrence_end) if event.recurrence_end else end
+
+        # 对于无限期事件，限制最大展开范围
+        max_end = start + timedelta(days=MAX_RECURRING_DAYS)
+        if effective_end > max_end:
+            effective_end = max_end
+            print(f"[Calendar] Limiting recurring event {event.id} expansion to {MAX_RECURRING_DAYS} days")
+
         # 生成在范围内的所有实例
         instances = []
-        recurrence_end = event.recurrence_end or end
+        instance_count = 0
 
-        # 获取范围内的所有日期
-        for dt in rule.between(start, min(end, recurrence_end), inc=True):
+        # 使用迭代器逐个生成（比 between() 更高效，可以提前退出）
+        for dt in rule:
+            # 跳过范围外的日期
+            if dt < start:
+                continue
+            if dt > effective_end:
+                break
+
             # 跳过原始事件（已作为普通事件返回）
             if dt == event.start_time:
                 continue
+
+            # 检查实例数限制
+            if instance_count >= max_instances:
+                print(f"[Calendar] Reached max instances ({max_instances}) for event {event.id}")
+                break
 
             instance = {
                 "id": event.id,  # 虚拟实例使用相同ID但带不同时间
@@ -133,10 +170,13 @@ def expand_recurring_event(event: CalendarEvent, start: datetime, end: datetime)
                 "recurrence_end": event.recurrence_end,
                 "parent_event_id": event.id,  # 指向原始事件
                 "is_recurring": True,
+                "is_instance": True,  # 标记为虚拟实例
+                "instance_date": dt.isoformat(),  # 实例日期（用于唯一标识）
                 "created_at": event.created_at,
                 "updated_at": event.updated_at,
             }
             instances.append(instance)
+            instance_count += 1
 
         return instances
 
@@ -146,7 +186,7 @@ def expand_recurring_event(event: CalendarEvent, start: datetime, end: datetime)
 
 
 def event_to_dict(event: CalendarEvent) -> dict:
-    """将事件对象转为字典，包含 is_recurring 字段"""
+    """将事件对象转为字典，包含 is_recurring 和 timezone 字段"""
     return {
         "id": event.id,
         "title": event.title,
@@ -162,6 +202,9 @@ def event_to_dict(event: CalendarEvent) -> dict:
         "recurrence_end": event.recurrence_end,
         "parent_event_id": event.parent_event_id,
         "is_recurring": bool(event.recurrence_rule),
+        "is_instance": False,  # 原始事件不是实例
+        "instance_date": None,
+        "timezone": getattr(event, 'timezone', 'Asia/Shanghai') or 'Asia/Shanghai',
         "created_at": event.created_at,
         "updated_at": event.updated_at,
     }

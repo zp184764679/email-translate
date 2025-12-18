@@ -79,34 +79,13 @@ if not check_port_available(PORT):
 print(f"单实例检查通过，准备启动后端服务（端口 {PORT}）")
 
 
-# 后台任务：轮询 Claude Batch 结果
-_batch_poll_task = None
-
-
-async def batch_poll_loop():
-    """
-    后台任务：每5分钟轮询 Claude Batch 结果
-
-    Batch API 返回时间不确定（几分钟到几小时），需要定期检查
-    """
-    from services.batch_service import poll_batches
-
-    while True:
-        try:
-            await asyncio.sleep(300)  # 每5分钟检查一次
-            result = await poll_batches()
-            if result.get("completed", 0) > 0:
-                print(f"[BatchPoll] Processed {result['completed']} batches")
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            print(f"[BatchPoll] Error: {e}")
+# 注意：Batch API 轮询已迁移到 Celery 定时任务 (celery_app.py)
+# 任务名：poll-batch-status，每30秒执行一次
+# 这样更可靠，不依赖 FastAPI 进程存活
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _batch_poll_task
-
     # Startup
     print("Starting up...")
     await init_db()
@@ -120,23 +99,13 @@ async def lifespan(app: FastAPI):
         await session.execute(text("SELECT 1"))
     print("Connection pool ready")
 
-    # 启动后台轮询任务
-    _batch_poll_task = asyncio.create_task(batch_poll_loop())
-    print("Batch poll task started (every 5 minutes)")
+    # 注意：Batch API 轮询由 Celery Beat 处理，无需在此启动
+    print("Ready. Batch polling handled by Celery Beat (poll-batch-status task)")
 
     yield
 
     # Shutdown
     print("Shutting down...")
-
-    # 取消后台任务
-    if _batch_poll_task:
-        _batch_poll_task.cancel()
-        try:
-            await _batch_poll_task
-        except asyncio.CancelledError:
-            pass
-        print("Batch poll task stopped")
 
 
 app = FastAPI(

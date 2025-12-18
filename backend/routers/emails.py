@@ -464,18 +464,54 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                     new_email = await crud.create_email(db, email_data)
                     saved_count += 1
 
-                    # 保存附件到数据库
+                    # 保存附件到数据库（带内容去重）
                     if attachments:
+                        saved_att_count = 0
+                        reused_att_count = 0
                         for att in attachments:
+                            content_hash = att.get("content_hash")
+
+                            # 内容去重：检查是否已有相同内容的附件
+                            existing_path = None
+                            if content_hash:
+                                existing_result = await db.execute(
+                                    select(Attachment.file_path).where(
+                                        Attachment.content_hash == content_hash
+                                    ).limit(1)
+                                )
+                                existing_row = existing_result.first()
+                                if existing_row:
+                                    existing_path = existing_row[0]
+                                    # 检查文件是否真实存在
+                                    import os
+                                    if existing_path and os.path.exists(existing_path):
+                                        # 复用现有文件，删除新保存的重复文件
+                                        new_path = att.get("file_path")
+                                        if new_path and os.path.exists(new_path) and new_path != existing_path:
+                                            try:
+                                                os.remove(new_path)
+                                                print(f"[Attachment] Removed duplicate file: {new_path}")
+                                            except OSError:
+                                                pass
+                                        reused_att_count += 1
+                                    else:
+                                        existing_path = None  # 文件不存在，使用新文件
+
                             attachment = Attachment(
                                 email_id=new_email.id,
                                 filename=att.get("filename"),
-                                file_path=att.get("file_path"),
+                                file_path=existing_path or att.get("file_path"),
                                 file_size=att.get("file_size"),
-                                mime_type=att.get("mime_type")
+                                mime_type=att.get("mime_type"),
+                                content_hash=content_hash
                             )
                             db.add(attachment)
-                        print(f"[EmailSync] Saved {len(attachments)} attachments for email {new_email.id}")
+                            saved_att_count += 1
+
+                        if reused_att_count > 0:
+                            print(f"[EmailSync] Saved {saved_att_count} attachments ({reused_att_count} reused existing files) for email {new_email.id}")
+                        else:
+                            print(f"[EmailSync] Saved {saved_att_count} attachments for email {new_email.id}")
 
                 except IntegrityError:
                     # 处理并发请求导致的重复插入

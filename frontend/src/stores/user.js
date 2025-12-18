@@ -95,8 +95,36 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
+  // 播放新邮件提示音
+  function playNotificationSound() {
+    try {
+      // 使用 Web Audio API 播放简单的提示音
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)()
+      const oscillator = audioContext.createOscillator()
+      const gainNode = audioContext.createGain()
+
+      oscillator.connect(gainNode)
+      gainNode.connect(audioContext.destination)
+
+      // 设置音调和音量
+      oscillator.frequency.setValueAtTime(880, audioContext.currentTime) // A5 音符
+      oscillator.type = 'sine'
+      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime)
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3)
+
+      // 播放
+      oscillator.start(audioContext.currentTime)
+      oscillator.stop(audioContext.currentTime + 0.3)
+    } catch (e) {
+      console.log('播放提示音失败:', e)
+    }
+  }
+
   // 显示新邮件桌面通知
   function showNewEmailNotification(count) {
+    // 播放提示音
+    playNotificationSound()
+
     // 检查是否在 Electron 环境
     if (typeof window !== 'undefined' && window.Notification) {
       if (Notification.permission === 'granted') {

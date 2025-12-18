@@ -398,11 +398,32 @@ VITE_API_URL=http://localhost:8000/api
 如果数据库已存在，需要运行迁移脚本添加新字段：
 ```bash
 cd backend
+# 基础功能
 python -m migrations.add_email_flags
 python -m migrations.add_email_labels
 python -m migrations.add_email_folders
+python -m migrations.add_translation_cache
+python -m migrations.add_draft_recipient_fields
+python -m migrations.add_email_rules
+
+# 日历功能
 python -m migrations.add_calendar_events
+python -m migrations.add_event_reminder
+python -m migrations.add_recurrence_fields
+
+# 审批和翻译
+python -m migrations.add_approval_fields
+python -m migrations.add_translation_status
+python -m migrations.add_sent_email_mapping
+python -m migrations.add_attachment_hash
+python -m migrations.add_batch_account_id
+
+# 数据清理（可选）
+python -m migrations.remove_shared_translation_originals
+python -m migrations.encrypt_passwords
 ```
+
+**注意**：CI/CD 部署流程会自动执行所有迁移脚本，见 `.github/workflows/deploy.yml`
 
 ## 安全机制
 
@@ -827,15 +848,41 @@ CELERY_RESULT_BACKEND=redis://localhost:6379/2
 | 邮件签名 | 自定义签名模板，支持多语言翻译 |
 | 收件人自动补全 | 标签式输入，支持历史联系人搜索 |
 | 邮件回复增强 | 全部回复、收件人/抄送去重、邮箱验证 |
+| 快捷键系统 | 邮件列表和详情页完整快捷键支持 |
+| 新邮件声音提示 | Web Audio API 播放提示音 |
+
+### 快捷键一览
+
+**邮件列表页**:
+| 快捷键 | 功能 |
+|--------|------|
+| j / k | 上下选择邮件 |
+| Enter | 打开邮件 |
+| x | 选择/取消 |
+| s | 切换星标 |
+| d | 删除 |
+| m / u | 标记已读/未读 |
+| r | 回复 |
+| f | 转发 |
+| l | 添加标签 |
+| Ctrl+a | 全选 |
+
+**邮件详情页**:
+| 快捷键 | 功能 |
+|--------|------|
+| r | 回复 |
+| a | 全部回复 |
+| f | 转发 |
+| s | 切换星标 |
+| d | 删除 |
+| j / k | 线程中上下封 |
+| l | 添加标签 |
+| Escape | 返回列表 |
+| Ctrl+Enter | 发送回复（撰写时）|
 
 ### 待实现功能
 
-#### 低优先级 🟢
-
-| 功能 | 说明 | 状态 |
-|------|------|------|
-| 快捷键系统 | 删除(D)、回复(R)、标记(S) | 仅Enter键 |
-| 新邮件声音提示 | 播放提示音 | 未实现 |
+当前所有核心功能已实现，暂无高优先级待实现功能。
 
 ### 配置参数
 
@@ -959,6 +1006,35 @@ git tag -d v1.0.5 && git push origin :refs/tags/v1.0.5
 | 修订号 | Bug 修复 | 1.0.0 → 1.0.1 |
 
 ## 更新日志
+
+### v1.0.44 (2025-12-18)
+
+#### Bug 修复
+- **Batch API 轮询任务修复**：修正 `poll_batch_status` 中的导入错误和异步调用问题
+- **维护任务模型引用修复**：`reset_monthly_quota` 中 `UsageProvider` 改为 `TranslationUsage`
+- **翻译状态字段修复**：移除不存在的 `translated_at` 字段引用，改用 `translation_status`
+
+#### 新功能
+- **新邮件声音提示**：使用 Web Audio API 播放提示音
+- **TranslationBatch 账户关联**：添加 `account_id` 字段，支持批次完成通知
+
+#### 架构优化
+- **批处理轮询统一**：移除 main.py 中的重复轮询，统一由 Celery Beat 处理
+- **月度配额重置**：在 Celery Beat 中注册定时任务，每月1日自动执行
+
+#### CI/CD 改进
+- **完整迁移脚本**：deploy.yml 现执行所有 17 个迁移脚本
+- **环境变量补充**：.env.example 添加 Redis、Celery、智能路由等配置
+
+#### 文档更新
+- **快捷键文档**：完整记录邮件列表页和详情页的快捷键
+- **迁移脚本列表**：更新为完整的 17 个迁移脚本
+
+#### 数据库迁移
+```bash
+# 新增迁移（为 TranslationBatch 添加 account_id 字段）
+python -m migrations.add_batch_account_id
+```
 
 ### v1.0.35 (2025-12-15)
 

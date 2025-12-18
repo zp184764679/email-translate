@@ -115,7 +115,7 @@ def translate_email_task(self, email_id: int, account_id: int, force: bool = Fal
         email.subject_translated = subject_translated
         email.body_translated = body_translated
         email.is_translated = True
-        email.translated_at = datetime.utcnow()
+        email.translation_status = "completed"
 
         # 保存到共享翻译表
         if email.message_id:
@@ -261,69 +261,27 @@ def poll_batch_status(self):
     轮询 Claude Batch API 状态
 
     定时任务，检查所有进行中的批次并处理完成的结果
+    使用 batch_service 的 poll_and_process_batches 方法处理
     """
-    from database.models import TranslationBatch, Email
-    from services.batch_service import check_batch_status, get_batch_results
-
-    db = get_db_session()
+    from services.batch_service import get_batch_service
 
     try:
-        # 查询所有进行中的批次
-        batches = db.query(TranslationBatch).filter(
-            TranslationBatch.status.in_(["submitted", "in_progress"])
-        ).all()
+        # 使用 asyncio.run() 调用异步方法
+        service = get_batch_service()
+        result = asyncio.run(service.poll_and_process_batches())
 
-        if not batches:
-            return {"checked": 0, "completed": 0}
+        checked = result.get("checked", 0)
+        completed = result.get("completed", 0)
 
-        completed_count = 0
-
-        for batch in batches:
-            try:
-                # 检查批次状态
-                status = check_batch_status(batch.batch_id)
-
-                if status == "completed":
-                    # 获取并处理结果
-                    results = get_batch_results(batch.batch_id)
-
-                    for result in results:
-                        email_id = result.get("email_id")
-                        if email_id:
-                            email = db.query(Email).filter(Email.id == email_id).first()
-                            if email:
-                                email.body_translated = result.get("body_translated")
-                                email.subject_translated = result.get("subject_translated")
-                                email.is_translated = True
-                                email.translated_at = datetime.utcnow()
-
-                    batch.status = "completed"
-                    batch.completed_at = datetime.utcnow()
-                    completed_count += 1
-
-                    # 通知用户
-                    notify_completion(batch.account_id, "batch_complete", {
-                        "batch_id": batch.id,
-                        "email_count": len(results)
-                    })
-
-                elif status == "failed":
-                    batch.status = "failed"
-                    batch.completed_at = datetime.utcnow()
-
-            except Exception as e:
-                print(f"[BatchPoll] Error checking batch {batch.batch_id}: {e}")
-
-        db.commit()
+        if completed > 0:
+            print(f"[BatchPoll] Checked {checked} batches, completed {completed}")
 
         return {
-            "checked": len(batches),
-            "completed": completed_count
+            "checked": checked,
+            "completed": completed,
+            "results": result.get("results", [])
         }
 
     except Exception as e:
-        db.rollback()
         print(f"[BatchPoll] Error: {e}")
         return {"error": str(e)}
-    finally:
-        db.close()

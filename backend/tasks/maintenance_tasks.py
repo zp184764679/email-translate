@@ -249,9 +249,9 @@ def reset_monthly_quota(self):
     """
     每月1日重置翻译配额
 
-    重置所有翻译引擎的月度使用量
+    为新月份初始化翻译用量记录，并重新启用可能被禁用的引擎
     """
-    from database.models import UsageProvider
+    from database.models import TranslationUsage
 
     db = get_db_session()
 
@@ -266,19 +266,45 @@ def reset_monthly_quota(self):
                 "reason": f"Not first day of month (today is {today.day})"
             }
 
-        # 重置所有引擎的月度用量
-        reset_count = db.query(UsageProvider).update({
-            "current_month_chars": 0,
-            "is_disabled": False,
-            "last_reset_at": datetime.utcnow()
-        }, synchronize_session=False)
+        # 当前月份字符串
+        year_month = today.strftime("%Y-%m")
+
+        # 重新启用上个月被禁用的引擎（针对旧记录）
+        last_month = (today.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+        reset_count = db.query(TranslationUsage).filter(
+            TranslationUsage.year_month == last_month,
+            TranslationUsage.is_disabled == True
+        ).update({"is_disabled": False}, synchronize_session=False)
+
+        # 为常用翻译引擎创建本月初始记录（如果不存在）
+        providers = ["ollama", "claude", "deepl", "tencent"]
+        created_count = 0
+
+        for provider in providers:
+            existing = db.query(TranslationUsage).filter(
+                TranslationUsage.provider == provider,
+                TranslationUsage.year_month == year_month
+            ).first()
+
+            if not existing:
+                new_usage = TranslationUsage(
+                    provider=provider,
+                    year_month=year_month,
+                    total_chars=0,
+                    total_requests=0,
+                    is_disabled=False
+                )
+                db.add(new_usage)
+                created_count += 1
 
         db.commit()
 
-        print(f"[QuotaReset] Reset quota for {reset_count} providers")
+        print(f"[QuotaReset] Reset {reset_count} disabled providers, created {created_count} new records for {year_month}")
         return {
             "success": True,
             "reset_count": reset_count,
+            "created_count": created_count,
+            "year_month": year_month,
             "timestamp": datetime.utcnow().isoformat()
         }
 

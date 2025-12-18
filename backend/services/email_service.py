@@ -211,14 +211,71 @@ class EmailService:
 
         return emails
 
-    # IMAP文件夹映射（21cn企业邮箱）
-    IMAP_FOLDER_MAP = {
-        "inbox": "INBOX",
-        "sent": "Sent Messages",      # 已发送
-        "drafts": "Drafts",           # 草稿
-        "trash": "Deleted Messages",  # 已删除
-        "spam": "Junk",               # 垃圾邮件
+    # IMAP文件夹映射（支持多种邮件服务商）
+    # 格式：{标准名: [可能的IMAP名称列表]}
+    IMAP_FOLDER_ALIASES = {
+        "inbox": ["INBOX", "收件箱"],
+        "sent": ["Sent Messages", "Sent", "已发送", "Sent Items", "INBOX.Sent"],
+        "drafts": ["Drafts", "草稿箱", "草稿", "INBOX.Drafts"],
+        "trash": ["Deleted Messages", "Trash", "已删除", "Deleted Items", "INBOX.Trash", "垃圾箱"],
+        "spam": ["Junk", "Spam", "垃圾邮件", "INBOX.Junk", "Junk E-mail"],
     }
+
+    # 缓存实际可用的文件夹映射
+    _folder_cache: Dict[str, str] = None
+
+    def _build_folder_map(self) -> Dict[str, str]:
+        """
+        动态构建文件夹映射
+
+        根据实际可用的IMAP文件夹，匹配标准名称
+        """
+        if self._folder_cache is not None:
+            return self._folder_cache
+
+        available_folders = self.list_folders()
+        if not available_folders:
+            # 使用默认映射（21cn格式）
+            self._folder_cache = {
+                "inbox": "INBOX",
+                "sent": "Sent Messages",
+                "drafts": "Drafts",
+                "trash": "Deleted Messages",
+                "spam": "Junk",
+            }
+            return self._folder_cache
+
+        # 构建实际映射
+        folder_map = {}
+        available_lower = {f.lower(): f for f in available_folders}
+
+        for standard_name, aliases in self.IMAP_FOLDER_ALIASES.items():
+            for alias in aliases:
+                # 精确匹配（不区分大小写）
+                if alias.lower() in available_lower:
+                    folder_map[standard_name] = available_lower[alias.lower()]
+                    print(f"[IMAP] Mapped '{standard_name}' -> '{folder_map[standard_name]}'")
+                    break
+            else:
+                # 如果没有找到，使用第一个别名作为默认值
+                folder_map[standard_name] = aliases[0]
+                print(f"[IMAP] No match for '{standard_name}', using default '{aliases[0]}'")
+
+        self._folder_cache = folder_map
+        return folder_map
+
+    def get_imap_folder(self, standard_name: str) -> str:
+        """
+        获取标准文件夹名对应的IMAP文件夹名
+
+        Args:
+            standard_name: 标准名称（inbox, sent, drafts, trash, spam）
+
+        Returns:
+            实际的IMAP文件夹名
+        """
+        folder_map = self._build_folder_map()
+        return folder_map.get(standard_name, standard_name)
 
     def list_folders(self) -> List[str]:
         """列出所有可用的IMAP文件夹"""
@@ -244,11 +301,16 @@ class EmailService:
 
         return folders
 
+    def reset_folder_cache(self):
+        """重置文件夹缓存，强制重新发现"""
+        self._folder_cache = None
+
     def fetch_emails_multi_folder(
         self,
         folders: List[str] = None,
         since_date: datetime = None,
-        limit_per_folder: int = 200
+        limit_per_folder: int = 200,
+        existing_message_ids: set = None
     ) -> Dict[str, List[Dict]]:
         """
         从多个IMAP文件夹拉取邮件
@@ -257,6 +319,7 @@ class EmailService:
             folders: 要拉取的文件夹列表，如 ["inbox", "sent"]
             since_date: 起始日期
             limit_per_folder: 每个文件夹的邮件数量限制
+            existing_message_ids: 已存在的邮件ID集合（用于去重）
 
         Returns:
             {
@@ -270,8 +333,8 @@ class EmailService:
         results = {}
 
         for folder_key in folders:
-            # 获取IMAP文件夹名称
-            imap_folder = self.IMAP_FOLDER_MAP.get(folder_key, folder_key)
+            # 使用动态文件夹映射
+            imap_folder = self.get_imap_folder(folder_key)
 
             print(f"[EmailService] Fetching from folder: {folder_key} ({imap_folder})")
 
@@ -279,7 +342,8 @@ class EmailService:
                 emails = self.fetch_emails(
                     folder=imap_folder,
                     since_date=since_date,
-                    limit=limit_per_folder
+                    limit=limit_per_folder,
+                    existing_message_ids=existing_message_ids
                 )
 
                 # 根据文件夹设置direction
@@ -405,6 +469,9 @@ class EmailService:
             return match.group(1)
         return header.strip()
 
+    # 日期解析失败计数（用于统计）
+    _date_parse_failures = []
+
     def _parse_email_date(self, date_str: str) -> datetime:
         """解析邮件日期，支持多种格式
 
@@ -412,48 +479,80 @@ class EmailService:
             date_str: 日期字符串
 
         Returns:
-            datetime 对象，解析失败时返回当前时间并记录警告
+            datetime 对象，解析失败时返回当前时间并记录详细日志
         """
         if not date_str:
+            print("[Date] 日期字符串为空，使用当前时间")
             return datetime.utcnow()
 
-        # 1. 首先尝试标准解析
+        original_date_str = date_str  # 保留原始字符串用于日志
+
+        # 1. 首先尝试标准 RFC 2822 解析
         try:
-            return parsedate_to_datetime(date_str)
-        except Exception:
+            result = parsedate_to_datetime(date_str)
+            return result
+        except Exception as e:
+            # 记录但继续尝试其他方式
             pass
 
-        # 2. 尝试常见的非标准格式
+        # 2. 尝试 dateutil 解析（更宽松）
         from dateutil import parser as dateutil_parser
 
-        # 清理日期字符串（移除多余空格和括号注释）
+        # 清理日期字符串
         cleaned = re.sub(r'\([^)]*\)', '', date_str).strip()  # 移除括号内容如 (CST)
         cleaned = re.sub(r'\s+', ' ', cleaned)  # 合并多余空格
 
         try:
-            return dateutil_parser.parse(cleaned)
+            result = dateutil_parser.parse(cleaned)
+            print(f"[Date] dateutil 解析成功: '{original_date_str}' -> {result}")
+            return result
         except Exception:
             pass
 
-        # 3. 尝试一些已知的特殊格式
+        # 3. 尝试已知的特殊格式
         special_formats = [
-            "%Y-%m-%d %H:%M:%S",
-            "%d %b %Y %H:%M:%S",
-            "%Y/%m/%d %H:%M:%S",
-            "%d/%m/%Y %H:%M:%S",
-            "%Y-%m-%dT%H:%M:%S",
-            "%a %b %d %H:%M:%S %Y",
+            ("%Y-%m-%d %H:%M:%S", "ISO 基础格式"),
+            ("%d %b %Y %H:%M:%S", "RFC 风格"),
+            ("%Y/%m/%d %H:%M:%S", "斜杠分隔"),
+            ("%d/%m/%Y %H:%M:%S", "欧洲格式"),
+            ("%Y-%m-%dT%H:%M:%S", "ISO 8601"),
+            ("%a %b %d %H:%M:%S %Y", "Unix 风格"),
+            ("%Y年%m月%d日 %H:%M:%S", "中文格式"),
+            ("%Y年%m月%d日", "中文日期"),
+            ("%m/%d/%Y %H:%M:%S", "美国格式"),
+            ("%d-%m-%Y %H:%M:%S", "欧洲短横线"),
         ]
 
-        for fmt in special_formats:
+        for fmt, fmt_name in special_formats:
             try:
-                return datetime.strptime(cleaned, fmt)
+                result = datetime.strptime(cleaned, fmt)
+                print(f"[Date] {fmt_name} 解析成功: '{original_date_str}' -> {result}")
+                return result
             except ValueError:
                 continue
 
-        # 解析失败，记录警告并返回当前时间
-        print(f"[Date] 无法解析日期格式: '{date_str}', 使用当前时间")
+        # 4. 解析完全失败，记录详细日志
+        failure_info = {
+            "original": original_date_str,
+            "cleaned": cleaned,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        self._date_parse_failures.append(failure_info)
+
+        # 限制失败记录数量
+        if len(self._date_parse_failures) > 100:
+            self._date_parse_failures = self._date_parse_failures[-50:]
+
+        print(f"[Date] ⚠️ 无法解析日期格式:")
+        print(f"  原始: '{original_date_str}'")
+        print(f"  清理后: '{cleaned}'")
+        print(f"  已累计 {len(self._date_parse_failures)} 次解析失败")
+
         return datetime.utcnow()
+
+    def get_date_parse_failures(self) -> List[Dict]:
+        """获取日期解析失败记录（用于调试）"""
+        return self._date_parse_failures.copy()
 
     def _get_body(self, msg) -> Tuple[Optional[str], Optional[str]]:
         """Extract text and HTML body from email"""

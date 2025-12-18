@@ -212,6 +212,7 @@ class TranslationBatch(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     batch_id = Column(String(255), unique=True, index=True)  # Claude 返回的批次 ID
+    account_id = Column(Integer, ForeignKey("email_accounts.id"), nullable=True)  # 提交者账户（用于通知）
 
     # 状态: pending(待提交), submitted(已提交), in_progress(处理中), ended(完成), failed(失败), expired(过期), canceled(取消)
     status = Column(String(20), default="pending")
@@ -228,6 +229,7 @@ class TranslationBatch(Base):
     expires_at = Column(DateTime)      # 过期时间（Claude Batch 24小时内有效）
 
     # 关联
+    account = relationship("EmailAccount")
     items = relationship("TranslationBatchItem", back_populates="batch")
 
 
@@ -302,10 +304,12 @@ class EmailSignature(Base):
     id = Column(Integer, primary_key=True, index=True)
     account_id = Column(Integer, ForeignKey("email_accounts.id"), nullable=False)
     name = Column(String(100), nullable=False)  # 签名名称
+    category = Column(String(50), default="default")  # 模板类别：default/formal/informal/holiday/auto-reply
     content_chinese = Column(Text)  # 中文签名内容
     content_translated = Column(Text)  # 翻译后的签名（可选）
     target_language = Column(String(10), default="en")  # 目标语言
     is_default = Column(Boolean, default=False)  # 是否为默认签名
+    sort_order = Column(Integer, default=0)  # 排序顺序
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -344,6 +348,7 @@ class EmailLabel(Base):
     name = Column(String(50), nullable=False)
     color = Column(String(20), default="#409EFF")  # 标签颜色
     description = Column(String(200))
+    sort_order = Column(Integer, default=0, index=True)  # 排序顺序（支持拖拽排序）
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # 关系
@@ -438,6 +443,43 @@ class EmailExtraction(Base):
     )
 
 
+class TranslationFeedback(Base):
+    """翻译质量反馈表 - 用户标记翻译问题"""
+    __tablename__ = "translation_feedbacks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("email_accounts.id"), nullable=False)
+    email_id = Column(Integer, ForeignKey("emails.id"), nullable=True)  # 关联的邮件
+
+    # 反馈内容
+    feedback_type = Column(String(50), nullable=False)  # inaccurate, missing, wrong_term, other
+    original_text = Column(Text)  # 原文片段
+    translated_text = Column(Text)  # 翻译结果
+    suggested_text = Column(Text)  # 用户建议的翻译
+    comment = Column(Text)  # 用户说明
+
+    # 翻译上下文
+    provider = Column(String(20))  # 使用的翻译引擎
+    source_lang = Column(String(10))
+    target_lang = Column(String(10))
+
+    # 状态
+    status = Column(String(20), default="pending")  # pending, reviewed, applied, dismissed
+    reviewed_by = Column(Integer, ForeignKey("email_accounts.id"), nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    review_comment = Column(Text)  # 审核意见
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # 关系
+    account = relationship("EmailAccount", foreign_keys=[account_id])
+    email = relationship("Email")
+
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
+
+
 class ApproverGroup(Base):
     """审批人组表 - 单选组模式"""
     __tablename__ = "approver_groups"
@@ -501,6 +543,35 @@ class EmailRule(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
+
+
+class RuleExecution(Base):
+    """规则执行日志表 - 记录每次规则匹配和执行情况"""
+    __tablename__ = "rule_executions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rule_id = Column(Integer, ForeignKey("email_rules.id", ondelete="CASCADE"), nullable=False)
+    email_id = Column(Integer, ForeignKey("emails.id", ondelete="CASCADE"), nullable=False)
+    account_id = Column(Integer, ForeignKey("email_accounts.id"), nullable=False)
+
+    # 执行结果
+    matched = Column(Boolean, default=True)  # 是否匹配
+    actions_applied = Column(JSON)  # 执行的动作列表 ["move_to_folder:5", "add_label:3"]
+    actions_success = Column(Boolean, default=True)  # 所有动作是否成功
+    error_message = Column(Text, nullable=True)  # 错误信息
+
+    # 匹配详情（用于调试）
+    matched_conditions = Column(JSON, nullable=True)  # 匹配的条件详情
+
+    executed_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    # 关系
+    rule = relationship("EmailRule")
+    email = relationship("Email")
 
     __table_args__ = (
         {'mysql_engine': 'InnoDB'},

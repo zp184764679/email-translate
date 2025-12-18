@@ -783,3 +783,135 @@ async def get_batch_items(
             for item in items
         ]
     }
+
+
+# ============ 翻译质量反馈 API ============
+
+class FeedbackCreate(BaseModel):
+    email_id: Optional[int] = None
+    feedback_type: str  # inaccurate, missing, wrong_term, other
+    original_text: Optional[str] = None
+    translated_text: Optional[str] = None
+    suggested_text: Optional[str] = None
+    comment: Optional[str] = None
+    provider: Optional[str] = None
+    source_lang: Optional[str] = None
+    target_lang: Optional[str] = None
+
+
+class FeedbackResponse(BaseModel):
+    id: int
+    account_id: int
+    email_id: Optional[int]
+    feedback_type: str
+    original_text: Optional[str]
+    translated_text: Optional[str]
+    suggested_text: Optional[str]
+    comment: Optional[str]
+    provider: Optional[str]
+    status: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+@router.post("/feedback", response_model=FeedbackResponse)
+async def submit_translation_feedback(
+    feedback: FeedbackCreate,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    提交翻译质量反馈
+
+    反馈类型:
+    - inaccurate: 翻译不准确
+    - missing: 内容遗漏
+    - wrong_term: 术语错误
+    - other: 其他问题
+    """
+    from database.models import TranslationFeedback
+
+    # 验证反馈类型
+    valid_types = ["inaccurate", "missing", "wrong_term", "other"]
+    if feedback.feedback_type not in valid_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"无效的反馈类型，可选: {', '.join(valid_types)}"
+        )
+
+    new_feedback = TranslationFeedback(
+        account_id=account.id,
+        email_id=feedback.email_id,
+        feedback_type=feedback.feedback_type,
+        original_text=feedback.original_text,
+        translated_text=feedback.translated_text,
+        suggested_text=feedback.suggested_text,
+        comment=feedback.comment,
+        provider=feedback.provider,
+        source_lang=feedback.source_lang,
+        target_lang=feedback.target_lang,
+        status="pending"
+    )
+
+    db.add(new_feedback)
+    await db.commit()
+    await db.refresh(new_feedback)
+
+    return new_feedback
+
+
+@router.get("/feedback", response_model=List[FeedbackResponse])
+async def get_feedbacks(
+    status: Optional[str] = None,
+    limit: int = 50,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """获取翻译反馈列表"""
+    from database.models import TranslationFeedback
+
+    query = select(TranslationFeedback).order_by(TranslationFeedback.created_at.desc()).limit(limit)
+
+    if status:
+        query = query.where(TranslationFeedback.status == status)
+
+    result = await db.execute(query)
+    return result.scalars().all()
+
+
+@router.get("/feedback/stats")
+async def get_feedback_stats(
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """获取翻译反馈统计"""
+    from database.models import TranslationFeedback
+    from sqlalchemy import case
+
+    result = await db.execute(
+        select(
+            func.count(TranslationFeedback.id).label("total"),
+            func.sum(case((TranslationFeedback.status == "pending", 1), else_=0)).label("pending"),
+            func.sum(case((TranslationFeedback.status == "reviewed", 1), else_=0)).label("reviewed"),
+            func.sum(case((TranslationFeedback.status == "applied", 1), else_=0)).label("applied"),
+            func.sum(case((TranslationFeedback.feedback_type == "inaccurate", 1), else_=0)).label("inaccurate"),
+            func.sum(case((TranslationFeedback.feedback_type == "wrong_term", 1), else_=0)).label("wrong_term"),
+            func.sum(case((TranslationFeedback.feedback_type == "missing", 1), else_=0)).label("missing")
+        )
+    )
+
+    stats = result.one()
+
+    return {
+        "total": stats.total or 0,
+        "pending": stats.pending or 0,
+        "reviewed": stats.reviewed or 0,
+        "applied": stats.applied or 0,
+        "by_type": {
+            "inaccurate": stats.inaccurate or 0,
+            "wrong_term": stats.wrong_term or 0,
+            "missing": stats.missing or 0
+        }
+    }

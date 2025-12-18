@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete, func, update, case
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from typing import List, Optional
@@ -51,6 +51,22 @@ FolderResponse.model_rebuild()
 
 class EmailFolderAction(BaseModel):
     email_ids: List[int]
+
+
+class FolderReorderRequest(BaseModel):
+    """文件夹重排序请求"""
+    folder_ids: List[int]  # 按新顺序排列的文件夹 ID 列表
+    parent_id: Optional[int] = None  # 可选：只重排指定父文件夹下的子文件夹
+
+
+class FolderStatsResponse(BaseModel):
+    """文件夹统计响应"""
+    total_folders: int
+    total_emails_in_folders: int
+    folders_with_counts: List[dict]
+    most_used_folder: Optional[dict] = None
+    empty_folders: List[dict] = []
+    max_depth: int = 0
 
 
 # ============ Routes ============
@@ -458,6 +474,128 @@ async def get_folder_emails(
     return {
         "emails": emails,
         "total": total
+    }
+
+
+# ============ 文件夹排序和统计 API ============
+@router.post("/reorder")
+async def reorder_folders(
+    data: FolderReorderRequest,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    批量重排序文件夹（拖拽排序）
+
+    传入按新顺序排列的文件夹 ID 列表，自动更新 sort_order
+    可选指定 parent_id 只重排某个父文件夹下的子文件夹
+    """
+    if not data.folder_ids:
+        return {"message": "无文件夹需要排序"}
+
+    # 验证所有文件夹都属于当前用户
+    query = select(EmailFolder.id).where(
+        EmailFolder.account_id == account.id,
+        EmailFolder.id.in_(data.folder_ids),
+        EmailFolder.is_system == False  # 系统文件夹不可重排
+    )
+
+    # 如果指定了父文件夹，只重排该父文件夹下的
+    if data.parent_id is not None:
+        if data.parent_id == 0:  # 0 表示根级别
+            query = query.where(EmailFolder.parent_id.is_(None))
+        else:
+            query = query.where(EmailFolder.parent_id == data.parent_id)
+
+    result = await db.execute(query)
+    valid_ids = set(row[0] for row in result.fetchall())
+
+    # 过滤掉不属于当前用户或不在指定父文件夹下的
+    filtered_ids = [fid for fid in data.folder_ids if fid in valid_ids]
+
+    if not filtered_ids:
+        raise HTTPException(status_code=400, detail="未找到有效的文件夹")
+
+    # 使用 CASE WHEN 原子性更新所有排序
+    case_conditions = []
+    for index, folder_id in enumerate(filtered_ids):
+        case_conditions.append((EmailFolder.id == folder_id, index))
+
+    await db.execute(
+        update(EmailFolder)
+        .where(EmailFolder.id.in_(filtered_ids))
+        .values(sort_order=case(*case_conditions, else_=EmailFolder.sort_order))
+    )
+    await db.commit()
+
+    return {
+        "message": f"已更新 {len(filtered_ids)} 个文件夹的排序",
+        "updated_count": len(filtered_ids)
+    }
+
+
+@router.get("/stats", response_model=FolderStatsResponse)
+async def get_folder_stats(
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """获取文件夹使用统计"""
+    # 获取所有文件夹及其邮件数量
+    result = await db.execute(
+        select(EmailFolder)
+        .where(EmailFolder.account_id == account.id)
+        .options(selectinload(EmailFolder.emails))
+        .order_by(EmailFolder.sort_order)
+    )
+    folders = result.scalars().all()
+
+    folders_with_counts = []
+    total_emails_in_folders = 0
+    most_used_folder = None
+    max_count = 0
+    empty_folders = []
+    max_depth = 0
+
+    # 计算每个文件夹的深度
+    folder_depths = {}
+    for folder in folders:
+        depth = 0
+        parent_id = folder.parent_id
+        while parent_id:
+            depth += 1
+            parent_folder = next((f for f in folders if f.id == parent_id), None)
+            parent_id = parent_folder.parent_id if parent_folder else None
+        folder_depths[folder.id] = depth
+        max_depth = max(max_depth, depth)
+
+    for folder in folders:
+        email_count = len(folder.emails) if folder.emails else 0
+        folder_info = {
+            "id": folder.id,
+            "name": folder.name,
+            "parent_id": folder.parent_id,
+            "color": folder.color,
+            "is_system": folder.is_system,
+            "depth": folder_depths.get(folder.id, 0),
+            "email_count": email_count
+        }
+        folders_with_counts.append(folder_info)
+        total_emails_in_folders += email_count
+
+        if email_count > max_count:
+            max_count = email_count
+            most_used_folder = folder_info
+
+        if email_count == 0 and not folder.is_system:
+            empty_folders.append(folder_info)
+
+    return {
+        "total_folders": len(folders),
+        "total_emails_in_folders": total_emails_in_folders,
+        "folders_with_counts": folders_with_counts,
+        "most_used_folder": most_used_folder,
+        "empty_folders": empty_folders,
+        "max_depth": max_depth
     }
 
 

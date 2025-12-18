@@ -1,12 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func, delete, and_
+from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from database.database import get_db
-from database.models import EmailAccount, Supplier, Glossary
+from database.models import EmailAccount, Supplier, Glossary, Email
 from routers.users import get_current_account
 
 router = APIRouter(prefix="/api/suppliers", tags=["suppliers"])
@@ -38,6 +39,31 @@ class SupplierUpdate(BaseModel):
     email_domain: Optional[str] = None
     contact_email: Optional[str] = None
     notes: Optional[str] = None
+
+
+class SupplierStatsResponse(BaseModel):
+    """供应商统计响应"""
+    supplier_id: int
+    supplier_name: str
+    email_domain: Optional[str]
+    total_emails: int
+    received_emails: int
+    sent_emails: int
+    unread_emails: int
+    translated_emails: int
+    last_email_date: Optional[datetime]
+    emails_last_7_days: int
+    emails_last_30_days: int
+    glossary_count: int
+
+
+class AllSuppliersStatsResponse(BaseModel):
+    """所有供应商统计汇总"""
+    total_suppliers: int
+    total_emails_from_suppliers: int
+    suppliers_with_stats: List[SupplierStatsResponse]
+    most_active_supplier: Optional[dict] = None
+    suppliers_without_emails: List[dict] = []
 
 
 # ============ Routes ============
@@ -195,3 +221,268 @@ async def delete_supplier(
     await db.commit()
 
     return {"message": "供应商已删除"}
+
+
+# ============ 供应商统计 API ============
+@router.get("/stats/all", response_model=AllSuppliersStatsResponse)
+async def get_all_suppliers_stats(
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """获取所有供应商的邮件统计汇总"""
+    now = datetime.utcnow()
+    seven_days_ago = now - timedelta(days=7)
+    thirty_days_ago = now - timedelta(days=30)
+
+    # 获取所有供应商
+    supplier_result = await db.execute(
+        select(Supplier).order_by(Supplier.name)
+    )
+    suppliers = supplier_result.scalars().all()
+
+    suppliers_with_stats = []
+    total_emails_from_suppliers = 0
+    most_active_supplier = None
+    max_emails = 0
+    suppliers_without_emails = []
+
+    for supplier in suppliers:
+        if not supplier.email_domain:
+            suppliers_without_emails.append({
+                "id": supplier.id,
+                "name": supplier.name,
+                "reason": "未设置邮箱域名"
+            })
+            continue
+
+        domain = supplier.email_domain.lower()
+
+        # 统计该供应商的邮件
+        # 收到的邮件（发件人域名匹配）
+        received_result = await db.execute(
+            select(func.count(Email.id)).where(
+                Email.account_id == account.id,
+                func.lower(Email.sender).like(f"%@{domain}%")
+            )
+        )
+        received_count = received_result.scalar() or 0
+
+        # 发送的邮件（收件人域名匹配）
+        sent_result = await db.execute(
+            select(func.count(Email.id)).where(
+                Email.account_id == account.id,
+                func.lower(Email.recipients).like(f"%@{domain}%")
+            )
+        )
+        sent_count = sent_result.scalar() or 0
+
+        total_emails = received_count + sent_count
+
+        if total_emails == 0:
+            suppliers_without_emails.append({
+                "id": supplier.id,
+                "name": supplier.name,
+                "email_domain": supplier.email_domain,
+                "reason": "无邮件往来记录"
+            })
+            continue
+
+        # 未读邮件
+        unread_result = await db.execute(
+            select(func.count(Email.id)).where(
+                Email.account_id == account.id,
+                func.lower(Email.sender).like(f"%@{domain}%"),
+                Email.is_read == False
+            )
+        )
+        unread_count = unread_result.scalar() or 0
+
+        # 已翻译邮件
+        translated_result = await db.execute(
+            select(func.count(Email.id)).where(
+                Email.account_id == account.id,
+                func.lower(Email.sender).like(f"%@{domain}%"),
+                Email.body_translated.isnot(None)
+            )
+        )
+        translated_count = translated_result.scalar() or 0
+
+        # 最近邮件日期
+        last_email_result = await db.execute(
+            select(func.max(Email.received_at)).where(
+                Email.account_id == account.id,
+                func.lower(Email.sender).like(f"%@{domain}%")
+            )
+        )
+        last_email_date = last_email_result.scalar()
+
+        # 最近7天邮件
+        recent_7_result = await db.execute(
+            select(func.count(Email.id)).where(
+                Email.account_id == account.id,
+                func.lower(Email.sender).like(f"%@{domain}%"),
+                Email.received_at >= seven_days_ago
+            )
+        )
+        recent_7_count = recent_7_result.scalar() or 0
+
+        # 最近30天邮件
+        recent_30_result = await db.execute(
+            select(func.count(Email.id)).where(
+                Email.account_id == account.id,
+                func.lower(Email.sender).like(f"%@{domain}%"),
+                Email.received_at >= thirty_days_ago
+            )
+        )
+        recent_30_count = recent_30_result.scalar() or 0
+
+        # 术语表数量
+        glossary_result = await db.execute(
+            select(func.count(Glossary.id)).where(Glossary.supplier_id == supplier.id)
+        )
+        glossary_count = glossary_result.scalar() or 0
+
+        stats = SupplierStatsResponse(
+            supplier_id=supplier.id,
+            supplier_name=supplier.name,
+            email_domain=supplier.email_domain,
+            total_emails=total_emails,
+            received_emails=received_count,
+            sent_emails=sent_count,
+            unread_emails=unread_count,
+            translated_emails=translated_count,
+            last_email_date=last_email_date,
+            emails_last_7_days=recent_7_count,
+            emails_last_30_days=recent_30_count,
+            glossary_count=glossary_count
+        )
+        suppliers_with_stats.append(stats)
+        total_emails_from_suppliers += total_emails
+
+        if total_emails > max_emails:
+            max_emails = total_emails
+            most_active_supplier = {
+                "id": supplier.id,
+                "name": supplier.name,
+                "total_emails": total_emails
+            }
+
+    return AllSuppliersStatsResponse(
+        total_suppliers=len(suppliers),
+        total_emails_from_suppliers=total_emails_from_suppliers,
+        suppliers_with_stats=suppliers_with_stats,
+        most_active_supplier=most_active_supplier,
+        suppliers_without_emails=suppliers_without_emails
+    )
+
+
+@router.get("/{supplier_id}/stats", response_model=SupplierStatsResponse)
+async def get_supplier_stats(
+    supplier_id: int,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """获取单个供应商的邮件统计"""
+    # 获取供应商
+    result = await db.execute(
+        select(Supplier).where(Supplier.id == supplier_id)
+    )
+    supplier = result.scalar_one_or_none()
+    if not supplier:
+        raise HTTPException(status_code=404, detail="供应商不存在")
+
+    if not supplier.email_domain:
+        raise HTTPException(status_code=400, detail="该供应商未设置邮箱域名，无法统计邮件")
+
+    now = datetime.utcnow()
+    seven_days_ago = now - timedelta(days=7)
+    thirty_days_ago = now - timedelta(days=30)
+    domain = supplier.email_domain.lower()
+
+    # 收到的邮件
+    received_result = await db.execute(
+        select(func.count(Email.id)).where(
+            Email.account_id == account.id,
+            func.lower(Email.sender).like(f"%@{domain}%")
+        )
+    )
+    received_count = received_result.scalar() or 0
+
+    # 发送的邮件
+    sent_result = await db.execute(
+        select(func.count(Email.id)).where(
+            Email.account_id == account.id,
+            func.lower(Email.recipients).like(f"%@{domain}%")
+        )
+    )
+    sent_count = sent_result.scalar() or 0
+
+    # 未读邮件
+    unread_result = await db.execute(
+        select(func.count(Email.id)).where(
+            Email.account_id == account.id,
+            func.lower(Email.sender).like(f"%@{domain}%"),
+            Email.is_read == False
+        )
+    )
+    unread_count = unread_result.scalar() or 0
+
+    # 已翻译邮件
+    translated_result = await db.execute(
+        select(func.count(Email.id)).where(
+            Email.account_id == account.id,
+            func.lower(Email.sender).like(f"%@{domain}%"),
+            Email.body_translated.isnot(None)
+        )
+    )
+    translated_count = translated_result.scalar() or 0
+
+    # 最近邮件日期
+    last_email_result = await db.execute(
+        select(func.max(Email.received_at)).where(
+            Email.account_id == account.id,
+            func.lower(Email.sender).like(f"%@{domain}%")
+        )
+    )
+    last_email_date = last_email_result.scalar()
+
+    # 最近7天邮件
+    recent_7_result = await db.execute(
+        select(func.count(Email.id)).where(
+            Email.account_id == account.id,
+            func.lower(Email.sender).like(f"%@{domain}%"),
+            Email.received_at >= seven_days_ago
+        )
+    )
+    recent_7_count = recent_7_result.scalar() or 0
+
+    # 最近30天邮件
+    recent_30_result = await db.execute(
+        select(func.count(Email.id)).where(
+            Email.account_id == account.id,
+            func.lower(Email.sender).like(f"%@{domain}%"),
+            Email.received_at >= thirty_days_ago
+        )
+    )
+    recent_30_count = recent_30_result.scalar() or 0
+
+    # 术语表数量
+    glossary_result = await db.execute(
+        select(func.count(Glossary.id)).where(Glossary.supplier_id == supplier.id)
+    )
+    glossary_count = glossary_result.scalar() or 0
+
+    return SupplierStatsResponse(
+        supplier_id=supplier.id,
+        supplier_name=supplier.name,
+        email_domain=supplier.email_domain,
+        total_emails=received_count + sent_count,
+        received_emails=received_count,
+        sent_emails=sent_count,
+        unread_emails=unread_count,
+        translated_emails=translated_count,
+        last_email_date=last_email_date,
+        emails_last_7_days=recent_7_count,
+        emails_last_30_days=recent_30_count,
+        glossary_count=glossary_count
+    )

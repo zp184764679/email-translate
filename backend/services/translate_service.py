@@ -428,7 +428,10 @@ class TranslateService:
         if not translated:
             return translated
 
-        # 1. 去除常见的前缀标记
+        original_translated = translated  # 保存原始结果，用于最小长度保护
+        original_len = len(original.strip()) if original else 0
+
+        # 1. 去除常见的前缀标记（安全操作，不会大幅缩短内容）
         prefixes_to_remove = [
             "译文：", "译文:", "翻译：", "翻译:",
             "Translation:", "Translation：",
@@ -456,8 +459,13 @@ class TranslateService:
                         after_chinese = len(re.findall(r'[\u4e00-\u9fff]', after))
                         after_ratio = after_chinese / max(len(after), 1)
 
-                        # 如果前面主要是非中文（<10%），后面主要是中文（>30%），则只保留后面
-                        if before_ratio < 0.1 and after_ratio > 0.3:
+                        # 安全检查：只有当 after 部分足够长时才截取
+                        # 要求：after 至少有原文 30% 的长度，或至少 100 字符
+                        min_after_len = max(original_len * 0.3, 100)
+
+                        # 如果前面主要是非中文（<10%），后面主要是中文（>30%），且后面够长
+                        if before_ratio < 0.1 and after_ratio > 0.3 and len(after) >= min_after_len:
+                            print(f"[TranslateClean] Separator split: keeping after part ({len(after)} chars)")
                             translated = after
                             break
 
@@ -480,19 +488,38 @@ class TranslateService:
                 chinese_count = len(re.findall(r'[\u4e00-\u9fff]', before_text))
                 chinese_ratio = chinese_count / max(len(before_text), 1)
 
-                # 前面部分中文占比很低（<10%），很可能是原文重复
-                if chinese_ratio < 0.1 and len(before_text) > 20:
-                    translated = '\n'.join(lines[first_chinese_line:])
+                # 计算截取后的内容长度
+                after_lines = lines[first_chinese_line:]
+                after_text = '\n'.join(after_lines)
+
+                # 安全检查：截取后的内容至少要有原文 30% 的长度
+                min_result_len = max(original_len * 0.3, 50)
+
+                # 前面部分中文占比很低（<10%），很可能是原文重复，且截取后够长
+                if chinese_ratio < 0.1 and len(before_text) > 20 and len(after_text) >= min_result_len:
+                    print(f"[TranslateClean] Removing non-Chinese prefix ({len(before_text)} chars)")
+                    translated = after_text
 
         # 4. 检查是否原文完整重复出现在开头
-        original_stripped = original.strip()
-        if len(original_stripped) > 20:
+        original_stripped = original.strip() if original else ""
+        if len(original_stripped) > 50:  # 只处理较长的原文（避免短文本误判）
             if translated.startswith(original_stripped):
-                translated = translated[len(original_stripped):].strip()
+                remaining = translated[len(original_stripped):].strip()
+                # 安全检查：剩余部分至少有原文 30% 的长度
+                if len(remaining) >= original_len * 0.3:
+                    print(f"[TranslateClean] Removing duplicate original text from start")
+                    translated = remaining
 
-        # 5. 去除开头的空行和分隔符
+        # 5. 去除开头的空行和分隔符（安全操作）
         translated = translated.lstrip('\n')
         translated = re.sub(r'^[\-=\*—#]+\s*\n*', '', translated)  # 去除开头的分隔符行
+
+        # 6. 最终安全检查：如果清理后太短，返回原始结果
+        # 翻译结果不应该比原文短太多（至少 25%）
+        min_acceptable_len = max(original_len * 0.25, 20)
+        if len(translated.strip()) < min_acceptable_len and len(original_translated) > len(translated):
+            print(f"[TranslateClean] WARNING: Cleaned result too short ({len(translated)} vs original {original_len}), returning unclean result")
+            return original_translated
 
         return translated
 
@@ -1027,7 +1054,8 @@ Please check the following items:
     # ============ Main Translation Method ============
     def translate_text(self, text: str, target_lang: str = "zh",
                        glossary: List[Dict] = None, context: str = None,
-                       source_lang: str = None) -> str:
+                       source_lang: str = None,
+                       enable_fallback: bool = True) -> str:
         """
         Translate text (main entry point)
 
@@ -1037,11 +1065,27 @@ Please check the following items:
             glossary: List of term mappings
             context: Previous conversation context
             source_lang: Source language hint
+            enable_fallback: If True, fallback to Ollama when Claude fails
+
+        Returns:
+            Translated text
         """
         if self.provider == "ollama":
             return self.translate_with_ollama(text, target_lang, source_lang, glossary)
         elif self.provider == "claude":
-            return self.translate_with_claude(text, target_lang, source_lang, glossary)
+            try:
+                return self.translate_with_claude(text, target_lang, source_lang, glossary)
+            except Exception as e:
+                if enable_fallback and self.ollama_base_url:
+                    print(f"[TranslateService] Claude API failed: {e}")
+                    print(f"[TranslateService] Falling back to Ollama...")
+                    try:
+                        return self.translate_with_ollama(text, target_lang, source_lang, glossary)
+                    except Exception as ollama_error:
+                        print(f"[TranslateService] Ollama fallback also failed: {ollama_error}")
+                        raise e  # 抛出原始 Claude 错误
+                else:
+                    raise
         else:
             raise ValueError(f"Unknown provider: {self.provider}. Supported: ollama, claude")
 

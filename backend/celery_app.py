@@ -109,6 +109,11 @@ celery_app.conf.update(
             "task": "tasks.maintenance_tasks.cleanup_stuck_translations",
             "schedule": 300.0,  # 5分钟
         },
+        # 月度配额重置 - 每月1日凌晨0点
+        "reset-monthly-quota": {
+            "task": "tasks.maintenance_tasks.reset_monthly_quota",
+            "schedule": crontab(day_of_month=1, hour=0, minute=0),
+        },
     },
 )
 
