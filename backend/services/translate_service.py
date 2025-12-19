@@ -1249,19 +1249,19 @@ Please check the following items:
             subject_translated = None
 
             if subject:
-                # 标题+正文联合翻译，提高理解深度
-                # 使用明确的分隔标记，便于解析
-                combined = f"[SUBJECT]\n{subject}\n[/SUBJECT]\n\n[BODY]\n{text}\n[/BODY]"
-                print(f"[SmartRouting] Simple email -> Ollama (subject+body, {len(combined)} chars, score={score})")
+                # 分开翻译标题和正文（避免联合翻译时标记解析失败的问题）
+                print(f"[SmartRouting] Simple email -> Ollama (separate translation, score={score})")
 
-                translated_combined = self.translate_with_ollama(
-                    combined, target_lang, source_lang, glossary,
+                # 先翻译正文
+                body_translated = self.translate_with_ollama(
+                    text, target_lang, source_lang, glossary,
                     complexity_score=score
                 )
 
-                # 解析翻译结果，分离标题和正文
-                subject_translated, body_translated = self._parse_combined_translation(
-                    translated_combined, subject, text
+                # 再翻译标题
+                subject_translated = self.translate_with_ollama(
+                    subject, target_lang, source_lang, glossary,
+                    complexity_score=score
                 )
             else:
                 print(f"[SmartRouting] Simple email -> Ollama ({len(text)} chars, score={score})")
@@ -1299,18 +1299,20 @@ Please check the following items:
 
         subject_translated = None
 
-        # 如果需要翻译标题，与正文一起用 Claude 翻译（提高上下文理解）
+        # 如果需要翻译标题，分开用 Claude 翻译（避免标记解析问题）
         if translate_subject and subject:
             try:
-                # 对于复杂邮件，标题也用 Claude 翻译（与正文一起提供上下文）
-                combined = f"[SUBJECT]\n{subject}\n[/SUBJECT]\n\n[BODY]\n{text}\n[/BODY]"
-                print(f"[SmartRouting] Complex email -> Claude with subject+body")
+                # 对于复杂邮件，分开翻译标题和正文
+                print(f"[SmartRouting] Complex email -> Claude (separate translation)")
 
-                translated_combined = self._translate_body_with_claude(
-                    combined, target_lang, source_lang, glossary
+                # 先翻译正文
+                text_translated = self._translate_body_with_claude(
+                    text, target_lang, source_lang, glossary
                 )
-                subject_translated, text_translated = self._parse_combined_translation(
-                    translated_combined, subject, text
+
+                # 再翻译标题
+                subject_translated = self._translate_body_with_claude(
+                    subject, target_lang, source_lang, glossary
                 )
 
                 result = {
