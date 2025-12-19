@@ -88,7 +88,8 @@ const api = {
 
   // Emails
   async getEmails(params = {}, options = {}) {
-    return instance.get('/emails', { params, signal: options.signal })
+    // 添加时间戳防止浏览器缓存
+    return instance.get('/emails', { params: { ...params, _t: Date.now() }, signal: options.signal })
   },
 
   async getEmail(id) {
