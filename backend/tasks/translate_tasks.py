@@ -294,3 +294,39 @@ def poll_batch_status(self):
     except Exception as e:
         print(f"[BatchPoll] Error: {e}")
         return {"error": str(e)}
+
+
+@celery_app.task(bind=True)
+def collect_and_submit_batch(self, limit: int = 50):
+    """
+    收集未翻译邮件并提交到 Batch API
+
+    定时任务，自动收集 translation_status='none' 的邮件，
+    创建批次并提交到 Claude Batch API 进行翻译。
+
+    Args:
+        limit: 每次最多收集的邮件数量（默认50）
+
+    Returns:
+        dict: 创建批次的结果
+    """
+    from services.batch_service import get_batch_service
+
+    try:
+        service = get_batch_service()
+        result = asyncio.run(service.run_batch_translation(limit))
+
+        message = result.get("message", "")
+        batches_created = result.get("batches_created", 0)
+        total_items = result.get("total_items", 0)
+
+        if batches_created > 0:
+            print(f"[CollectBatch] Created {batches_created} batches with {total_items} emails")
+        elif message:
+            print(f"[CollectBatch] {message}")
+
+        return result
+
+    except Exception as e:
+        print(f"[CollectBatch] Error: {e}")
+        return {"error": str(e)}
