@@ -120,7 +120,7 @@ celery_app.conf.update(
         "collect-and-translate-pending": {
             "task": "tasks.translate_tasks.collect_and_translate_pending",
             "schedule": 300.0,  # 5分钟
-            "kwargs": {"limit": 20},
+            "kwargs": {"limit": 500},
         },
     },
 )

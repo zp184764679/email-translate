@@ -187,7 +187,7 @@ def batch_translate_task(self, email_ids: list, account_id: int, batch_size: int
     Args:
         email_ids: 邮件ID列表
         account_id: 账户ID
-        batch_size: 每批处理的邮件数量（默认20，防止内存溢出）
+        batch_size: 每批处理的邮件数量（默认500，防止内存溢出）
 
     Returns:
         dict: 批量翻译结果
@@ -297,7 +297,7 @@ def poll_batch_status(self):
 
 
 @celery_app.task(bind=True)
-def collect_and_translate_pending(self, limit: int = 20):
+def collect_and_translate_pending(self, limit: int = 500):
     """
     收集未翻译邮件并使用 Ollama 翻译
 
@@ -305,7 +305,7 @@ def collect_and_translate_pending(self, limit: int = 20):
     调用 translate_email_task 进行翻译（使用配置的翻译引擎，默认 Ollama）。
 
     Args:
-        limit: 每次最多处理的邮件数量（默认20，避免队列积压）
+        limit: 每次最多处理的邮件数量（默认500，避免队列积压）
 
     Returns:
         dict: 处理结果
