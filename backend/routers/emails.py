@@ -519,6 +519,16 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                     print(f"[EmailSync] Skipped duplicate: {email_data.get('message_id', 'unknown')[:50]}")
                     continue
 
+                # 分批提交：每 5 封邮件提交一次，避免长事务导致锁超时
+                if saved_count > 0 and saved_count % 5 == 0:
+                    try:
+                        await db.commit()
+                        print(f"[EmailSync] Batch commit: {saved_count} emails saved")
+                    except Exception as commit_err:
+                        print(f"[EmailSync] Batch commit error (will retry): {commit_err}")
+                        await asyncio.sleep(1)
+                        await db.commit()
+
                 # 应用邮件规则
                 skip_translate = False
                 try:
@@ -723,7 +733,18 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                     except Exception as te:
                         print(f"[AutoTranslate] Failed for {email_data['message_id'][:30]}: {te}")
 
-            await db.commit()
+            # 最终提交（带重试）
+            for retry in range(3):
+                try:
+                    await db.commit()
+                    break
+                except Exception as commit_err:
+                    if retry < 2:
+                        print(f"[EmailSync] Final commit retry {retry + 1}/3: {commit_err}")
+                        await asyncio.sleep(2 ** retry)
+                    else:
+                        print(f"[EmailSync] Final commit failed after 3 retries: {commit_err}")
+                        raise
 
         # 在线程池中断开连接
         await loop.run_in_executor(None, service.disconnect_imap)
