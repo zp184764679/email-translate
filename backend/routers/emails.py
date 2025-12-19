@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update, and_
 from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel
