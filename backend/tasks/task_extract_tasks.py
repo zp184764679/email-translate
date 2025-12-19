@@ -27,15 +27,40 @@ TASK_EXTRACTION_PROMPT = """请分析以下供应商邮件内容，提取项目�
 邮件正文：
 {body}
 
+【重要提取规则】
+1. **项目名称提取规则**：
+   - 优先从邮件主题中提取关键信息
+   - NCR 邮件格式：如 "NCR: O-2507-03 JZC 2J3060 Dirt on Shaft" 应提取为 "NCR O-2507-03 2J3060 轴污问题"
+   - 保留品番号（如 2J3060、2J1030）作为项目名称的一部分
+   - 英文专业术语必须准确翻译成中文：
+     * Dirt on Shaft = 轴污/轴脏污
+     * Scratch = 划痕
+     * Dent = 凹痕
+     * Crack = 裂纹
+     * Rust = 锈蚀
+     * Burr = 毛刺
+     * Dimension = 尺寸问题
+     * Surface = 表面问题
+     * Coating = 涂层问题
+
+2. **品番号（part_number）提取规则**：
+   - 格式通常为：字母+数字组合，如 2J3060、2J1030、OA-25-023
+   - 可能出现在主题或正文中
+   - 如有多个品番号，用逗号分隔
+
+3. **订单号（order_no）提取规则**：
+   - 格式如：PO-xxx、O-xxx-xx（如 O-2507-03）
+   - NCR 编号也可作为 order_no
+
 请识别邮件中涉及的项目和任务信息，并提取以下字段。如果某个字段无法确定，请设为 null。
 
 返回严格的 JSON 格式（不要包含其他文字）：
 {{
-    "project_name": "项目名称（根据邮件内容推断的项目名称，不超过50字）",
+    "project_name": "项目名称（根据邮件主题和内容推断，必须包含品番号和问题中文描述，不超过50字）",
     "customer_name": "客户/供应商名称（发件人所在公司或邮件中提到的客户名）",
-    "order_no": "订单号/PO号（如有，格式如 PO-xxx、订单xxx）",
-    "part_number": "品番号/部件号/零件编号（如有，可能有多个用逗号分隔）",
-    "title": "任务标题（简洁描述主要工作内容，不超过50字）",
+    "order_no": "订单号/PO号/NCR编号（如有）",
+    "part_number": "品番号/部件号（如 2J3060，可能有多个用逗号分隔）",
+    "title": "任务标题（简洁描述主要工作内容，包含品番号和问题描述，不超过50字）",
     "description": "任务详细描述（包含关键要求和背景信息）",
     "task_type": "任务类型",
     "priority": "优先级",
@@ -50,12 +75,14 @@ TASK_EXTRACTION_PROMPT = """请分析以下供应商邮件内容，提取项目�
     }}
 }}
 
-任务类型可选值：general(常规), design(设计), development(开发), testing(测试), review(审查), deployment(部署), documentation(文档), meeting(会议), other(其他)
+任务类型可选值：
+- ncr(品质问题): 包含 NCR、品质、不良、不合格等
+- general(常规), design(设计), development(开发), testing(测试), review(审查), deployment(部署), documentation(文档), meeting(会议), other(其他)
 
 优先级可选值：low(低), normal(普通), high(高), urgent(紧急)
 
 判断优先级依据：
-- urgent: 包含"紧急"、"立即"、"urgent"、"ASAP"等词
+- urgent: 包含"紧急"、"立即"、"urgent"、"ASAP"、NCR 邮件
 - high: 包含"重要"、"尽快"、"优先"等词
 - normal: 普通工作邮件
 - low: 非紧急事项、FYI 类邮件

@@ -31,7 +31,8 @@ def notify_completion(account_id: int, event_type: str, data: dict):
     """发送任务完成通知"""
     try:
         from services.notification_service import notification_manager
-        asyncio.get_event_loop().run_until_complete(
+        # 使用 asyncio.run() 替代 get_event_loop() 以兼容 Python 3.10+
+        asyncio.run(
             notification_manager.broadcast(account_id, event_type, data)
         )
     except Exception as e:
@@ -71,14 +72,13 @@ def translate_email_task(self, email_id: int, account_id: int, force: bool = Fal
         # 获取账户信息（用于术语表）
         account = db.query(EmailAccount).filter(EmailAccount.id == email.account_id).first()
 
-        # 创建翻译服务
+        # 创建翻译服务（使用 Ollama）
         service = TranslateService(
             provider=settings.translate_provider,
-            api_key=settings.claude_api_key or settings.deepl_api_key,
+            api_key=settings.claude_api_key,
             ollama_base_url=settings.ollama_base_url,
             ollama_model=settings.ollama_model,
             claude_model=settings.claude_model,
-            is_free_api=settings.deepl_free_api,
         )
 
         # 执行翻译
@@ -96,7 +96,7 @@ def translate_email_task(self, email_id: int, account_id: int, force: bool = Fal
             provider_used = result.get("provider_used", provider_used)
         else:
             # 普通翻译
-            body_translated = service.translate(
+            body_translated = service.translate_text(
                 text=email.body_original,
                 target_lang="zh",
                 source_lang=email.language_detected
@@ -105,7 +105,7 @@ def translate_email_task(self, email_id: int, account_id: int, force: bool = Fal
         # 翻译主题
         subject_translated = None
         if email.subject_original:
-            subject_translated = service.translate(
+            subject_translated = service.translate_text(
                 text=email.subject_original,
                 target_lang="zh",
                 source_lang=email.language_detected

@@ -97,6 +97,17 @@ class TranslateService:
         "Burr": "毛刺",
         "Crack": "裂纹",
         "Deformation": "变形",
+        # NCR 常见缺陷组合词（重要！）
+        "Dirt on Shaft": "轴污/轴脏污",
+        "Scratch on Shaft": "轴划痕",
+        "Rust on Shaft": "轴锈蚀",
+        "Dent on Shaft": "轴凹痕",
+        "Dirt on Surface": "表面脏污",
+        "Scratch on Surface": "表面划痕",
+        "Plating Defect": "电镀缺陷",
+        "Surface Defect": "表面缺陷",
+        "Dimension Out of Spec": "尺寸超差",
+        "Out of Tolerance": "超差",
 
         # ========== 产品/物流相关 ==========
         "Shaft": "轴类零件",  # 不是简单的"轴"
@@ -622,6 +633,18 @@ class TranslateService:
 - "Plating peel-off" = "电镀脱落"
 - "Collapsed boxes" = "箱体塌陷"
 - "Detached strap" = "捆扎带脱落"
+
+## NCR 缺陷术语翻译（非常重要！常见于品质不良邮件主题）
+- "Dirt on Shaft" = "轴污/轴脏污"（不是"轴上的泥土"！）
+- "Scratch on Shaft" = "轴划痕"
+- "Rust on Shaft" = "轴锈蚀"
+- "Dent on Shaft" = "轴凹痕"
+- "Dirt on Surface" = "表面脏污"
+- "Scratch on Surface" = "表面划痕"
+- "Plating Defect" = "电镀缺陷"
+- "Surface Defect" = "表面缺陷"
+- "Dimension Out of Spec" = "尺寸超差"
+- "Out of Tolerance" = "超差"
 
 ## 日语特殊处理
 - 「お世話になっております」→「承蒙关照」（商务标准译法）
