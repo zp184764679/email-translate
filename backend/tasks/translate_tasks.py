@@ -297,36 +297,60 @@ def poll_batch_status(self):
 
 
 @celery_app.task(bind=True)
-def collect_and_submit_batch(self, limit: int = 50):
+def collect_and_translate_pending(self, limit: int = 20):
     """
-    收集未翻译邮件并提交到 Batch API
+    收集未翻译邮件并使用 Ollama 翻译
 
-    定时任务，自动收集 translation_status='none' 的邮件，
-    创建批次并提交到 Claude Batch API 进行翻译。
+    定时任务，自动收集 is_translated=0 的邮件，
+    调用 translate_email_task 进行翻译（使用配置的翻译引擎，默认 Ollama）。
 
     Args:
-        limit: 每次最多收集的邮件数量（默认50）
+        limit: 每次最多处理的邮件数量（默认20，避免队列积压）
 
     Returns:
-        dict: 创建批次的结果
+        dict: 处理结果
     """
-    from services.batch_service import get_batch_service
+    from database.models import Email
+    from celery import group
+
+    db = get_db_session()
 
     try:
-        service = get_batch_service()
-        result = asyncio.run(service.run_batch_translation(limit))
+        # 查找未翻译的邮件
+        pending_emails = db.query(Email).filter(
+            Email.is_translated == False,
+            Email.translation_status.in_(['none', None])
+        ).order_by(Email.received_at.desc()).limit(limit).all()
 
-        message = result.get("message", "")
-        batches_created = result.get("batches_created", 0)
-        total_items = result.get("total_items", 0)
+        if not pending_emails:
+            return {"message": "No pending emails", "count": 0}
 
-        if batches_created > 0:
-            print(f"[CollectBatch] Created {batches_created} batches with {total_items} emails")
-        elif message:
-            print(f"[CollectBatch] {message}")
+        email_ids = [(e.id, e.account_id) for e in pending_emails]
+        print(f"[CollectTranslate] Found {len(email_ids)} pending emails")
 
-        return result
+        # 标记为处理中
+        for email in pending_emails:
+            email.translation_status = 'pending'
+        db.commit()
+
+        # 创建翻译任务组
+        tasks = group(
+            translate_email_task.s(email_id, account_id)
+            for email_id, account_id in email_ids
+        )
+
+        # 异步执行（不等待结果）
+        tasks.apply_async()
+
+        return {
+            "message": f"Queued {len(email_ids)} emails for translation",
+            "count": len(email_ids),
+            "email_ids": [e[0] for e in email_ids]
+        }
 
     except Exception as e:
-        print(f"[CollectBatch] Error: {e}")
+        db.rollback()
+        print(f"[CollectTranslate] Error: {e}")
         return {"error": str(e)}
+    finally:
+        db.close()

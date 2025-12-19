@@ -112,11 +112,15 @@ celery_app.conf.update(
             "schedule": 300.0,  # 5分钟
         },
         # 月度配额重置 - 每月1日凌晨0点
-                # 收集未翻译邮件并提交批次 - 每5分钟
-        "collect-and-submit-batch": {
-            "task": "tasks.translate_tasks.collect_and_submit_batch",
+        "reset-monthly-quota": {
+            "task": "tasks.maintenance_tasks.reset_monthly_quota",
+            "schedule": crontab(day_of_month=1, hour=0, minute=0),
+        },
+        # 收集未翻译邮件并翻译（Ollama）- 每5分钟
+        "collect-and-translate-pending": {
+            "task": "tasks.translate_tasks.collect_and_translate_pending",
             "schedule": 300.0,  # 5分钟
-            "kwargs": {"limit": 50},
+            "kwargs": {"limit": 20},
         },
     },
 )
