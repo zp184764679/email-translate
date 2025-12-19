@@ -28,9 +28,10 @@ jobs:
 
             cd /www/email-translate
 
-            # 拉取最新代码
+            # 拉取最新代码（强制同步，忽略本地修改）
             echo "Pulling latest code..."
-            GIT_SSH_COMMAND="ssh -i ~/.ssh/email_deploy -o StrictHostKeyChecking=no" git pull origin main
+            GIT_SSH_COMMAND="ssh -i ~/.ssh/email_deploy -o StrictHostKeyChecking=no" git fetch origin main
+            git reset --hard origin/main
 
             # 创建日志目录
             mkdir -p /www/email-translate/logs
