@@ -1546,7 +1546,7 @@ async def translate_email(
     settings = get_settings()
 
     result = await db.execute(
-        select(Email).where(Email.id == email_id, Email.account_id == account.id)
+        select(Email).where(Email.id == email_id, Email.account_id == account.id).options(selectinload(Email.labels), selectinload(Email.folders))
     )
     email = result.scalar_one_or_none()
 
