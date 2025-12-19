@@ -443,6 +443,78 @@ class EmailExtraction(Base):
     )
 
 
+class TaskExtraction(Base):
+    """任务提取表 - 供 Portal 项目管理系统导入项目和任务使用
+
+    翻译完成后异步提取，存储结构化信息
+    Portal 导入时直接读取，秒级响应
+    """
+    __tablename__ = "task_extractions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email_id = Column(Integer, ForeignKey("emails.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
+
+    # 提取的项目字段（新增）
+    project_name = Column(String(200))  # 项目名称
+    customer_name = Column(String(200))  # 客户/供应商名称
+    order_no = Column(String(100))  # 订单号/PO号
+
+    # 提取的任务字段
+    title = Column(String(200))  # 任务标题
+    description = Column(Text)  # 任务描述
+    task_type = Column(String(50), default="general")  # 任务类型: general/design/development/testing/review/deployment/documentation/meeting/other
+    priority = Column(String(20), default="normal")  # 优先级: low/normal/high/urgent
+    due_date = Column(DateTime)  # 截止日期
+    start_date = Column(DateTime)  # 开始日期
+    part_number = Column(String(200))  # 品番号/部件号（可能多个，用于匹配Portal项目）
+    assignee_name = Column(String(100))  # 负责人姓名（用于匹配HR员工）
+    action_items = Column(JSON)  # 待办事项列表 ["事项1", "事项2"]
+
+    # AI 置信度评分
+    confidence = Column(JSON)  # {"title": 0.9, "priority": 0.7, ...}
+
+    # 提取状态: pending(待提取), processing(提取中), completed(已完成), failed(失败)
+    status = Column(String(20), default="pending", index=True)
+    error_message = Column(Text)  # 失败时的错误信息
+
+    # 时间戳
+    extracted_at = Column(DateTime)  # 提取完成时间
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # 关系
+    email = relationship("Email")
+
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
+
+    def to_dict(self):
+        """转换为字典，供API返回"""
+        return {
+            "id": self.id,
+            "email_id": self.email_id,
+            # 项目字段
+            "project_name": self.project_name,
+            "customer_name": self.customer_name,
+            "order_no": self.order_no,
+            # 任务字段
+            "title": self.title,
+            "description": self.description,
+            "task_type": self.task_type,
+            "priority": self.priority,
+            "due_date": self.due_date.isoformat() if self.due_date else None,
+            "start_date": self.start_date.isoformat() if self.start_date else None,
+            "part_number": self.part_number,
+            "assignee_name": self.assignee_name,
+            "action_items": self.action_items,
+            "confidence": self.confidence,
+            "status": self.status,
+            "error_message": self.error_message,
+            "extracted_at": self.extracted_at.isoformat() if self.extracted_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 class TranslationFeedback(Base):
     """翻译质量反馈表 - 用户标记翻译问题"""
     __tablename__ = "translation_feedbacks"
