@@ -403,6 +403,12 @@ class EmailService:
         # Parse body
         body_text, body_html = self._get_body(msg)
 
+        # 关键修复：如果纯文本为空但 HTML 有内容，从 HTML 提取文本
+        # 这确保 body_original 不会为 NULL（某些邮件只有 HTML 格式）
+        if not body_text and body_html:
+            body_text = self._clean_text_for_detection(body_html)
+
+
         # Detect language - 优先使用纯文本，其次使用 HTML 内容，最后使用主题
         detection_text = body_text
         if not detection_text and body_html:
