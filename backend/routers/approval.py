@@ -297,7 +297,7 @@ async def submit_for_approval(
     if draft.status == DRAFT_STATUS_REJECTED:
         raise HTTPException(
             status_code=400,
-            detail="驳回的草稿需要先修改后重新保存，请使用"撤回到草稿"功能"
+            detail="驳回的草稿需要先修改后重新保存，请使用「撤回到草稿」功能"
         )
 
     if not can_transition_to(draft.status, DRAFT_STATUS_PENDING):
