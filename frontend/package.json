@@ -79,7 +79,7 @@
     },
     "publish": {
       "provider": "generic",
-      "url": "https://jzchardware.cn:8888/email-updates"
+      "url": "https://jzchardware.cn/email-updates"
     }
   }
 }

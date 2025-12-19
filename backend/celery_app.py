@@ -26,6 +26,7 @@ celery_app = Celery(
         "tasks.ai_tasks",
         "tasks.maintenance_tasks",
         "tasks.reminder_tasks",
+        "tasks.task_extract_tasks",
     ]
 )
 
@@ -55,6 +56,7 @@ celery_app.conf.update(
         "tasks.ai_tasks.*": {"queue": "email_translate"},
         "tasks.maintenance_tasks.*": {"queue": "maintenance"},
         "tasks.reminder_tasks.*": {"queue": "email_translate"},
+        "tasks.task_extract_tasks.*": {"queue": "email_translate"},
     },
 
     # 重试配置

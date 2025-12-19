@@ -4,7 +4,7 @@ import { ElMessage } from 'element-plus'
 // Create axios instance
 // 开发环境直连本地后端，生产环境直连服务器
 const isDev = import.meta.env.DEV
-const baseURL = isDev ? 'http://127.0.0.1:2000/api' : 'https://jzchardware.cn:8888/email/api'
+const baseURL = isDev ? 'http://127.0.0.1:2000/api' : 'https://jzchardware.cn/email/api'
 
 // 导出 API 基础地址供其他模块使用
 export const API_BASE_URL = baseURL

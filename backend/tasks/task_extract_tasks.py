@@ -78,10 +78,10 @@ def call_ollama_extract(subject: str, body: str, settings) -> dict:
                 "stream": False,
                 "options": {
                     "temperature": 0.3,  # 降低温度，保证输出稳定
-                    "num_predict": 1000,
+                    "num_predict": 3000,  # 增加 token 限制，qwen3 的 thinking 模式会消耗额外 token
                 }
             },
-            timeout=180  # 3分钟超时
+            timeout=300  # 5分钟超时
         )
         response.raise_for_status()
 

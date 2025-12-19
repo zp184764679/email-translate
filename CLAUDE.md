@@ -205,7 +205,7 @@ npx electron-builder --win
 ### 运行机制
 
 **服务器统一部署架构**（2024年12月更新）：
-1. 后端服务部署在服务器 `jzchardware.cn:8888`
+1. 后端服务部署在服务器 `jzchardware.cn`（标准 HTTPS 443 端口）
 2. 用户点击快捷方式启动 Electron 应用
 3. Electron 显示启动画面，等待服务器健康检查通过
 4. 检查通过后显示主界面，直接连接服务器 API
@@ -213,14 +213,14 @@ npx electron-builder --win
 
 **API 地址**：
 - 开发环境：`http://127.0.0.1:2000/api`
-- 生产环境：`https://jzchardware.cn:8888/email/api`
+- 生产环境：`https://jzchardware.cn/email/api`
 
 ## 端口配置
 
 | 服务 | 默认端口 | 环境变量 |
 |------|----------|----------|
 | 后端 API（开发） | 2000 | `BACKEND_PORT` |
-| 后端 API（生产） | 8888 | 服务器固定 |
+| 后端 API（生产） | 443 | 标准 HTTPS |
 | 前端开发 | 4567 | `VITE_PORT` |
 
 ## 启动安全机制

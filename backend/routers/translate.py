@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from pydantic import BaseModel
 from typing import List, Optional
+from datetime import datetime
 import hashlib
 
 from database.database import get_db

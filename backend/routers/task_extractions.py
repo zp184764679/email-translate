@@ -17,7 +17,7 @@ from datetime import datetime
 
 from database.database import get_db
 from database.models import TaskExtraction, Email
-from shared.auth_middleware import get_current_account
+from routers.users import get_current_account
 
 router = APIRouter(prefix="/api/task-extractions", tags=["task-extractions"])
 

@@ -25,7 +25,7 @@ let mainWindow = null
 let tray = null
 
 // 后端配置 - 统一部署在服务器
-const BACKEND_URL = 'https://jzchardware.cn:8888/email/api'
+const BACKEND_URL = 'https://jzchardware.cn/email/api'
 
 /**
  * 检查服务器后端是否可用
