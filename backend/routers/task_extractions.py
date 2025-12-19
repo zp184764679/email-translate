@@ -432,6 +432,58 @@ async def portal_get_extraction(
     }
 
 
+@router.post("/portal/sync")
+async def portal_sync_emails(
+    since_days: int = Query(7, description="同步最近多少天的邮件"),
+    db: AsyncSession = Depends(get_db),
+    _: bool = Depends(verify_portal_token)
+):
+    """
+    Portal 集成：触发邮件同步
+
+    从 IMAP 服务器拉取最新邮件到本地数据库
+
+    Args:
+        since_days: 同步最近多少天的邮件（默认7天）
+
+    Returns:
+        同步触发结果
+    """
+    from database.models import EmailAccount
+
+    # 获取所有活跃的邮箱账户
+    result = await db.execute(
+        select(EmailAccount).where(EmailAccount.is_active == True)
+    )
+    accounts = result.scalars().all()
+
+    if not accounts:
+        return {
+            "success": False,
+            "message": "没有配置活跃的邮箱账户",
+            "synced_accounts": 0
+        }
+
+    # 为每个账户触发后台同步任务
+    synced_count = 0
+    for account in accounts:
+        try:
+            # 调用邮件同步的后台任务
+            from routers.emails import fetch_emails_background
+            import asyncio
+            asyncio.create_task(fetch_emails_background(account, since_days))
+            synced_count += 1
+        except Exception as e:
+            print(f"[Portal Sync] Failed to sync account {account.email}: {e}")
+
+    return {
+        "success": True,
+        "message": f"已触发 {synced_count} 个邮箱账户的同步",
+        "synced_accounts": synced_count,
+        "since_days": since_days
+    }
+
+
 @router.post("/portal/emails/{email_id}/extract")
 async def portal_trigger_extraction(
     email_id: int,
