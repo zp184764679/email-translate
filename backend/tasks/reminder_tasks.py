@@ -21,7 +21,8 @@ def check_event_reminders():
     - 当前时间 >= start_time - reminder_minutes
     - 事件还未开始
     """
-    return asyncio.get_event_loop().run_until_complete(_check_reminders_async())
+    # 使用 asyncio.run() 替代 get_event_loop() 以兼容 Python 3.10+
+    return asyncio.run(_check_reminders_async())
 
 
 async def _check_reminders_async():
@@ -124,9 +125,8 @@ def send_test_reminder(account_id: int, event_id: int = None):
         account_id: 账户ID
         event_id: 可选的事件ID
     """
-    return asyncio.get_event_loop().run_until_complete(
-        _send_test_reminder_async(account_id, event_id)
-    )
+    # 使用 asyncio.run() 替代 get_event_loop() 以兼容 Python 3.10+
+    return asyncio.run(_send_test_reminder_async(account_id, event_id))
 
 
 async def _send_test_reminder_async(account_id: int, event_id: int = None):

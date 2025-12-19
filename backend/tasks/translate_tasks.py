@@ -39,7 +39,7 @@ def notify_completion(account_id: int, event_type: str, data: dict):
         print(f"[Notify] Failed to send notification: {e}")
 
 
-@celery_app.task(bind=True, max_retries=3, soft_time_limit=60, time_limit=90)
+@celery_app.task(bind=True, max_retries=3, soft_time_limit=180, time_limit=240)
 def translate_email_task(self, email_id: int, account_id: int, force: bool = False):
     """
     异步翻译单封邮件
@@ -127,7 +127,7 @@ def translate_email_task(self, email_id: int, account_id: int, force: bool = Fal
                     message_id=email.message_id,
                     subject_translated=subject_translated,
                     body_translated=body_translated,
-                    translated_by=account.email if account else "system",
+                    translated_by=account.id if account else None,
                     translated_at=datetime.utcnow()
                 )
                 db.add(shared)
