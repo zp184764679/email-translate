@@ -48,8 +48,8 @@
                 <span class="sender-name">{{ email.from_name || extractEmailName(email.from_email) }}</span>
                 <span class="email-time">{{ formatTime(email.received_at) }}</span>
               </div>
-              <div class="email-subject">{{ email.subject_original }}</div>
-              <div class="email-preview">{{ getOriginalPreview(email) }}</div>
+              <div class="email-subject">{{ email.subject_translated || email.subject_original }}</div>
+              <div class="email-preview">{{ getTranslatedPreview(email) }}</div>
             </div>
             <div class="email-tags">
               <!-- 邮件标签 -->
