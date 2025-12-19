@@ -10,7 +10,7 @@ import asyncio
 
 from config import get_settings
 from database.database import init_db
-from routers import emails_router, users_router, translate_router, drafts_router, suppliers_router, signatures_router, labels_router, folders_router, calendar_router, ai_extract_router, tasks_router, rules_router, approval_groups_router
+from routers import emails_router, users_router, translate_router, drafts_router, suppliers_router, signatures_router, labels_router, folders_router, calendar_router, ai_extract_router, tasks_router, rules_router, approval_groups_router, task_extractions_router
 from websocket import manager as ws_manager, websocket_endpoint
 
 settings = get_settings()
@@ -130,7 +130,7 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "X-Portal-Token"],
 )
 
 # Include routers
@@ -147,6 +147,7 @@ app.include_router(ai_extract_router)
 app.include_router(tasks_router)
 app.include_router(rules_router)
 app.include_router(approval_groups_router)
+app.include_router(task_extractions_router)
 
 
 # WebSocket 端点

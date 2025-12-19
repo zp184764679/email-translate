@@ -145,6 +145,15 @@ def translate_email_task(self, email_id: int, account_id: int, force: bool = Fal
             "success": True
         })
 
+        # 翻译完成后，异步触发任务信息提取（供Portal项目管理导入）
+        try:
+            from tasks.task_extract_tasks import extract_task_info_for_email
+            extract_task_info_for_email.delay(email_id, account_id)
+            print(f"[TranslateTask] Triggered task extraction for email {email_id}")
+        except Exception as e:
+            # 提取失败不影响翻译结果
+            print(f"[TranslateTask] Failed to trigger task extraction: {e}")
+
         return {
             "success": True,
             "email_id": email_id,

@@ -18,6 +18,7 @@ from .ai_extract import router as ai_extract_router
 from .tasks import router as tasks_router
 from .rules import router as rules_router
 from .approval_groups import router as approval_groups_router
+from .task_extractions import router as task_extractions_router
 
 __all__ = [
     "emails_router",
@@ -33,4 +34,5 @@ __all__ = [
     "tasks_router",
     "rules_router",
     "approval_groups_router",
+    "task_extractions_router",
 ]
