@@ -593,6 +593,7 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
 
                             new_email.body_translated = display_translated
                             new_email.is_translated = True
+                            new_email.translation_status = "completed"
                             print(f"[AutoTranslate] Used shared translation (with dynamic quote assembly) for {email_data['message_id'][:30]}")
                         else:
                             # 智能翻译正文（检测引用 + 智能路由 + 历史翻译复用）
@@ -1624,6 +1625,7 @@ async def translate_email(
 
                 email.body_translated = display_translated
                 email.is_translated = True
+                email.translation_status = "completed"
                 await db.commit()
                 await db.refresh(email)
                 print(f"[SharedTranslation] Used with dynamic quote assembly for {email.message_id}")
