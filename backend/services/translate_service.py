@@ -707,6 +707,9 @@ Container: 40ft Blue Ring
             glossary: List of term mappings for context
             complexity_score: Optional complexity score (0-100) from smart routing
         """
+        # 空文本检查
+        if not text:
+            return ""
         text_len = len(text)
         # 短文本（<100字符且无换行）使用简化的严格 prompt，防止 LLM 过度扩展
         is_short_text = text_len < 100 and '\n' not in text
@@ -1093,6 +1096,9 @@ Please check the following items:
         Returns:
             Translated text
         """
+        # 空文本直接返回
+        if not text:
+            return ""
         if self.provider == "ollama":
             return self.translate_with_ollama(text, target_lang, source_lang, glossary)
         elif self.provider == "claude":
