@@ -118,3 +118,6 @@ secret.local
 *.key
 id_rsa*
 id_ed25519*
+
+# Claude local settings (contains server credentials)
+.claude/settings.local.json
