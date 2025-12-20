@@ -110,3 +110,11 @@ backend/.env.production
 DEPLOYMENT.md
 **/emails_bilingual.md
 *_bilingual.md
+
+# ===== 本地密钥/凭证 (禁止提交) =====
+*.local
+secret.local
+*.pem
+*.key
+id_rsa*
+id_ed25519*

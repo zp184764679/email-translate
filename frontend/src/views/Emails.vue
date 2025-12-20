@@ -182,15 +182,18 @@
             <div class="email-content">
               <div class="email-top-row">
                 <span class="sender-name">{{ email.from_name || extractEmailName(email.from_email) }}</span>
-                <!-- 右侧显示"未翻译"标签 -->
-                <el-tag
-                  v-if="!email.is_translated && email.language_detected && email.language_detected !== 'zh' && email.language_detected !== 'unknown'"
-                  size="small"
-                  type="warning"
-                  class="untranslated-tag"
-                >
-                  未翻译
-                </el-tag>
+                <!-- 右侧显示时间和"未翻译"标签 -->
+                <span class="email-time-area">
+                  <el-tag
+                    v-if="!email.is_translated && email.language_detected && email.language_detected !== 'zh' && email.language_detected !== 'unknown'"
+                    size="small"
+                    type="warning"
+                    class="untranslated-tag"
+                  >
+                    未翻译
+                  </el-tag>
+                  <span class="email-time">{{ formatTime(email.received_at) }}</span>
+                </span>
               </div>
               <div class="email-subject">{{ email.subject_translated || email.subject_original }}</div>
               <div class="email-preview">{{ getTranslatedPreview(email) }}</div>
@@ -1273,6 +1276,19 @@ function getTextColor(bgColor) {
   flex-shrink: 0;
   margin-left: auto;  /* 始终靠右对齐 */
   padding-left: 8px;
+}
+
+.email-time-area {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.email-time-area .email-time {
+  margin-left: 0;
+  padding-left: 0;
 }
 
 .untranslated-tag {
