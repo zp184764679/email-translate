@@ -19,15 +19,6 @@ jobs:
           script: |
             set -e
 
-            # 添加开发机 SSH 公钥（一次性设置，后续自动跳过）
-            DEV_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOZu0HjNfnyKcyMYDnH1a4UpkOi5NI2HhodQzVik+TTe dev-server-access-20251220"
-            mkdir -p ~/.ssh && chmod 700 ~/.ssh
-            if ! grep -q "dev-server-access-20251220" ~/.ssh/authorized_keys 2>/dev/null; then
-              echo "$DEV_KEY" >> ~/.ssh/authorized_keys
-              chmod 600 ~/.ssh/authorized_keys
-              echo "Dev SSH key added to authorized_keys"
-            fi
-
             # 首次部署：克隆仓库
             if [ ! -d "/www/email-translate" ]; then
               echo "First deployment: cloning repository..."
