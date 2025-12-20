@@ -105,6 +105,20 @@ export const useEmailStore = defineStore('emails', () => {
     emailIds.forEach(id => updateEmailStatus(id, changes))
   }
 
+  // ========== 翻译更新 ==========
+  function updateEmailTranslation(emailId, translationData) {
+    // 更新列表中的邮件
+    const email = emails.value.find(e => e.id === emailId)
+    if (email) {
+      email.subject_translated = translationData.subject_translated
+      email.body_translated = translationData.body_translated
+      email.is_translated = translationData.is_translated
+      email.translation_status = translationData.translation_status
+    }
+    // 清除缓存，下次打开详情时获取最新数据
+    invalidateCache(emailId)
+  }
+
   // ========== 邮件详情缓存 ==========
   async function getEmailDetail(emailId, forceRefresh = false) {
     if (!forceRefresh && emailCache.value.has(emailId)) {
@@ -160,6 +174,7 @@ export const useEmailStore = defineStore('emails', () => {
     loadEmails,
     updateEmailStatus,
     updateEmailsStatus,
+    updateEmailTranslation,
 
     // 缓存
     getEmailDetail,

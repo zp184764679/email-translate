@@ -665,6 +665,7 @@ onMounted(async () => {
   window.addEventListener('email-status-changed', handleRemoteStatusChange)
   window.addEventListener('email-deleted', handleRemoteDelete)
   window.addEventListener('ws:reconnected', handleWsReconnected)
+  window.addEventListener('email-translated', handleEmailTranslated)
 })
 
 // 清理事件监听器
@@ -672,7 +673,29 @@ onUnmounted(() => {
   window.removeEventListener('email-status-changed', handleRemoteStatusChange)
   window.removeEventListener('email-deleted', handleRemoteDelete)
   window.removeEventListener('ws:reconnected', handleWsReconnected)
+  window.removeEventListener('email-translated', handleEmailTranslated)
 })
+
+// 处理翻译完成事件
+async function handleEmailTranslated(event) {
+  const { email_id } = event.detail
+  if (!email_id) return
+
+  const emailIndex = emails.value.findIndex(e => e.id === email_id)
+  if (emailIndex === -1) return
+
+  try {
+    const freshEmail = await api.getEmail(email_id)
+    const existingEmail = emails.value[emailIndex]
+    existingEmail.subject_translated = freshEmail.subject_translated
+    existingEmail.body_translated = freshEmail.body_translated
+    existingEmail.is_translated = freshEmail.is_translated
+    existingEmail.translation_status = freshEmail.translation_status
+    console.log(`[Emails] Updated translation for email ${email_id}`)
+  } catch (e) {
+    console.error(`[Emails] Failed to refresh email ${email_id}:`, e)
+  }
+}
 
 // 处理远程邮件状态变更（来自其他客户端的 WebSocket 通知）
 function handleRemoteStatusChange(event) {

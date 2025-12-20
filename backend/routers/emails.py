@@ -1533,14 +1533,19 @@ async def batch_unflag_emails(
 @router.post("/{email_id}/translate", response_model=EmailResponse)
 async def translate_email(
     email_id: int,
+    force: bool = False,
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """翻译单个邮件（带缓存和共享）"""
+    """翻译单个邮件（带缓存和共享）
+
+    Args:
+        force: 强制重新翻译，清除已有缓存和共享翻译
+    """
     from database.models import SharedEmailTranslation, TranslationCache
     from services.translate_service import TranslateService
     from config import get_settings
-    from sqlalchemy import and_
+    from sqlalchemy import and_, delete
     import hashlib
 
     settings = get_settings()
@@ -1557,8 +1562,32 @@ async def translate_email(
     if email.translation_status == "translating":
         raise HTTPException(status_code=409, detail="该邮件正在翻译中，请稍候")
 
-    # 只有当已翻译且翻译内容确实存在时才跳过
-    if email.is_translated and email.body_translated:
+    # 强制重新翻译：清除所有缓存
+    if force:
+        print(f"[Translate] Force re-translate for email {email_id}, clearing caches...")
+
+        # 1. 清除共享翻译表中的记录
+        if email.message_id:
+            await db.execute(
+                delete(SharedEmailTranslation).where(
+                    SharedEmailTranslation.message_id == email.message_id
+                )
+            )
+            print(f"[Translate] Cleared SharedEmailTranslation for message_id={email.message_id}")
+
+        # 2. 清除邮件的翻译字段
+        email.subject_translated = None
+        email.body_translated = None
+        email.is_translated = False
+        email.translation_status = None
+        await db.commit()
+        print(f"[Translate] Cleared email translation fields")
+
+        # 3. 清除 Redis 缓存（如果有正文/标题的缓存）
+        # Redis 缓存会在翻译时自动更新，这里不需要显式清除
+
+    # 只有当已翻译且翻译内容确实存在时才跳过（非强制模式）
+    if not force and email.is_translated and email.body_translated:
         return email
 
     # 使用数据库乐观锁：只有 translation_status != 'translating' 时才能开始翻译

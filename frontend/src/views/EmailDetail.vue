@@ -220,6 +220,18 @@
             <!-- 非中文邮件：显示翻译 -->
             <div class="pane-content" v-else-if="email.body_translated">
               {{ email.body_translated }}
+              <div class="retranslate-hint">
+                <el-button
+                  type="primary"
+                  text
+                  size="small"
+                  @click="retranslateEmail"
+                  :loading="translating"
+                >
+                  <el-icon><RefreshRight /></el-icon>
+                  重新翻译
+                </el-button>
+              </div>
             </div>
             <div class="pane-placeholder" v-else>
               <el-icon :size="32"><DocumentCopy /></el-icon>
@@ -487,7 +499,7 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeft, Back, ChatLineSquare, Right, Delete, Star,
   Printer, Paperclip, Document, Download, InfoFilled, DocumentCopy, View, ArrowDown, CollectionTag,
-  CopyDocument, Refresh, Search, Link, Message
+  CopyDocument, Refresh, RefreshRight, Search, Link, Message
 } from '@element-plus/icons-vue'
 import LabelSelector from '@/components/LabelSelector.vue'
 import ExtractionPanel from '@/components/ExtractionPanel.vue'
@@ -529,6 +541,8 @@ onUnmounted(() => {
   isUnmounted = true  // 标记已卸载，防止异步回调修改状态
   // 注意：不取消翻译请求，让它在后台继续运行
   // 翻译完成后数据会保存到后端，下次查看时直接显示结果
+  // 移除翻译事件监听
+  window.removeEventListener('email-translated', handleEmailTranslated)
 })
 
 // 邮件详情快捷键
@@ -1094,10 +1108,29 @@ function previewSignature() {
   )
 }
 
+// 处理翻译完成事件
+async function handleEmailTranslated(event) {
+  const { email_id } = event.detail
+  if (!email_id || !email.value || email.value.id !== email_id) return
+
+  try {
+    const freshEmail = await api.getEmail(email_id)
+    email.value.subject_translated = freshEmail.subject_translated
+    email.value.body_translated = freshEmail.body_translated
+    email.value.is_translated = freshEmail.is_translated
+    email.value.translation_status = freshEmail.translation_status
+    console.log(`[EmailDetail] Updated translation for email ${email_id}`)
+  } catch (e) {
+    console.error(`[EmailDetail] Failed to refresh email ${email_id}:`, e)
+  }
+}
+
 onMounted(() => {
   loadEmail()
   loadSignatures()
   loadContactHistory()
+  // 监听翻译完成事件
+  window.addEventListener('email-translated', handleEmailTranslated)
 })
 
 async function loadEmail() {
@@ -1402,7 +1435,7 @@ async function downloadAllAttachments() {
   }
 }
 
-async function translateEmail() {
+async function translateEmail(force = false) {
   // 立即显示提交状态
   translating.value = true
 
@@ -1410,7 +1443,7 @@ async function translateEmail() {
   const currentEmailId = email.value.id
 
   // 发起翻译请求（不等待完成）
-  api.translateEmail(currentEmailId)
+  api.translateEmail(currentEmailId, { force })
     .then(translatedEmail => {
       // 翻译完成后更新（如果用户还在此页面且是同一封邮件）
       if (!isUnmounted && email.value.id === currentEmailId) {
@@ -1419,7 +1452,7 @@ async function translateEmail() {
         email.value.body_translated = translatedEmail.body_translated
         email.value.is_translated = translatedEmail.is_translated
         email.value.translation_status = translatedEmail.translation_status
-        ElMessage.success('翻译完成')
+        ElMessage.success(force ? '重新翻译完成' : '翻译完成')
       } else {
         console.log('Translation completed in background, data saved to server')
       }
@@ -1434,8 +1467,25 @@ async function translateEmail() {
     })
 
   // 立即提示用户并释放 UI
-  ElMessage.info('翻译任务已提交，可继续操作')
+  ElMessage.info(force ? '重新翻译任务已提交，可继续操作' : '翻译任务已提交，可继续操作')
   translating.value = false
+}
+
+// 强制重新翻译（清除缓存后重新翻译）
+async function retranslateEmail() {
+  await ElMessageBox.confirm(
+    '确定要重新翻译吗？这将清除已有翻译并重新生成。',
+    '确认重新翻译',
+    {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning'
+    }
+  ).then(() => {
+    translateEmail(true)
+  }).catch(() => {
+    // 用户取消
+  })
 }
 
 async function translateReply() {
@@ -1963,6 +2013,13 @@ function sanitizeHtml(html) {
 .pane-content.empty-content {
   color: #909399;
   font-style: italic;
+}
+
+.retranslate-hint {
+  margin-top: 20px;
+  padding-top: 12px;
+  border-top: 1px dashed #dcdfe6;
+  text-align: center;
 }
 
 .pane-placeholder {

@@ -42,10 +42,12 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElNotification } from 'element-plus'
 import wsManager from './utils/websocket'
 import { useUserStore } from './stores/user'
-import { getStorageKey } from './api'
+import { useEmailStore } from './stores/emails'
+import api, { getStorageKey } from './api'
 
 const router = useRouter()
 const userStore = useUserStore()
+const emailStore = useEmailStore()
 
 const showDownloadProgress = ref(false)
 const downloadVersion = ref('')
@@ -151,13 +153,28 @@ function initWebSocket() {
 
   // 监听翻译完成事件
   wsUnsubscribes.push(
-    wsManager.on('translation_complete', (data) => {
+    wsManager.on('translation_complete', async (data) => {
       console.log('[WS] Translation complete:', data)
       ElNotification.success({
         title: '翻译完成',
         message: `邮件 #${data.email_id} 翻译完成`,
         duration: 3000
       })
+
+      // 获取最新数据并更新 store
+      try {
+        const freshEmail = await api.getEmail(data.email_id)
+        emailStore.updateEmailTranslation(data.email_id, {
+          subject_translated: freshEmail.subject_translated,
+          body_translated: freshEmail.body_translated,
+          is_translated: freshEmail.is_translated,
+          translation_status: freshEmail.translation_status
+        })
+        console.log('[WS] Updated email translation in store:', data.email_id)
+      } catch (e) {
+        console.error('[WS] Failed to refresh email after translation:', e)
+      }
+
       // 触发全局事件供其他组件刷新
       window.dispatchEvent(new CustomEvent('email-translated', { detail: data }))
     })

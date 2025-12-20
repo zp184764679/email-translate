@@ -246,9 +246,12 @@ const api = {
   },
 
   // Email Actions
-  async translateEmail(id, signal = null) {
+  async translateEmail(id, { force = false, signal = null } = {}) {
     // 翻译可能需要较长时间（Ollama），设置 10 分钟超时
+    // force=true 会清除已有翻译缓存，强制重新翻译
+    const params = force ? { force: true } : {}
     return instance.post(`/emails/${id}/translate`, null, {
+      params,
       timeout: 600000,  // 10 分钟
       signal  // AbortController signal，用于取消请求
     })
