@@ -107,13 +107,22 @@ export const useEmailStore = defineStore('emails', () => {
 
   // ========== 翻译更新 ==========
   function updateEmailTranslation(emailId, translationData) {
-    // 更新列表中的邮件
+    // 更新列表中的邮件（支持部分更新）
     const email = emails.value.find(e => e.id === emailId)
     if (email) {
-      email.subject_translated = translationData.subject_translated
-      email.body_translated = translationData.body_translated
-      email.is_translated = translationData.is_translated
-      email.translation_status = translationData.translation_status
+      // 只更新传入的字段
+      if (translationData.subject_translated !== undefined) {
+        email.subject_translated = translationData.subject_translated
+      }
+      if (translationData.body_translated !== undefined) {
+        email.body_translated = translationData.body_translated
+      }
+      if (translationData.is_translated !== undefined) {
+        email.is_translated = translationData.is_translated
+      }
+      if (translationData.translation_status !== undefined) {
+        email.translation_status = translationData.translation_status
+      }
     }
     // 清除缓存，下次打开详情时获取最新数据
     invalidateCache(emailId)

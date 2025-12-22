@@ -153,7 +153,7 @@ function initWebSocket() {
 
   // 监听翻译完成事件
   wsUnsubscribes.push(
-    wsManager.on('translation_complete', async (data) => {
+    wsManager.on('translation_complete', (data) => {
       console.log('[WS] Translation complete:', data)
       ElNotification.success({
         title: '翻译完成',
@@ -161,18 +161,15 @@ function initWebSocket() {
         duration: 3000
       })
 
-      // 获取最新数据并更新 store
-      try {
-        const freshEmail = await api.getEmail(data.email_id)
+      // 直接使用 WebSocket 推送的完整数据更新 store（无需再请求 API）
+      if (data.success && data.body_translated !== undefined) {
         emailStore.updateEmailTranslation(data.email_id, {
-          subject_translated: freshEmail.subject_translated,
-          body_translated: freshEmail.body_translated,
-          is_translated: freshEmail.is_translated,
-          translation_status: freshEmail.translation_status
+          subject_translated: data.subject_translated,
+          body_translated: data.body_translated,
+          is_translated: data.is_translated,
+          translation_status: data.translation_status
         })
-        console.log('[WS] Updated email translation in store:', data.email_id)
-      } catch (e) {
-        console.error('[WS] Failed to refresh email after translation:', e)
+        console.log('[WS] Updated email translation in store from WS data:', data.email_id)
       }
 
       // 触发全局事件供其他组件刷新
@@ -189,6 +186,16 @@ function initWebSocket() {
         message: data.error || '翻译过程中发生错误',
         duration: 5000
       })
+
+      // 更新 store 中的翻译状态为失败
+      if (data.email_id) {
+        emailStore.updateEmailTranslation(data.email_id, {
+          translation_status: 'failed'
+        })
+      }
+
+      // 触发全局事件供其他组件刷新
+      window.dispatchEvent(new CustomEvent('email-translation-failed', { detail: data }))
     })
   )
 

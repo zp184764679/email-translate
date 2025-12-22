@@ -55,6 +55,7 @@ def translate_email_task(self, email_id: int, account_id: int, force: bool = Fal
     from database.models import Email, SharedEmailTranslation, EmailAccount
     from services.translate_service import TranslateService
     from config import get_settings
+    from sqlalchemy import and_
 
     settings = get_settings()
     db = get_db_session()
@@ -68,6 +69,27 @@ def translate_email_task(self, email_id: int, account_id: int, force: bool = Fal
         # 检查是否已翻译
         if email.is_translated and not force:
             return {"success": True, "email_id": email_id, "cached": True}
+
+        # 翻译锁：使用数据库原子更新防止并发翻译
+        # 只有状态为 none/pending/failed 的邮件才能开始翻译
+        from sqlalchemy import update
+        result = db.execute(
+            update(Email)
+            .where(and_(
+                Email.id == email_id,
+                Email.translation_status.in_(["none", "pending", "failed", None])
+            ))
+            .values(translation_status="translating")
+        )
+        db.commit()
+
+        if result.rowcount == 0:
+            # 邮件正在被其他 worker 翻译，跳过
+            print(f"[TranslateTask] Email {email_id} is already being translated, skipping")
+            return {"success": True, "email_id": email_id, "skipped": True, "reason": "already_translating"}
+
+        # 刷新邮件对象以获取最新状态
+        db.refresh(email)
 
         # 获取账户信息（用于术语表）
         account = db.query(EmailAccount).filter(EmailAccount.id == email.account_id).first()
@@ -138,11 +160,15 @@ def translate_email_task(self, email_id: int, account_id: int, force: bool = Fal
 
         db.commit()
 
-        # 发送完成通知
+        # 发送完成通知（包含完整翻译数据，前端无需再请求 API）
         notify_completion(account_id, "translation_complete", {
             "email_id": email_id,
             "provider": provider_used,
-            "success": True
+            "success": True,
+            "subject_translated": subject_translated,
+            "body_translated": body_translated,
+            "is_translated": True,
+            "translation_status": "completed"
         })
 
         # 翻译完成后，异步触发任务信息提取（供Portal项目管理导入）
@@ -161,10 +187,27 @@ def translate_email_task(self, email_id: int, account_id: int, force: bool = Fal
         }
 
     except SoftTimeLimitExceeded:
-        # 软超时，尝试重试（使用指数退避：10s, 20s, 40s）
+        # 软超时，重置状态为 failed 以便重试
+        try:
+            db.rollback()
+            email = db.query(Email).filter(Email.id == email_id).first()
+            if email:
+                email.translation_status = "failed"
+                db.commit()
+        except:
+            pass
+        # 尝试重试（使用指数退避：10s, 20s, 40s）
         raise self.retry(countdown=10 * (2 ** self.request.retries))
     except Exception as e:
-        db.rollback()
+        # 翻译失败，更新状态为 failed
+        try:
+            db.rollback()
+            email = db.query(Email).filter(Email.id == email_id).first()
+            if email:
+                email.translation_status = "failed"
+                db.commit()
+        except:
+            pass
         print(f"[TranslateTask] Error translating email {email_id}: {e}")
 
         # 发送失败通知

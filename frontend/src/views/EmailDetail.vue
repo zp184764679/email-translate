@@ -44,7 +44,23 @@
           <el-tag v-else type="success" size="small">发件</el-tag>
           <!-- 外语标签：显示翻译状态 -->
           <el-tag
-            v-if="email.language_detected && email.language_detected !== 'zh' && email.language_detected !== 'unknown'"
+            v-if="email.translation_status === 'translating'"
+            type="primary"
+            size="small"
+            class="translating-status-tag"
+          >
+            <el-icon class="is-loading"><Loading /></el-icon>
+            翻译中
+          </el-tag>
+          <el-tag
+            v-else-if="email.translation_status === 'failed'"
+            type="danger"
+            size="small"
+          >
+            翻译失败
+          </el-tag>
+          <el-tag
+            v-else-if="email.language_detected && email.language_detected !== 'zh' && email.language_detected !== 'unknown'"
             :type="email.is_translated ? 'success' : 'warning'"
             size="small"
           >
@@ -119,8 +135,22 @@
         </div>
       </div>
 
-      <!-- 翻译提示条（仅非中文且未翻译时显示）-->
-      <div class="translation-notice" v-if="!email.is_translated && email.language_detected && email.language_detected !== 'zh' && email.language_detected !== 'unknown'">
+      <!-- 翻译提示条 -->
+      <!-- 翻译中状态 -->
+      <div class="translation-notice translating" v-if="email.translation_status === 'translating'">
+        <el-icon class="is-loading"><Loading /></el-icon>
+        <span>正在翻译此邮件，请稍候...</span>
+      </div>
+      <!-- 翻译失败状态 -->
+      <div class="translation-notice failed" v-else-if="email.translation_status === 'failed'">
+        <el-icon><InfoFilled /></el-icon>
+        <span>翻译失败，请重试</span>
+        <el-button type="primary" size="small" @click="translateEmail" :loading="translating">
+          重试翻译
+        </el-button>
+      </div>
+      <!-- 未翻译状态（仅非中文时显示）-->
+      <div class="translation-notice" v-else-if="!email.is_translated && email.language_detected && email.language_detected !== 'zh' && email.language_detected !== 'unknown'">
         <el-icon><InfoFilled /></el-icon>
         <span>此邮件为 {{ getLanguageName(email.language_detected) }}，尚未翻译</span>
         <el-button type="primary" size="small" @click="translateEmail" :loading="translating">
@@ -499,7 +529,7 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeft, Back, ChatLineSquare, Right, Delete, Star,
   Printer, Paperclip, Document, Download, InfoFilled, DocumentCopy, View, ArrowDown, CollectionTag,
-  CopyDocument, Refresh, RefreshRight, Search, Link, Message
+  CopyDocument, Refresh, RefreshRight, Search, Link, Message, Loading
 } from '@element-plus/icons-vue'
 import LabelSelector from '@/components/LabelSelector.vue'
 import ExtractionPanel from '@/components/ExtractionPanel.vue'
@@ -543,6 +573,7 @@ onUnmounted(() => {
   // 翻译完成后数据会保存到后端，下次查看时直接显示结果
   // 移除翻译事件监听
   window.removeEventListener('email-translated', handleEmailTranslated)
+  window.removeEventListener('email-translation-failed', handleEmailTranslationFailed)
 })
 
 // 邮件详情快捷键
@@ -1109,28 +1140,35 @@ function previewSignature() {
 }
 
 // 处理翻译完成事件
-async function handleEmailTranslated(event) {
-  const { email_id } = event.detail
-  if (!email_id || !email.value || email.value.id !== email_id) return
+function handleEmailTranslated(event) {
+  const detail = event.detail
+  if (!detail?.email_id || !email.value || email.value.id !== detail.email_id) return
 
-  try {
-    const freshEmail = await api.getEmail(email_id)
-    email.value.subject_translated = freshEmail.subject_translated
-    email.value.body_translated = freshEmail.body_translated
-    email.value.is_translated = freshEmail.is_translated
-    email.value.translation_status = freshEmail.translation_status
-    console.log(`[EmailDetail] Updated translation for email ${email_id}`)
-  } catch (e) {
-    console.error(`[EmailDetail] Failed to refresh email ${email_id}:`, e)
+  // 直接使用 WebSocket 推送的数据（如果有的话）
+  if (detail.body_translated !== undefined) {
+    email.value.subject_translated = detail.subject_translated
+    email.value.body_translated = detail.body_translated
+    email.value.is_translated = detail.is_translated
+    email.value.translation_status = detail.translation_status
+    console.log(`[EmailDetail] Updated translation for email ${detail.email_id} from WS data`)
   }
+}
+
+function handleEmailTranslationFailed(event) {
+  const detail = event.detail
+  if (!detail?.email_id || !email.value || email.value.id !== detail.email_id) return
+
+  email.value.translation_status = 'failed'
+  console.log(`[EmailDetail] Translation failed for email ${detail.email_id}`)
 }
 
 onMounted(() => {
   loadEmail()
   loadSignatures()
   loadContactHistory()
-  // 监听翻译完成事件
+  // 监听翻译事件
   window.addEventListener('email-translated', handleEmailTranslated)
+  window.addEventListener('email-translation-failed', handleEmailTranslationFailed)
 })
 
 async function loadEmail() {
@@ -1833,6 +1871,28 @@ function sanitizeHtml(html) {
   border-radius: 4px;
   font-size: 13px;
   color: #e6a23c;
+}
+
+.translation-notice.translating {
+  background-color: #ecf5ff;
+  border-color: #d9ecff;
+  color: #409eff;
+}
+
+.translation-notice.failed {
+  background-color: #fef0f0;
+  border-color: #fde2e2;
+  color: #f56c6c;
+}
+
+.translating-status-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.translating-status-tag .el-icon {
+  font-size: 12px;
 }
 
 /* 附件区域 */

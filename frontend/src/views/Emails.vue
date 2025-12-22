@@ -182,10 +182,30 @@
             <div class="email-content">
               <div class="email-top-row">
                 <span class="sender-name">{{ email.from_name || extractEmailName(email.from_email) }}</span>
-                <!-- 右侧显示时间和"未翻译"标签 -->
+                <!-- 右侧显示时间和翻译状态标签 -->
                 <span class="email-time-area">
+                  <!-- 翻译中状态 -->
                   <el-tag
-                    v-if="!email.is_translated && email.language_detected && email.language_detected !== 'zh' && email.language_detected !== 'unknown'"
+                    v-if="email.translation_status === 'translating'"
+                    size="small"
+                    type="primary"
+                    class="translating-tag"
+                  >
+                    <el-icon class="is-loading"><Loading /></el-icon>
+                    翻译中
+                  </el-tag>
+                  <!-- 翻译失败状态 -->
+                  <el-tag
+                    v-else-if="email.translation_status === 'failed'"
+                    size="small"
+                    type="danger"
+                    class="failed-tag"
+                  >
+                    翻译失败
+                  </el-tag>
+                  <!-- 未翻译状态 -->
+                  <el-tag
+                    v-else-if="!email.is_translated && email.language_detected && email.language_detected !== 'zh' && email.language_detected !== 'unknown'"
                     size="small"
                     type="warning"
                     class="untranslated-tag"
@@ -279,7 +299,9 @@ import {
   // 右键菜单图标
   View, Hide, Delete, Folder, PriceTag, EditPen, Promotion, Refresh, Back, DArrowRight,
   // 悬停按钮图标
-  MoreFilled
+  MoreFilled,
+  // 翻译状态图标
+  Loading
 } from '@element-plus/icons-vue'
 import api from '@/api'
 import dayjs from 'dayjs'
@@ -666,6 +688,7 @@ onMounted(async () => {
   window.addEventListener('email-deleted', handleRemoteDelete)
   window.addEventListener('ws:reconnected', handleWsReconnected)
   window.addEventListener('email-translated', handleEmailTranslated)
+  window.addEventListener('email-translation-failed', handleEmailTranslationFailed)
 })
 
 // 清理事件监听器
@@ -674,27 +697,40 @@ onUnmounted(() => {
   window.removeEventListener('email-deleted', handleRemoteDelete)
   window.removeEventListener('ws:reconnected', handleWsReconnected)
   window.removeEventListener('email-translated', handleEmailTranslated)
+  window.removeEventListener('email-translation-failed', handleEmailTranslationFailed)
 })
 
 // 处理翻译完成事件
-async function handleEmailTranslated(event) {
-  const { email_id } = event.detail
-  if (!email_id) return
+function handleEmailTranslated(event) {
+  const detail = event.detail
+  if (!detail?.email_id) return
 
-  const emailIndex = emails.value.findIndex(e => e.id === email_id)
+  const emailIndex = emails.value.findIndex(e => e.id === detail.email_id)
   if (emailIndex === -1) return
 
-  try {
-    const freshEmail = await api.getEmail(email_id)
-    const existingEmail = emails.value[emailIndex]
-    existingEmail.subject_translated = freshEmail.subject_translated
-    existingEmail.body_translated = freshEmail.body_translated
-    existingEmail.is_translated = freshEmail.is_translated
-    existingEmail.translation_status = freshEmail.translation_status
-    console.log(`[Emails] Updated translation for email ${email_id}`)
-  } catch (e) {
-    console.error(`[Emails] Failed to refresh email ${email_id}:`, e)
+  const existingEmail = emails.value[emailIndex]
+
+  // 直接使用 WebSocket 推送的数据（如果有的话）
+  if (detail.body_translated !== undefined) {
+    existingEmail.subject_translated = detail.subject_translated
+    existingEmail.body_translated = detail.body_translated
+    existingEmail.is_translated = detail.is_translated
+    existingEmail.translation_status = detail.translation_status
+    console.log(`[Emails] Updated translation for email ${detail.email_id} from WS data`)
   }
+}
+
+// 处理翻译失败事件
+function handleEmailTranslationFailed(event) {
+  const detail = event.detail
+  if (!detail?.email_id) return
+
+  const emailIndex = emails.value.findIndex(e => e.id === detail.email_id)
+  if (emailIndex === -1) return
+
+  const existingEmail = emails.value[emailIndex]
+  existingEmail.translation_status = 'failed'
+  console.log(`[Emails] Translation failed for email ${detail.email_id}`)
 }
 
 // 处理远程邮件状态变更（来自其他客户端的 WebSocket 通知）
@@ -1316,6 +1352,21 @@ function getTextColor(bgColor) {
 
 .untranslated-tag {
   margin-left: auto;  /* 靠右对齐 */
+}
+
+.translating-tag {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.translating-tag .el-icon {
+  font-size: 12px;
+}
+
+.failed-tag {
+  margin-left: auto;
 }
 
 .email-subject {
