@@ -219,10 +219,9 @@
             @contextmenu.prevent="handleBodyContextMenu"
           >
             <!-- 优先显示纯文本，否则显示 HTML 渲染 -->
-            <div class="pane-content" v-if="email.body_original && email.body_original.trim()">
-              {{ email.body_original }}
+            <div class="pane-content linkified" v-if="email.body_original && email.body_original.trim()" v-html="linkifyText(email.body_original)" @click="handleLinkClick">
             </div>
-            <div class="pane-content html-content" v-else-if="email.body_html" v-html="sanitizeHtml(email.body_html)">
+            <div class="pane-content html-content" v-else-if="email.body_html" v-html="sanitizeHtml(email.body_html)" @click="handleLinkClick">
             </div>
             <div class="pane-content empty-content" v-else>
               (无文本内容)
@@ -240,16 +239,14 @@
             @contextmenu.prevent="handleBodyContextMenu"
           >
             <!-- 中文邮件或未识别语言：右侧显示原文 -->
-            <div class="pane-content" v-if="!email.language_detected || email.language_detected === 'zh' || email.language_detected === 'unknown'">
-              <template v-if="email.body_original && email.body_original.trim()">
-                {{ email.body_original }}
-              </template>
+            <div class="pane-content" v-if="!email.language_detected || email.language_detected === 'zh' || email.language_detected === 'unknown'" @click="handleLinkClick">
+              <div class="linkified" v-if="email.body_original && email.body_original.trim()" v-html="linkifyText(email.body_original)"></div>
               <div class="html-content" v-else-if="email.body_html" v-html="sanitizeHtml(email.body_html)"></div>
               <template v-else>(无文本内容)</template>
             </div>
             <!-- 非中文邮件：显示翻译 -->
-            <div class="pane-content" v-else-if="email.body_translated">
-              {{ email.body_translated }}
+            <div class="pane-content" v-else-if="email.body_translated" @click="handleLinkClick">
+              <div class="linkified" v-html="linkifyText(email.body_translated)"></div>
               <div class="retranslate-hint">
                 <el-button
                   type="primary"
@@ -1730,6 +1727,42 @@ function sanitizeHtml(html) {
     ALLOW_DATA_ATTR: false
   })
 }
+
+// 将纯文本中的 URL 转换为可点击链接
+function linkifyText(text) {
+  if (!text) return ''
+  // 先转义 HTML 特殊字符，防止 XSS
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+  // URL 正则匹配（支持 http/https）
+  const urlRegex = /(https?:\/\/[^\s<>"'&]+)/gi
+  // 将 URL 替换为可点击链接
+  const linked = escaped.replace(urlRegex, '<a href="$1" class="email-link" target="_blank">$1</a>')
+  // 保留换行
+  return linked.replace(/\n/g, '<br>')
+}
+
+// 处理链接点击
+function handleLinkClick(event) {
+  const target = event.target
+  if (target.tagName === 'A' && target.href) {
+    event.preventDefault()
+    event.stopPropagation()
+    const url = target.getAttribute('href')
+    if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
+      // Electron 环境
+      if (window.electronAPI?.openExternal) {
+        window.electronAPI.openExternal(url)
+      } else {
+        // 浏览器环境
+        window.open(url, '_blank', 'noopener,noreferrer')
+      }
+    }
+  }
+}
 </script>
 
 <style scoped>
@@ -2073,6 +2106,22 @@ function sanitizeHtml(html) {
 .pane-content.empty-content {
   color: #909399;
   font-style: italic;
+}
+
+/* 链接样式 */
+.pane-content :deep(.email-link),
+.pane-content.linkified :deep(a),
+.linkified :deep(a) {
+  color: #409eff;
+  text-decoration: underline;
+  cursor: pointer;
+  word-break: break-all;
+}
+
+.pane-content :deep(.email-link:hover),
+.pane-content.linkified :deep(a:hover),
+.linkified :deep(a:hover) {
+  color: #79bbff;
 }
 
 .retranslate-hint {

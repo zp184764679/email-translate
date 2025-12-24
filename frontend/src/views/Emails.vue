@@ -2,8 +2,28 @@
   <div class="emails-container" :class="layoutClass">
     <!-- 主要内容区 -->
     <div class="emails-main">
+      <!-- 视图切换按钮 -->
+      <div class="view-mode-toggle">
+        <el-radio-group v-model="viewMode" size="small">
+          <el-radio-button value="split">双栏</el-radio-button>
+          <el-radio-button value="grouped">分组</el-radio-button>
+        </el-radio-group>
+      </div>
+
+      <!-- 分组视图模式 -->
+      <EmailGroupView
+        v-if="viewMode === 'grouped'"
+        :emails="emails"
+        :selected-emails="selectedEmails"
+        :active-email-id="activeEmailId"
+        @email-click="(email) => handleEmailClick(email, emails.indexOf(email))"
+        @toggle-select="toggleSelect"
+        @toggle-flag="toggleFlag"
+        @mark-read="(ids) => handleBatchMarkRead(ids, true)"
+      />
+
       <!-- Split View 模式：左边原文，右边译文 -->
-      <div class="split-panes">
+      <div class="split-panes" v-if="viewMode === 'split'">
       <!-- 左侧原文列表 -->
       <div class="split-pane original-pane">
         <div class="split-pane-header">
@@ -301,7 +321,9 @@ import {
   // 悬停按钮图标
   MoreFilled,
   // 翻译状态图标
-  Loading
+  Loading,
+  // 视图切换图标
+  Grid
 } from '@element-plus/icons-vue'
 import api from '@/api'
 import dayjs from 'dayjs'
@@ -310,6 +332,7 @@ import { useKeyboardShortcuts } from '@/composables/useKeyboardShortcuts'
 import EmailPreview from '@/components/EmailPreview.vue'
 import LabelSelector from '@/components/LabelSelector.vue'
 import FolderPicker from '@/components/FolderPicker.vue'
+import EmailGroupView from '@/components/EmailGroupView.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -337,6 +360,9 @@ const folderPickerEmailId = ref(null)  // 当前操作的邮件ID
 
 // 操作锁：防止快速双击导致竞态
 const pendingFlagOps = ref(new Set())  // 正在进行星标操作的邮件 ID
+
+// 视图模式：split(双栏) / grouped(分组)
+const viewMode = ref('split')
 
 // 布局模式类名
 const layoutClass = computed(() => {
@@ -1174,6 +1200,15 @@ function getTextColor(bgColor) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+/* 视图模式切换 */
+.view-mode-toggle {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  background: var(--el-bg-color);
 }
 
 /* 列表头部 */

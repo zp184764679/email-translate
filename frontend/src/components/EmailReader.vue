@@ -92,30 +92,30 @@
         <!-- 中文邮件：左右都显示原文 -->
         <template v-if="!email.language_detected || email.language_detected === 'zh'">
           <div class="paragraph-pair" v-for="(para, index) in chineseParagraphs" :key="index">
-            <div class="pair-cell original-cell">
-              <div class="cell-content">{{ para }}</div>
+            <div class="pair-cell original-cell" @click="handleLinkClick">
+              <div class="cell-content linkified" v-html="linkifyText(para)"></div>
             </div>
-            <div class="pair-cell translated-cell">
-              <div class="cell-content">{{ para }}</div>
+            <div class="pair-cell translated-cell" @click="handleLinkClick">
+              <div class="cell-content linkified" v-html="linkifyText(para)"></div>
             </div>
           </div>
         </template>
         <!-- 非中文邮件：显示原文和翻译 -->
         <template v-else-if="email.body_translated">
           <div class="paragraph-pair" v-for="(pair, index) in paragraphPairs" :key="index">
-            <div class="pair-cell original-cell">
-              <div class="cell-content">{{ pair.original }}</div>
+            <div class="pair-cell original-cell" @click="handleLinkClick">
+              <div class="cell-content linkified" v-html="linkifyText(pair.original)"></div>
             </div>
-            <div class="pair-cell translated-cell">
-              <div class="cell-content">{{ pair.translated }}</div>
+            <div class="pair-cell translated-cell" @click="handleLinkClick">
+              <div class="cell-content linkified" v-html="linkifyText(pair.translated)"></div>
             </div>
           </div>
         </template>
         <template v-else>
           <!-- 未翻译时显示原文和占位符 -->
           <div class="split-body-fallback">
-            <div class="split-pane original-pane">
-              <div class="pane-content">{{ displayOriginalBody }}</div>
+            <div class="split-pane original-pane" @click="handleLinkClick">
+              <div class="pane-content linkified" v-html="linkifyText(displayOriginalBody)"></div>
             </div>
             <div class="split-divider"></div>
             <div class="split-pane translated-pane">
@@ -142,7 +142,7 @@
 
     <!-- HTML 对话框 -->
     <el-dialog v-model="showHtmlDialog" title="HTML 原文" width="80%" top="5vh">
-      <div class="body-html" v-html="sanitizeHtml(email.body_html)"></div>
+      <div class="body-html" v-html="sanitizeHtml(email.body_html)" @click="handleLinkClick"></div>
     </el-dialog>
 
     <!-- 快速回复区域 -->
@@ -480,6 +480,42 @@ function sanitizeHtml(html) {
     ALLOW_DATA_ATTR: false
   })
 }
+
+// 将纯文本中的 URL 转换为可点击链接
+function linkifyText(text) {
+  if (!text) return ''
+  // 先转义 HTML 特殊字符，防止 XSS
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+  // URL 正则匹配（支持 http/https）
+  const urlRegex = /(https?:\/\/[^\s<>"'&]+)/gi
+  // 将 URL 替换为可点击链接
+  const linked = escaped.replace(urlRegex, '<a href="$1" class="email-link" target="_blank">$1</a>')
+  // 保留换行
+  return linked.replace(/\n/g, '<br>')
+}
+
+// 处理链接点击
+function handleLinkClick(event) {
+  const target = event.target
+  if (target.tagName === 'A' && target.href) {
+    event.preventDefault()
+    event.stopPropagation()
+    const url = target.getAttribute('href')
+    if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
+      // Electron 环境
+      if (window.electronAPI?.openExternal) {
+        window.electronAPI.openExternal(url)
+      } else {
+        // 浏览器环境
+        window.open(url, '_blank', 'noopener,noreferrer')
+      }
+    }
+  }
+}
 </script>
 
 <style scoped>
@@ -740,6 +776,26 @@ function sanitizeHtml(html) {
   line-height: 1.7;
   font-size: 13px;
   color: #303133;
+}
+
+/* 链接样式 */
+.linkified :deep(.email-link),
+.linkified :deep(a),
+.cell-content :deep(.email-link),
+.cell-content :deep(a),
+.body-html :deep(a) {
+  color: #409eff;
+  text-decoration: underline;
+  cursor: pointer;
+  word-break: break-all;
+}
+
+.linkified :deep(.email-link:hover),
+.linkified :deep(a:hover),
+.cell-content :deep(.email-link:hover),
+.cell-content :deep(a:hover),
+.body-html :deep(a:hover) {
+  color: #79bbff;
 }
 
 .pane-placeholder {

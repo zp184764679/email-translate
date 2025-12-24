@@ -23,6 +23,15 @@
       <div class="folder-list">
         <div
           class="folder-item"
+          :class="{ active: currentFolder === 'dashboard' }"
+          @click="navigateTo('/dashboard', 'dashboard')"
+        >
+          <el-icon><DataLine /></el-icon>
+          <span class="folder-name">仪表盘</span>
+        </div>
+
+        <div
+          class="folder-item"
           :class="{ active: currentFolder === 'inbox' }"
           @click="navigateTo('/emails', 'inbox')"
         >
@@ -185,17 +194,56 @@
 
         <div class="toolbar-center">
           <!-- 搜索框 -->
-          <el-input
-            v-model="searchQuery"
-            placeholder="搜索邮件..."
-            prefix-icon="Search"
-            clearable
-            class="search-input"
-            @keyup.enter="handleSearch"
-          />
+          <div class="search-wrapper">
+            <el-input
+              v-model="searchQuery"
+              placeholder="搜索邮件..."
+              prefix-icon="Search"
+              clearable
+              class="search-input"
+              @keyup.enter="handleSearch"
+            />
+            <el-button
+              v-if="isEmailView"
+              text
+              class="advanced-search-btn"
+              @click="showAdvancedSearch = true"
+            >
+              <el-icon><Filter /></el-icon>
+              高级
+            </el-button>
+          </div>
         </div>
 
         <div class="toolbar-right">
+          <!-- 分组切换 -->
+          <el-dropdown @command="handleGroupChange" v-if="isEmailView">
+            <el-button>
+              <el-icon><Collection /></el-icon>
+              分组
+              <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="" :class="{ 'is-active': !currentGroupBy }">
+                  不分组
+                </el-dropdown-item>
+                <el-dropdown-item command="sender" :class="{ 'is-active': currentGroupBy === 'sender' }">
+                  按发件人
+                </el-dropdown-item>
+                <el-dropdown-item command="date" :class="{ 'is-active': currentGroupBy === 'date' }">
+                  按日期
+                </el-dropdown-item>
+                <el-dropdown-item command="language" :class="{ 'is-active': currentGroupBy === 'language' }">
+                  按语言
+                </el-dropdown-item>
+                <el-dropdown-item command="label" :class="{ 'is-active': currentGroupBy === 'label' }">
+                  按标签
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+
           <!-- 布局切换 -->
           <el-dropdown @command="handleLayoutChange" v-if="isEmailView">
             <el-button>
@@ -220,6 +268,9 @@
               </el-dropdown-menu>
             </template>
           </el-dropdown>
+
+          <!-- 通知中心 -->
+          <NotificationCenter />
 
           <!-- 双语对比模式提示 -->
           <span class="view-mode-hint">
@@ -252,6 +303,9 @@
 
     <!-- 快捷键帮助弹窗 -->
     <KeyboardShortcutsHelp ref="shortcutsHelpRef" />
+
+    <!-- 高级搜索抽屉 -->
+    <AdvancedSearch v-model="showAdvancedSearch" />
 
     <!-- 文件夹创建/编辑对话框 -->
     <el-dialog
@@ -301,13 +355,15 @@ import {
   Refresh, RefreshRight, Message, EditPen, Document, Delete,
   OfficeBuilding, Setting, Promotion, Star, ChatDotSquare,
   SwitchButton, Checked, Reading, DocumentCopy, Grid, List,
-  Operation, Histogram, ArrowDown, Plus, Folder, Edit, Calendar
+  Operation, Histogram, ArrowDown, Plus, Folder, Edit, Calendar, DataLine, Filter, Collection, Bell
 } from '@element-plus/icons-vue'
 import api from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import ComposeEmail from '@/components/ComposeEmail.vue'
 import KeyboardShortcutsHelp from '@/components/KeyboardShortcutsHelp.vue'
 import TodayAgenda from '@/components/TodayAgenda.vue'
+import AdvancedSearch from '@/components/AdvancedSearch.vue'
+import NotificationCenter from '@/components/NotificationCenter.vue'
 import { useKeyboardShortcuts } from '@/composables/useKeyboardShortcuts'
 
 const route = useRoute()
@@ -320,6 +376,7 @@ const batchTranslating = ref(false)
 const currentFolder = ref('inbox')
 const searchQuery = ref('')
 const showComposeDialog = ref(false)
+const showAdvancedSearch = ref(false)
 const unreadCount = ref(0)
 const draftCount = ref(0)
 
@@ -371,6 +428,9 @@ const isEmailView = computed(() => {
   return route.path.startsWith('/emails')
 })
 
+// 当前分组方式
+const currentGroupBy = computed(() => route.query.group_by || '')
+
 // 初始化
 onMounted(() => {
   loadCounts()
@@ -403,7 +463,9 @@ watch(() => route.path, () => {
 
 function updateCurrentFolder() {
   const path = route.path
-  if (path.startsWith('/emails')) {
+  if (path.startsWith('/dashboard')) {
+    currentFolder.value = 'dashboard'
+  } else if (path.startsWith('/emails')) {
     if (route.query.direction === 'outbound') {
       currentFolder.value = 'sent'
     } else if (route.query.folder_id) {
@@ -493,6 +555,16 @@ function handleSearch() {
 
 function handleLayoutChange(mode) {
   userStore.setLayoutMode(mode)
+}
+
+function handleGroupChange(groupBy) {
+  const query = { ...route.query }
+  if (groupBy) {
+    query.group_by = groupBy
+  } else {
+    delete query.group_by
+  }
+  router.push({ path: '/emails', query })
 }
 
 async function markAsRead() {
@@ -896,8 +968,23 @@ async function deleteFolderConfirm() {
   margin: 0 24px;
 }
 
+.search-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .search-input {
-  width: 100%;
+  flex: 1;
+}
+
+.advanced-search-btn {
+  color: #606266;
+  font-size: 13px;
+}
+
+.advanced-search-btn:hover {
+  color: #409eff;
 }
 
 .toolbar-right {

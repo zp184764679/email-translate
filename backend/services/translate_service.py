@@ -1474,9 +1474,8 @@ Please check the following items:
                 translated = self.translate_with_ollama(text_to_translate, target_lang, source_lang, glossary,
                                                          complexity_score=complexity_score)
 
-                # 如果有引用，拼接回去
-                if has_quote:
-                    translated = translated + "\n\n---\n[以下为历史邮件引用]\n" + quoted_content
+                # 注意：不在此处拼接引用内容，由 emails.py 统一处理
+                # 这样可以正确使用历史翻译而非原文引用
 
                 return {
                     "translated_text": translated,
@@ -1492,10 +1491,9 @@ Please check the following items:
         # 2. Claude 兜底（同样只翻译最新内容）
         result = self._translate_with_claude_fallback(text_to_translate, target_lang, source_lang, glossary, complexity)
 
-        # 如果有引用，拼接回去
-        if has_quote:
-            result["translated_text"] = result["translated_text"] + "\n\n---\n[以下为历史邮件引用]\n" + quoted_content
-            result["has_quote"] = True
+        # 注意：不在此处拼接引用内容，由 emails.py 统一处理
+        # 这样可以正确使用历史翻译而非原文引用
+        result["has_quote"] = has_quote
 
         return result
 

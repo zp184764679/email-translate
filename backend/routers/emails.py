@@ -154,11 +154,25 @@ async def get_emails(
     sort_by: Optional[str] = "date_desc",  # date_desc, date_asc, from, subject
     limit: int = 100,
     offset: int = 0,
+    # Advanced search filters
+    from_email: Optional[str] = None,
+    to_email: Optional[str] = None,
+    date_start: Optional[str] = None,  # ISO format: 2024-01-01
+    date_end: Optional[str] = None,
+    has_attachment: Optional[bool] = None,
+    label_ids: Optional[str] = None,  # Comma-separated IDs
+    language: Optional[str] = None,
+    translation_status: Optional[str] = None,  # none, pending, translating, completed, failed
+    is_read: Optional[bool] = None,
+    is_translated: Optional[bool] = None,
+    is_flagged: Optional[bool] = None,
+    folder_id: Optional[int] = None,
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """获取当前账户的邮件列表"""
-    from sqlalchemy import or_
+    """获取当前账户的邮件列表（支持高级搜索）"""
+    from sqlalchemy import or_, exists
+    from datetime import datetime
 
     # 构建基础查询条件
     base_conditions = [Email.account_id == account.id]
@@ -180,6 +194,82 @@ async def get_emails(
             Email.from_email.ilike(search_pattern),
             Email.from_name.ilike(search_pattern)
         ))
+
+    # Advanced filters
+    if from_email:
+        base_conditions.append(Email.from_email.ilike(f"%{from_email}%"))
+
+    if to_email:
+        base_conditions.append(or_(
+            Email.to_email.ilike(f"%{to_email}%"),
+            Email.cc_email.ilike(f"%{to_email}%")
+        ))
+
+    if date_start:
+        try:
+            start_date = datetime.fromisoformat(date_start)
+            base_conditions.append(Email.received_at >= start_date)
+        except ValueError:
+            pass
+
+    if date_end:
+        try:
+            end_date = datetime.fromisoformat(date_end)
+            # Add one day to include the entire end date
+            end_date = end_date.replace(hour=23, minute=59, second=59)
+            base_conditions.append(Email.received_at <= end_date)
+        except ValueError:
+            pass
+
+    if has_attachment is not None:
+        if has_attachment:
+            base_conditions.append(
+                exists().where(Attachment.email_id == Email.id)
+            )
+        else:
+            base_conditions.append(
+                ~exists().where(Attachment.email_id == Email.id)
+            )
+
+    if label_ids:
+        try:
+            ids = [int(id.strip()) for id in label_ids.split(',') if id.strip()]
+            if ids:
+                from database.models import email_label_association
+                base_conditions.append(
+                    Email.id.in_(
+                        select(email_label_association.c.email_id).where(
+                            email_label_association.c.label_id.in_(ids)
+                        )
+                    )
+                )
+        except ValueError:
+            pass
+
+    if language:
+        base_conditions.append(Email.language_detected == language)
+
+    if translation_status:
+        base_conditions.append(Email.translation_status == translation_status)
+
+    if is_read is not None:
+        base_conditions.append(Email.is_read == is_read)
+
+    if is_translated is not None:
+        base_conditions.append(Email.is_translated == is_translated)
+
+    if is_flagged is not None:
+        base_conditions.append(Email.is_flagged == is_flagged)
+
+    if folder_id:
+        from database.models import email_folder_association
+        base_conditions.append(
+            Email.id.in_(
+                select(email_folder_association.c.email_id).where(
+                    email_folder_association.c.folder_id == folder_id
+                )
+            )
+        )
 
     # 先计算总数
     count_query = select(func.count(Email.id)).where(*base_conditions)

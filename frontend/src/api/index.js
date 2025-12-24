@@ -546,6 +546,36 @@ const api = {
 
   async getRuleFieldOptions() {
     return instance.get('/rules/fields/options')
+  },
+
+  // Dashboard
+  async getDashboardStats() {
+    return instance.get('/dashboard/stats')
+  },
+
+  // Notifications
+  async getNotifications(params = {}) {
+    return instance.get('/notifications', { params })
+  },
+
+  async getUnreadNotificationCount() {
+    return instance.get('/notifications/unread-count')
+  },
+
+  async markNotificationAsRead(notificationId) {
+    return instance.patch(`/notifications/${notificationId}/read`)
+  },
+
+  async markAllNotificationsAsRead() {
+    return instance.post('/notifications/read-all')
+  },
+
+  async deleteNotification(notificationId) {
+    return instance.delete(`/notifications/${notificationId}`)
+  },
+
+  async clearAllNotifications() {
+    return instance.delete('/notifications')
   }
 }
 

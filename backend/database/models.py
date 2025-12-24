@@ -685,3 +685,33 @@ class SentEmailMapping(Base):
     __table_args__ = (
         {'mysql_engine': 'InnoDB'},
     )
+
+
+class Notification(Base):
+    """通知表 - 集中管理新邮件、翻译完成、审批等通知"""
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("email_accounts.id"), nullable=False, index=True)
+
+    # 通知类型: new_email, translation_complete, approval_request, approval_result
+    type = Column(String(50), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    message = Column(Text)
+
+    # 关联内容（可选）
+    related_id = Column(Integer)  # 关联的邮件ID/草稿ID等
+    related_type = Column(String(50))  # 'email', 'draft', 'batch'
+
+    # 状态
+    is_read = Column(Boolean, default=False, index=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    read_at = Column(DateTime)
+
+    # 关系
+    account = relationship("EmailAccount")
+
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )

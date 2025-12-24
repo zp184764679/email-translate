@@ -80,25 +80,23 @@
       </div>
 
       <!-- 单独显示 -->
-      <div class="body-content" v-if="showMode !== 'split'">
-        <div class="body-text" v-if="showMode === 'translated' && email.body_translated">
-          {{ email.body_translated }}
+      <div class="body-content" v-if="showMode !== 'split'" @click="handleLinkClick">
+        <div class="body-text linkified" v-if="showMode === 'translated' && email.body_translated" v-html="linkifyText(email.body_translated)">
         </div>
-        <div class="body-text" v-else>
-          {{ email.body_original || '(无文本内容)' }}
+        <div class="body-text linkified" v-else v-html="linkifyText(email.body_original) || '(无文本内容)'">
         </div>
       </div>
 
       <!-- 对比显示 -->
-      <div class="body-split" v-else>
+      <div class="body-split" v-else @click="handleLinkClick">
         <div class="split-pane">
           <div class="split-label">原文</div>
-          <div class="split-text">{{ email.body_original || '(无文本内容)' }}</div>
+          <div class="split-text linkified" v-html="linkifyText(email.body_original) || '(无文本内容)'"></div>
         </div>
         <div class="split-divider"></div>
         <div class="split-pane">
           <div class="split-label">{{ (!email.language_detected || email.language_detected === 'zh') ? '内容预览' : '翻译' }}</div>
-          <div class="split-text">{{ (!email.language_detected || email.language_detected === 'zh') ? (email.body_original || '(无文本内容)') : (email.body_translated || '(未翻译)') }}</div>
+          <div class="split-text linkified" v-html="linkifyText((!email.language_detected || email.language_detected === 'zh') ? email.body_original : email.body_translated) || '(未翻译)'"></div>
         </div>
       </div>
     </div>
@@ -260,6 +258,42 @@ function getAvatarColor(email) {
   }
   return colors[Math.abs(hash) % colors.length]
 }
+
+// 将纯文本中的 URL 转换为可点击链接
+function linkifyText(text) {
+  if (!text) return ''
+  // 先转义 HTML 特殊字符，防止 XSS
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+  // URL 正则匹配（支持 http/https）
+  const urlRegex = /(https?:\/\/[^\s<>"'&]+)/gi
+  // 将 URL 替换为可点击链接
+  const linked = escaped.replace(urlRegex, '<a href="$1" class="email-link" target="_blank">$1</a>')
+  // 保留换行
+  return linked.replace(/\n/g, '<br>')
+}
+
+// 处理链接点击
+function handleLinkClick(event) {
+  const target = event.target
+  if (target.tagName === 'A' && target.href) {
+    event.preventDefault()
+    event.stopPropagation()
+    const url = target.getAttribute('href')
+    if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
+      // Electron 环境
+      if (window.electronAPI?.openExternal) {
+        window.electronAPI.openExternal(url)
+      } else {
+        // 浏览器环境
+        window.open(url, '_blank', 'noopener,noreferrer')
+      }
+    }
+  }
+}
 </script>
 
 <style scoped>
@@ -393,6 +427,28 @@ function getAvatarColor(email) {
   color: #303133;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* 链接样式 */
+.linkified :deep(.email-link),
+.linkified :deep(a),
+.body-text :deep(.email-link),
+.body-text :deep(a),
+.split-text :deep(.email-link),
+.split-text :deep(a) {
+  color: #409eff;
+  text-decoration: underline;
+  cursor: pointer;
+  word-break: break-all;
+}
+
+.linkified :deep(.email-link:hover),
+.linkified :deep(a:hover),
+.body-text :deep(.email-link:hover),
+.body-text :deep(a:hover),
+.split-text :deep(.email-link:hover),
+.split-text :deep(a:hover) {
+  color: #79bbff;
 }
 
 /* 对比显示 */
