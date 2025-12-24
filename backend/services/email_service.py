@@ -169,19 +169,16 @@ class EmailService:
                 )
 
                 print(f"[IMAP] Pre-filtering against {len(normalized_existing)} existing emails...")
-                # 调试：检查最新几封邮件
-                debug_count = 0
-                for num in message_list[-5:][::-1]:  # 最新5封
+                # 调试：检查最新几封邮件（message_list[0] 是最新的，因为已 reverse）
+                print(f"[IMAP DEBUG] First 3 UIDs (newest): {message_list[:3]}, Last 3 UIDs (oldest): {message_list[-3:]}")
+                for num in message_list[:3]:  # 前3个是最新的
                     try:
                         _, header_data = self.imap_conn.fetch(num, "(BODY[HEADER.FIELDS (MESSAGE-ID DATE SUBJECT)])")
                         if header_data[0]:
                             header_text = header_data[0][1].decode('utf-8', errors='ignore')
-                            print(f"[IMAP DEBUG] Latest email {num}: {header_text[:200]}")
+                            print(f"[IMAP DEBUG] Newest email {num}: {header_text[:300]}")
                     except Exception as e:
                         print(f"[IMAP DEBUG] Error: {e}")
-                    debug_count += 1
-                    if debug_count >= 3:
-                        break
 
                 for num in message_list:
                     try:
