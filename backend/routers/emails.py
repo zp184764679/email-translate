@@ -1648,11 +1648,7 @@ async def translate_email(
     if not email:
         raise HTTPException(status_code=404, detail="邮件不存在")
 
-    # 检查翻译状态（使用数据库锁，支持多进程/多worker）
-    if email.translation_status == "translating":
-        raise HTTPException(status_code=409, detail="该邮件正在翻译中，请稍候")
-
-    # 强制重新翻译：清除所有缓存
+    # 强制重新翻译：清除所有缓存（必须在检查翻译状态之前）
     if force:
         print(f"[Translate] Force re-translate for email {email_id}, clearing caches...")
 
@@ -1665,7 +1661,7 @@ async def translate_email(
             )
             print(f"[Translate] Cleared SharedEmailTranslation for message_id={email.message_id}")
 
-        # 2. 清除邮件的翻译字段
+        # 2. 清除邮件的翻译字段和状态（包括卡住的 translating 状态）
         email.subject_translated = None
         email.body_translated = None
         email.is_translated = False
@@ -1673,8 +1669,13 @@ async def translate_email(
         await db.commit()
         print(f"[Translate] Cleared email translation fields")
 
-        # 3. 清除 Redis 缓存（如果有正文/标题的缓存）
-        # Redis 缓存会在翻译时自动更新，这里不需要显式清除
+        # 3. 重新获取邮件状态
+        await db.refresh(email)
+
+    # 检查翻译状态（使用数据库锁，支持多进程/多worker）
+    # 注意：force=true 时上面已经清除了 translating 状态
+    if email.translation_status == "translating":
+        raise HTTPException(status_code=409, detail="该邮件正在翻译中，请稍候")
 
     # 只有当已翻译且翻译内容确实存在时才跳过（非强制模式）
     if not force and email.is_translated and email.body_translated:
