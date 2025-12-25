@@ -32,12 +32,12 @@ class WebSocketManager {
     this.isConnecting = true
     this.isManualClose = false
 
-    // 构建 WebSocket URL
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = import.meta.env.VITE_API_URL
-      ? new URL(import.meta.env.VITE_API_URL).host
-      : window.location.host
-    const wsUrl = `${protocol}//${host}/ws/${accountId}`
+    // 构建 WebSocket URL - 使用与 API 相同的逻辑
+    const isDev = import.meta.env.DEV
+    const apiBaseUrl = isDev ? 'http://127.0.0.1:2000' : 'https://jzchardware.cn/email'
+    const wsProtocol = apiBaseUrl.startsWith('https') ? 'wss:' : 'ws:'
+    const apiUrl = new URL(apiBaseUrl)
+    const wsUrl = `${wsProtocol}//${apiUrl.host}${apiUrl.pathname}/ws/${accountId}`
 
     console.log(`[WS] Connecting to ${wsUrl}`)
 

@@ -18,6 +18,11 @@
           </el-button>
           <el-button :icon="CollectionTag" @click="openLabelSelector">标签</el-button>
         </el-button-group>
+        <el-divider direction="vertical" />
+        <el-button type="primary" plain @click="showCreateTaskDialog = true">
+          <el-icon><Document /></el-icon>
+          创建任务
+        </el-button>
       </div>
       <div class="toolbar-right">
         <el-dropdown @command="handleExport">
@@ -517,6 +522,14 @@
       @select="handleSenderMenuSelect"
       @close="senderContextMenu.hide()"
     />
+
+    <!-- 创建任务对话框 -->
+    <CreateTaskDialog
+      v-model="showCreateTaskDialog"
+      :email-id="email?.id"
+      :email-subject="email?.subject_translated || email?.subject_original"
+      @created="handleTaskCreated"
+    />
   </div>
 </template>
 
@@ -531,6 +544,7 @@ import {
 import LabelSelector from '@/components/LabelSelector.vue'
 import ExtractionPanel from '@/components/ExtractionPanel.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
+import CreateTaskDialog from '@/components/CreateTaskDialog.vue'
 import api, { getStorageKey } from '@/api'
 import dayjs from 'dayjs'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -547,6 +561,7 @@ const email = ref(null)
 const loading = ref(false)
 const showReplyDialog = ref(false)
 const showHtmlDialog = ref(false)
+const showCreateTaskDialog = ref(false)
 const translating = ref(false)
 const submitting = ref(false)
 const downloadingAttachments = ref({})  // 跟踪每个附件的下载状态
@@ -1357,6 +1372,12 @@ function handleEventCreated() {
   ElMessage.success('日程已创建，可在日历中查看')
 }
 
+// Portal 任务创建成功回调
+function handleTaskCreated(result) {
+  ElMessage.success('任务已创建，可在 Portal 项目管理中查看')
+  console.log('[EmailDetail] Task created:', result)
+}
+
 async function handleDelete() {
   try {
     await ElMessageBox.confirm('确定要删除这封邮件吗？', '删除确认', {
@@ -1753,13 +1774,7 @@ function handleLinkClick(event) {
     event.stopPropagation()
     const url = target.getAttribute('href')
     if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
-      // Electron 环境
-      if (window.electronAPI?.openExternal) {
-        window.electronAPI.openExternal(url)
-      } else {
-        // 浏览器环境
-        window.open(url, '_blank', 'noopener,noreferrer')
-      }
+      window.open(url, '_blank', 'noopener,noreferrer')
     }
   }
 }

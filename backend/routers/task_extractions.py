@@ -9,17 +9,41 @@
 2. Portal集成接口（/portal/...）- 使用服务令牌认证
 """
 import os
-from fastapi import APIRouter, Depends, HTTPException, Query, Header
+from fastapi import APIRouter, Depends, HTTPException, Query, Header, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
+from pydantic import BaseModel
 
 from database.database import get_db
 from database.models import TaskExtraction, Email
 from routers.users import get_current_account
+from services.portal_integration import portal_integration_service
 
 router = APIRouter(prefix="/api/task-extractions", tags=["task-extractions"])
+
+
+# ==================== Pydantic 模型 ====================
+
+class CreateTaskRequest(BaseModel):
+    """创建任务请求"""
+    project_id: Optional[int] = None
+    create_project: bool = False
+    project_name: Optional[str] = None
+    # 任务信息（用户可修改）
+    title: Optional[str] = None
+    description: Optional[str] = None
+    task_type: str = "general"
+    priority: str = "normal"
+    due_date: Optional[str] = None
+    start_date: Optional[str] = None
+    assigned_to_id: Optional[int] = None
+    action_items: Optional[List[str]] = None
+    # 项目信息（创建新项目时使用）
+    customer_name: Optional[str] = None
+    order_no: Optional[str] = None
+    part_number: Optional[str] = None
 
 # Portal 服务令牌（用于服务间通信）
 PORTAL_SERVICE_TOKEN = os.getenv('PORTAL_SERVICE_TOKEN', 'jzc-portal-integration-token-2025')
@@ -536,3 +560,298 @@ async def portal_trigger_extraction(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"触发提取失败: {str(e)}")
+
+
+# ==================== 项目匹配接口 ====================
+
+@router.get("/emails/{email_id}/match-projects")
+async def match_projects_for_email(
+    email_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_account = Depends(get_current_account)
+):
+    """
+    根据邮件提取信息匹配 Portal 项目
+
+    Returns:
+        {
+            'matches': [...],
+            'best_match': {...} or None,
+            'should_create_project': bool,
+            'suggested_project_name': str
+        }
+    """
+    # 验证邮件属于当前账户
+    result = await db.execute(
+        select(Email).where(
+            and_(
+                Email.id == email_id,
+                Email.account_id == current_account.id
+            )
+        )
+    )
+    email = result.scalar_one_or_none()
+
+    if not email:
+        raise HTTPException(status_code=404, detail="邮件不存在或无权限访问")
+
+    # 获取提取记录
+    result = await db.execute(
+        select(TaskExtraction).where(TaskExtraction.email_id == email_id)
+    )
+    extraction = result.scalar_one_or_none()
+
+    if not extraction or extraction.status != "completed":
+        return {
+            "success": False,
+            "message": "邮件尚未完成任务提取",
+            "matches": [],
+            "best_match": None,
+            "should_create_project": True,
+            "suggested_project_name": None
+        }
+
+    # 调用 Portal 服务匹配项目
+    match_result = portal_integration_service.match_projects(
+        order_no=extraction.order_no,
+        customer_name=extraction.customer_name,
+        part_number=extraction.part_number
+    )
+
+    # 更新提取记录中的匹配信息
+    if match_result.get('best_match'):
+        best = match_result['best_match']
+        extraction.matched_project_id = best.get('id')
+        extraction.matched_project_name = best.get('name')
+        extraction.should_create_project = False
+    else:
+        extraction.should_create_project = True
+        # 生成建议的项目名称
+        if extraction.project_name:
+            extraction.suggested_project_name = extraction.project_name
+        elif extraction.customer_name and extraction.order_no:
+            extraction.suggested_project_name = f"{extraction.customer_name} - {extraction.order_no}"
+        elif extraction.customer_name:
+            extraction.suggested_project_name = f"{extraction.customer_name} 项目"
+        else:
+            extraction.suggested_project_name = f"邮件项目 - {email.subject_translated or email.subject_original}"[:100]
+
+    await db.commit()
+    await db.refresh(extraction)
+
+    return {
+        "success": True,
+        "matches": match_result.get('matches', []),
+        "best_match": match_result.get('best_match'),
+        "should_create_project": extraction.should_create_project,
+        "suggested_project_name": extraction.suggested_project_name,
+        "extraction": extraction.to_dict()
+    }
+
+
+@router.post("/emails/{email_id}/create-task")
+async def create_task_from_email(
+    email_id: int,
+    request: CreateTaskRequest,
+    db: AsyncSession = Depends(get_db),
+    current_account = Depends(get_current_account)
+):
+    """
+    从邮件创建 Portal 任务
+
+    支持：
+    1. 关联到已有项目
+    2. 创建新项目并关联
+
+    Args:
+        email_id: 邮件ID
+        request: 创建任务请求（包含项目ID或新项目信息）
+
+    Returns:
+        {
+            'success': True,
+            'project': {...},
+            'task': {...},
+            'created_project': bool
+        }
+    """
+    # 验证邮件属于当前账户
+    result = await db.execute(
+        select(Email).where(
+            and_(
+                Email.id == email_id,
+                Email.account_id == current_account.id
+            )
+        )
+    )
+    email = result.scalar_one_or_none()
+
+    if not email:
+        raise HTTPException(status_code=404, detail="邮件不存在或无权限访问")
+
+    # 获取提取记录
+    result = await db.execute(
+        select(TaskExtraction).where(TaskExtraction.email_id == email_id)
+    )
+    extraction = result.scalar_one_or_none()
+
+    if not extraction or extraction.status != "completed":
+        raise HTTPException(status_code=400, detail="邮件尚未完成任务提取，请先提取")
+
+    # 检查是否已导入
+    if extraction.imported_to_portal:
+        return {
+            "success": False,
+            "message": "该邮件已导入到 Portal",
+            "portal_task_id": extraction.portal_task_id,
+            "portal_project_id": extraction.portal_project_id,
+            "imported_at": extraction.imported_at.isoformat() if extraction.imported_at else None
+        }
+
+    # 验证必要参数
+    if not request.project_id and not request.create_project:
+        raise HTTPException(
+            status_code=400,
+            detail="必须指定项目ID或选择创建新项目"
+        )
+
+    if request.create_project and not request.project_name:
+        # 使用建议的项目名称
+        request.project_name = extraction.suggested_project_name
+
+    # 构建提取数据（合并AI提取和用户修改）
+    extraction_data = {
+        "title": request.title or extraction.title,
+        "description": request.description or extraction.description,
+        "task_type": request.task_type or extraction.task_type or "general",
+        "priority": request.priority or extraction.priority or "normal",
+        "due_date": request.due_date or (extraction.due_date.isoformat() if extraction.due_date else None),
+        "start_date": request.start_date or (extraction.start_date.isoformat() if extraction.start_date else None),
+        "assigned_to_id": request.assigned_to_id,
+        "action_items": request.action_items or extraction.action_items,
+        "customer_name": request.customer_name or extraction.customer_name,
+        "order_no": request.order_no or extraction.order_no,
+        "part_number": request.part_number or extraction.part_number,
+        "suggested_project_name": request.project_name,
+    }
+
+    # 调用 Portal 服务创建任务
+    create_result = portal_integration_service.create_task_from_email(
+        email_id=email_id,
+        email_subject=email.subject_translated or email.subject_original,
+        extraction_data=extraction_data,
+        project_id=request.project_id,
+        create_project=request.create_project,
+        project_name=request.project_name
+    )
+
+    if not create_result.get('success'):
+        raise HTTPException(
+            status_code=500,
+            detail=create_result.get('error', '创建任务失败')
+        )
+
+    # 更新提取记录
+    extraction.imported_to_portal = True
+    extraction.portal_task_id = create_result.get('task', {}).get('id')
+    extraction.portal_project_id = create_result.get('project_id')
+    extraction.imported_at = datetime.utcnow()
+
+    await db.commit()
+    await db.refresh(extraction)
+
+    return {
+        "success": True,
+        "message": "任务创建成功",
+        "project": create_result.get('project'),
+        "task": create_result.get('task'),
+        "project_id": create_result.get('project_id'),
+        "created_project": create_result.get('created_project', False),
+        "extraction": extraction.to_dict()
+    }
+
+
+@router.get("/emails/{email_id}/employees")
+async def get_employees_for_assignment(
+    email_id: int,
+    search: str = Query("", description="搜索关键词"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+    current_account = Depends(get_current_account)
+):
+    """
+    获取可分配的员工列表（用于任务分配）
+    """
+    # 验证邮件属于当前账户
+    result = await db.execute(
+        select(Email).where(
+            and_(
+                Email.id == email_id,
+                Email.account_id == current_account.id
+            )
+        )
+    )
+    email = result.scalar_one_or_none()
+
+    if not email:
+        raise HTTPException(status_code=404, detail="邮件不存在或无权限访问")
+
+    # 调用 Portal 服务获取员工列表
+    emp_result = portal_integration_service.get_employees(
+        search=search,
+        page=page,
+        page_size=page_size
+    )
+
+    return emp_result
+
+
+@router.get("/emails/{email_id}/import-status")
+async def get_import_status(
+    email_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_account = Depends(get_current_account)
+):
+    """
+    获取邮件的 Portal 导入状态
+    """
+    # 验证邮件属于当前账户
+    result = await db.execute(
+        select(Email).where(
+            and_(
+                Email.id == email_id,
+                Email.account_id == current_account.id
+            )
+        )
+    )
+    email = result.scalar_one_or_none()
+
+    if not email:
+        raise HTTPException(status_code=404, detail="邮件不存在或无权限访问")
+
+    # 获取提取记录
+    result = await db.execute(
+        select(TaskExtraction).where(TaskExtraction.email_id == email_id)
+    )
+    extraction = result.scalar_one_or_none()
+
+    if not extraction:
+        return {
+            "extracted": False,
+            "imported": False,
+            "message": "尚未提取任务信息"
+        }
+
+    return {
+        "extracted": extraction.status == "completed",
+        "extraction_status": extraction.status,
+        "imported": extraction.imported_to_portal,
+        "portal_task_id": extraction.portal_task_id,
+        "portal_project_id": extraction.portal_project_id,
+        "imported_at": extraction.imported_at.isoformat() if extraction.imported_at else None,
+        "matched_project_id": extraction.matched_project_id,
+        "matched_project_name": extraction.matched_project_name,
+        "should_create_project": extraction.should_create_project,
+        "suggested_project_name": extraction.suggested_project_name
+    }

@@ -477,6 +477,18 @@ class TaskExtraction(Base):
     status = Column(String(20), default="pending", index=True)
     error_message = Column(Text)  # 失败时的错误信息
 
+    # Portal 项目匹配字段
+    matched_project_id = Column(Integer)  # Portal 中匹配到的项目 ID
+    matched_project_name = Column(String(200))  # 匹配到的项目名称
+    should_create_project = Column(Boolean, default=False)  # 是否需要创建新项目
+    suggested_project_name = Column(String(200))  # AI 建议的新项目名称
+
+    # Portal 导入状态
+    imported_to_portal = Column(Boolean, default=False, index=True)  # 是否已导入到 Portal
+    portal_task_id = Column(Integer)  # Portal 中创建的任务 ID
+    portal_project_id = Column(Integer)  # Portal 中关联的项目 ID
+    imported_at = Column(DateTime)  # 导入时间
+
     # 时间戳
     extracted_at = Column(DateTime)  # 提取完成时间
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -510,6 +522,17 @@ class TaskExtraction(Base):
             "confidence": self.confidence,
             "status": self.status,
             "error_message": self.error_message,
+            # Portal 项目匹配
+            "matched_project_id": self.matched_project_id,
+            "matched_project_name": self.matched_project_name,
+            "should_create_project": self.should_create_project,
+            "suggested_project_name": self.suggested_project_name,
+            # Portal 导入状态
+            "imported_to_portal": self.imported_to_portal,
+            "portal_task_id": self.portal_task_id,
+            "portal_project_id": self.portal_project_id,
+            "imported_at": self.imported_at.isoformat() if self.imported_at else None,
+            # 时间戳
             "extracted_at": self.extracted_at.isoformat() if self.extracted_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

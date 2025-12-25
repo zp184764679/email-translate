@@ -576,6 +576,31 @@ const api = {
 
   async clearAllNotifications() {
     return instance.delete('/notifications')
+  },
+
+  // Portal Task Integration - 任务提取与导入
+  async getTaskExtraction(emailId) {
+    return instance.get(`/task-extractions/emails/${emailId}`)
+  },
+
+  async triggerTaskExtraction(emailId, force = false) {
+    return instance.post(`/task-extractions/emails/${emailId}/extract`, null, { params: { force } })
+  },
+
+  async matchProjects(emailId) {
+    return instance.get(`/task-extractions/emails/${emailId}/match-projects`)
+  },
+
+  async createTaskFromEmail(emailId, data) {
+    return instance.post(`/task-extractions/emails/${emailId}/create-task`, data)
+  },
+
+  async getEmployeesForAssignment(emailId, params = {}) {
+    return instance.get(`/task-extractions/emails/${emailId}/employees`, { params })
+  },
+
+  async getImportStatus(emailId) {
+    return instance.get(`/task-extractions/emails/${emailId}/import-status`)
   }
 }
 
