@@ -1,6 +1,8 @@
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 from functools import lru_cache
 import os
+import warnings
 from dotenv import load_dotenv
 
 # 确保 .env 文件在模块加载时就被读取
@@ -32,12 +34,13 @@ class Settings(BaseSettings):
     mysql_database: str = "email_translate"
 
     # Translation API
-    translate_provider: str = "ollama"  # "ollama" or "claude"
+    translate_provider: str = "vllm"  # "vllm" or "claude"
     translate_enabled: bool = True
 
-    # Ollama (local LLM) - 主力翻译引擎，免费且质量好
-    ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "qwen3:8b"
+    # vLLM Gateway - 主力翻译引擎
+    vllm_base_url: str = "http://localhost:5081"
+    vllm_model: str = "/home/aaa/models/Qwen3-VL-8B-Instruct"
+    vllm_api_key: str = ""  # Gateway API Key
 
     # Claude API (Anthropic) - 复杂邮件用
     claude_api_key: str = ""
@@ -50,6 +53,23 @@ class Settings(BaseSettings):
     secret_key: str = "email-translate-secret-key-change-in-production"
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60 * 24 * 7  # 7 days
+
+    @field_validator('secret_key')
+    @classmethod
+    def validate_secret_key(cls, v: str) -> str:
+        """验证 SECRET_KEY 安全性"""
+        default_key = "email-translate-secret-key-change-in-production"
+        if v == default_key:
+            warnings.warn(
+                "使用默认 SECRET_KEY 不安全！请在 .env 中设置 SECRET_KEY 环境变量。",
+                UserWarning
+            )
+        if len(v) < 32:
+            warnings.warn(
+                f"SECRET_KEY 长度（{len(v)}）小于推荐的 32 字符，建议使用更长的密钥。",
+                UserWarning
+            )
+        return v
 
     # Email polling
     email_poll_interval: int = 300  # 5 minutes

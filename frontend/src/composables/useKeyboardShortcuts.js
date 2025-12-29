@@ -17,8 +17,11 @@ export function useKeyboardShortcuts(shortcuts, options = {}) {
     const target = event.target
     const tagName = target.tagName
     const isEditable = target.isContentEditable
+    // 检查是否在可编辑区域内（包括富文本编辑器等）
+    const hasTextRole = target.getAttribute?.('role') === 'textbox'
+    const isInEditor = target.closest?.('[contenteditable="true"]') !== null
 
-    if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tagName) || isEditable) {
+    if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tagName) || isEditable || hasTextRole || isInEditor) {
       // 在输入框中只响应 Escape
       if (event.key !== 'Escape') return
     }

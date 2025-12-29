@@ -94,12 +94,12 @@ def translate_email_task(self, email_id: int, account_id: int, force: bool = Fal
         # 获取账户信息（用于术语表）
         account = db.query(EmailAccount).filter(EmailAccount.id == email.account_id).first()
 
-        # 创建翻译服务（使用 Ollama）
+        # 创建翻译服务（使用 vLLM）
         service = TranslateService(
             provider=settings.translate_provider,
             api_key=settings.claude_api_key,
-            ollama_base_url=settings.ollama_base_url,
-            ollama_model=settings.ollama_model,
+            vllm_base_url=settings.vllm_base_url,
+            vllm_model=settings.vllm_model,
             claude_model=settings.claude_model,
         )
 
@@ -194,8 +194,8 @@ def translate_email_task(self, email_id: int, account_id: int, force: bool = Fal
             if email:
                 email.translation_status = "failed"
                 db.commit()
-        except:
-            pass
+        except Exception as cleanup_err:
+            print(f"[TranslateTask] Cleanup failed during retry: {cleanup_err}")
         # 尝试重试（使用指数退避：10s, 20s, 40s）
         raise self.retry(countdown=10 * (2 ** self.request.retries))
     except Exception as e:
@@ -206,8 +206,8 @@ def translate_email_task(self, email_id: int, account_id: int, force: bool = Fal
             if email:
                 email.translation_status = "failed"
                 db.commit()
-        except:
-            pass
+        except Exception as cleanup_err:
+            print(f"[TranslateTask] Cleanup failed: {cleanup_err}")
         print(f"[TranslateTask] Error translating email {email_id}: {e}")
 
         # 发送失败通知
@@ -342,10 +342,10 @@ def poll_batch_status(self):
 @celery_app.task(bind=True)
 def collect_and_translate_pending(self, limit: int = 500):
     """
-    收集未翻译邮件并使用 Ollama 翻译
+    收集未翻译邮件并使用 vLLM 翻译
 
     定时任务，自动收集 is_translated=0 的邮件，
-    调用 translate_email_task 进行翻译（使用配置的翻译引擎，默认 Ollama）。
+    调用 translate_email_task 进行翻译（使用配置的翻译引擎，默认 vLLM）。
 
     Args:
         limit: 每次最多处理的邮件数量（默认500，避免队列积压）

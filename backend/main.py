@@ -41,8 +41,8 @@ def release_single_instance_lock():
     if _lock_socket:
         try:
             _lock_socket.close()
-        except:
-            pass
+        except Exception as e:
+            print(f"[Cleanup] Failed to close lock socket: {e}")
         _lock_socket = None
 
 
@@ -153,14 +153,17 @@ app.include_router(notifications_router)
 
 
 # WebSocket 端点
-@app.websocket("/ws/{account_id}")
-async def ws_endpoint(websocket: WebSocket, account_id: int):
+@app.websocket("/ws")
+async def ws_endpoint(websocket: WebSocket, token: str = None):
     """
-    WebSocket 连接端点
+    WebSocket 连接端点（需要 JWT 认证）
 
     用于实时推送任务完成通知
+
+    Args:
+        token: JWT token（通过 query 参数传递，如 /ws?token=xxx）
     """
-    await websocket_endpoint(websocket, account_id)
+    await websocket_endpoint(websocket, token=token)
 
 
 @app.get("/api/ws/stats")

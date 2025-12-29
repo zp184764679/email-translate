@@ -7,10 +7,10 @@ from datetime import datetime, timezone
 
 
 class TranslateService:
-    """Translation service supporting Ollama and Claude API
+    """Translation service supporting vLLM and Claude API
 
     统一 API 模式：
-    - ollama: 本地 LLM 翻译（免费，质量好，主力引擎）
+    - vllm: 本地 vLLM 翻译（OpenAI 兼容 API，主力引擎）
     - claude: Claude API（复杂邮件用）
 
     切换方式：修改 .env 中的 TRANSLATE_PROVIDER
@@ -300,40 +300,47 @@ class TranslateService:
         "단가": "单价",
     }
 
-    def __init__(self, api_key: str = None, provider: str = "ollama", proxy_url: str = None,
-                 ollama_base_url: str = None, ollama_model: str = None,
+    def __init__(self, api_key: str = None, provider: str = "vllm", proxy_url: str = None,
+                 vllm_base_url: str = None, vllm_model: str = None, vllm_api_key: str = None,
                  claude_model: str = None, **kwargs):
         """
         Initialize translate service
 
         Args:
             api_key: API key (Claude)
-            provider: "ollama" or "claude"
+            provider: "vllm" or "claude"
             proxy_url: Proxy URL (e.g., "http://127.0.0.1:7890")
-            ollama_base_url: Ollama API base URL (e.g., "http://localhost:11434")
-            ollama_model: Ollama model name (e.g., "qwen3:8b")
+            vllm_base_url: vLLM API base URL (e.g., "http://localhost:5081")
+            vllm_model: vLLM model name (e.g., "/home/aaa/models/Qwen3-VL-8B-Instruct")
+            vllm_api_key: vLLM Gateway API key (e.g., "email_xxxxx")
             claude_model: Claude model name (e.g., "claude-sonnet-4-20250514")
         """
         self.api_key = api_key
         self.provider = provider
-        self.ollama_base_url = ollama_base_url or "http://localhost:11434"
-        self.ollama_model = ollama_model or "qwen3:8b"
+        self.vllm_base_url = vllm_base_url or "http://localhost:5081"
+        self.vllm_model = vllm_model or "/home/aaa/models/Qwen3-VL-8B-Instruct"
+        self.vllm_api_key = vllm_api_key or os.environ.get("VLLM_API_KEY")
         self.claude_model = claude_model or "claude-sonnet-4-20250514"
 
         # Get proxy from parameter or env var
         proxy = proxy_url or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
 
-        if proxy and provider != "ollama":
+        # vLLM headers (for Gateway authentication)
+        self.vllm_headers = {}
+        if self.vllm_api_key:
+            self.vllm_headers["Authorization"] = f"Bearer {self.vllm_api_key}"
+
+        if proxy and provider != "vllm":
             print(f"[TranslateService] Using proxy: {proxy}")
             self.http_client = httpx.Client(proxy=proxy, timeout=120.0)
-        elif provider == "ollama":
-            # Ollama 本地模型需要更长的超时时间（支持 think mode）
-            self.http_client = httpx.Client(timeout=600.0)
+        elif provider == "vllm":
+            # vLLM 本地模型需要更长的超时时间
+            self.http_client = httpx.Client(timeout=600.0, headers=self.vllm_headers)
         else:
             self.http_client = httpx.Client(timeout=120.0)
 
-        # 单独的 Ollama HTTP 客户端（智能路由用，超时更长）
-        self.ollama_client = httpx.Client(timeout=600.0)
+        # 单独的 vLLM HTTP 客户端（智能路由用，超时更长，带认证）
+        self.vllm_client = httpx.Client(timeout=600.0, headers=self.vllm_headers)
 
     def _detect_language_type(self, text: str) -> str:
         """
@@ -540,7 +547,7 @@ class TranslateService:
         """构建优化后的翻译 prompt（基于邮件样本分析优化）
 
         Args:
-            use_think: 是否使用 /think 模式（Ollama 翻译时启用，提高质量）
+            use_think: 是否使用 /think 模式（vLLM 不支持，始终禁用）
             is_short_text: 是否是短文本（如邮件主题），需要更严格的限制
             is_long_text: 是否是长文本（>8000字符），使用简洁提示防止摘要
         """
@@ -582,7 +589,7 @@ class TranslateService:
         # 术语表（核心术语 + 供应商特定术语）
         glossary_table = self._format_glossary_table(glossary)
 
-        # /think 前缀（仅 Ollama 使用）
+        # /think 前缀（vLLM 不支持）
         think_prefix = "/think\n" if use_think else ""
 
         # 完整版提示词（基于 Claude 提示词 + 采购行业深度优化）
@@ -693,12 +700,12 @@ Container: 40ft Blue Ring
 只输出上述邮件的{target_name}翻译，不要包含原文，不要添加任何前缀或标签："""
         return prompt
 
-    # ============ Ollama Translation ============
-    def translate_with_ollama(self, text: str, target_lang: str = "zh",
-                               source_lang: str = None, glossary: List[Dict] = None,
-                               complexity_score: int = None) -> str:
+    # ============ vLLM Translation (OpenAI 兼容 API) ============
+    def translate_with_vllm(self, text: str, target_lang: str = "zh",
+                             source_lang: str = None, glossary: List[Dict] = None,
+                             complexity_score: int = None) -> str:
         """
-        Translate text using local Ollama model
+        Translate text using local vLLM model (OpenAI compatible API)
 
         Args:
             text: Text to translate
@@ -716,69 +723,49 @@ Container: 40ft Blue Ring
         # 长文本判断
         is_long_text = text_len > 8000
 
-        # think 模式决策逻辑（基于复杂度而非单纯长度）
-        # - 短文本：不需要 think（太简单）
-        # - 长文本 + 低复杂度（<= 50）：不需要 think（如简单通知、新闻邮件）
-        # - 长文本 + 高复杂度（> 50）：需要 think（如技术文档、合同条款）
-        # - 正常文本：需要 think
-        if is_short_text:
-            use_think = False
-        elif is_long_text:
-            # 长文本根据复杂度决定：高复杂度仍启用 think
-            # 如果没有传入复杂度分数，保守地禁用 think
-            use_think = complexity_score is not None and complexity_score > 50
-            if use_think:
-                print(f"[Ollama] Long text ({text_len} chars) with high complexity ({complexity_score}) -> enabling think mode")
-        else:
-            use_think = True
+        # vLLM 不支持 think 模式，始终禁用
+        use_think = False
 
         prompt = self._build_translation_prompt(text, target_lang, source_lang, glossary,
                                                  use_think=use_think,
                                                  is_short_text=is_short_text,
                                                  is_long_text=is_long_text)
 
-        # 动态计算 num_predict：翻译到中文通常输出比英文短（约 0.6-0.8 倍）
+        # 动态计算 max_tokens：翻译到中文通常输出比英文短（约 0.6-0.8 倍）
         # 但我们给足够的空间，防止截断
         # 估算：1 个英文字符约 0.3 token，中文约 0.5 token
         estimated_tokens = max(4096, int(text_len * 0.8))
         # 限制最大值防止内存爆炸
-        num_predict = min(estimated_tokens, 16384)
+        max_tokens = min(estimated_tokens, 16384)
 
         try:
-            # 使用专用的 Ollama 客户端（超时更长，支持 think mode）
-            client = getattr(self, 'ollama_client', self.http_client)
+            # 使用专用的 vLLM 客户端（超时更长）
+            client = getattr(self, 'vllm_client', self.http_client)
             response = client.post(
-                f"{self.ollama_base_url}/api/generate",
+                f"{self.vllm_base_url}/v1/chat/completions",
                 json={
-                    "model": self.ollama_model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {
-                        "temperature": 0.3,
-                        "num_predict": num_predict  # 动态设置，支持长文本
-                    }
+                    "model": self.vllm_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                    "max_tokens": max_tokens
                 }
             )
             response.raise_for_status()
 
             result = response.json()
-            translated = result.get("response", "").strip()
-
-            # 去除 qwen3 的思考标签 <think>...</think>
-            translated = re.sub(r'<think>.*?</think>', '', translated, flags=re.DOTALL)
-            translated = translated.strip()
+            translated = result["choices"][0]["message"]["content"].strip()
 
             # 去除可能的原文重复（模型有时会输出原文+译文）
             translated = self._clean_translation_output(translated, text, target_lang)
 
-            print(f"[Ollama/{self.ollama_model}] Translated to {target_lang}")
+            print(f"[vLLM/{self.vllm_model}] Translated to {target_lang}")
             return translated
 
         except httpx.HTTPStatusError as e:
-            print(f"Ollama API error: {e.response.status_code} - {e.response.text}")
+            print(f"vLLM API error: {e.response.status_code} - {e.response.text}")
             raise
         except Exception as e:
-            print(f"Ollama translation error: {e}")
+            print(f"vLLM translation error: {e}")
             raise
 
     # ============ Claude API Translation ============
@@ -1091,7 +1078,7 @@ Please check the following items:
             glossary: List of term mappings
             context: Previous conversation context
             source_lang: Source language hint
-            enable_fallback: If True, fallback to Ollama when Claude fails
+            enable_fallback: If True, fallback to vLLM when Claude fails
 
         Returns:
             Translated text
@@ -1099,24 +1086,24 @@ Please check the following items:
         # 空文本直接返回
         if not text:
             return ""
-        if self.provider == "ollama":
-            return self.translate_with_ollama(text, target_lang, source_lang, glossary)
+        if self.provider == "vllm":
+            return self.translate_with_vllm(text, target_lang, source_lang, glossary)
         elif self.provider == "claude":
             try:
                 return self.translate_with_claude(text, target_lang, source_lang, glossary)
             except Exception as e:
-                if enable_fallback and self.ollama_base_url:
+                if enable_fallback and self.vllm_base_url:
                     print(f"[TranslateService] Claude API failed: {e}")
-                    print(f"[TranslateService] Falling back to Ollama...")
+                    print(f"[TranslateService] Falling back to vLLM...")
                     try:
-                        return self.translate_with_ollama(text, target_lang, source_lang, glossary)
-                    except Exception as ollama_error:
-                        print(f"[TranslateService] Ollama fallback also failed: {ollama_error}")
+                        return self.translate_with_vllm(text, target_lang, source_lang, glossary)
+                    except Exception as vllm_error:
+                        print(f"[TranslateService] vLLM fallback also failed: {vllm_error}")
                         raise e  # 抛出原始 Claude 错误
                 else:
                     raise
         else:
-            raise ValueError(f"Unknown provider: {self.provider}. Supported: ollama, claude")
+            raise ValueError(f"Unknown provider: {self.provider}. Supported: vllm, claude")
 
     def translate_with_smart_routing(self, text: str, subject: str = "",
                                       target_lang: str = "zh",
@@ -1127,10 +1114,10 @@ Please check the following items:
         智能路由翻译 - 基于复杂度选择最优引擎
 
         策略：
-        1. Ollama 快速评估复杂度（规则优先，必要时用LLM）
+        1. vLLM 快速评估复杂度（规则优先，必要时用LLM）
         2. 根据复杂度选择引擎：
-           - 简单/中等(≤70分): Ollama 直接翻译（免费，质量好）
-           - 复杂(>70): Claude（正文）+ Ollama（签名）
+           - 简单/中等(≤70分): vLLM 直接翻译（免费，质量好）
+           - 复杂(>70): Claude（正文）+ vLLM（签名）
 
         Args:
             text: 邮件正文
@@ -1150,7 +1137,7 @@ Please check the following items:
 
         # 1. 评估复杂度
         try:
-            analyzer = get_email_analyzer(self.ollama_base_url, self.ollama_model)
+            analyzer = get_email_analyzer(self.vllm_base_url, self.vllm_model)
             complexity, score = analyzer.quick_complexity_check(text, subject)
             print(f"[SmartRouting] Complexity: {complexity.value} (score={score})")
         except Exception as e:
@@ -1163,17 +1150,17 @@ Please check the following items:
         #   - SIMPLE: <= 30 分
         #   - MEDIUM: 31-70 分
         #   - COMPLEX: > 70 分
-        # SIMPLE 和 MEDIUM 使用 Ollama（免费），COMPLEX 使用 Claude（更强但付费）
-        OLLAMA_THRESHOLD = 70  # 70分以下用 Ollama（覆盖 SIMPLE + MEDIUM）
+        # SIMPLE 和 MEDIUM 使用 vLLM（免费），COMPLEX 使用 Claude（更强但付费）
+        VLLM_THRESHOLD = 70  # 70分以下用 vLLM（覆盖 SIMPLE + MEDIUM）
 
-        if score <= OLLAMA_THRESHOLD:
-            # 简单/中等邮件：Ollama 直接翻译（免费，有提示词理解上下文）
-            print(f"[SmartRouting] Score {score} <= {OLLAMA_THRESHOLD} (SIMPLE/MEDIUM) -> Ollama")
+        if score <= VLLM_THRESHOLD:
+            # 简单/中等邮件：vLLM 直接翻译（免费，有提示词理解上下文）
+            print(f"[SmartRouting] Score {score} <= {VLLM_THRESHOLD} (SIMPLE/MEDIUM) -> vLLM")
             return self._translate_simple(text, target_lang, source_lang, glossary, score,
                                           subject if translate_subject else None)
         else:
-            # 复杂邮件：Claude（正文）+ Ollama（签名）
-            print(f"[SmartRouting] Score {score} > {OLLAMA_THRESHOLD} (COMPLEX) -> Claude+Ollama")
+            # 复杂邮件：Claude（正文）+ vLLM（签名）
+            print(f"[SmartRouting] Score {score} > {VLLM_THRESHOLD} (COMPLEX) -> Claude+vLLM")
             return self._translate_complex(text, subject, target_lang, source_lang, glossary, score,
                                            translate_subject)
 
@@ -1225,7 +1212,7 @@ Please check the following items:
         # 方法4：回退 - 单独翻译标题
         print("[SmartRouting] Failed to parse combined translation, translating subject separately")
         try:
-            subject_translated = self.translate_with_ollama(
+            subject_translated = self.translate_with_vllm(
                 original_subject, "zh", None, None
             )
             # 整个翻译结果当作正文
@@ -1237,7 +1224,7 @@ Please check the following items:
 
     def _translate_simple(self, text: str, target_lang: str, source_lang: str,
                           glossary: List[Dict], score: int, subject: str = None) -> Dict:
-        """简单邮件翻译 - Ollama 直接翻译
+        """简单邮件翻译 - vLLM 直接翻译
 
         注意：邮件链处理（提取新内容、复用历史翻译）已在 emails.py 中完成，
         这里只负责翻译传入的文本。
@@ -1250,27 +1237,27 @@ Please check the following items:
 
             if subject:
                 # 分开翻译标题和正文（避免联合翻译时标记解析失败的问题）
-                print(f"[SmartRouting] Simple email -> Ollama (separate translation, score={score})")
+                print(f"[SmartRouting] Simple email -> vLLM (separate translation, score={score})")
 
                 # 先翻译正文
-                body_translated = self.translate_with_ollama(
+                body_translated = self.translate_with_vllm(
                     text, target_lang, source_lang, glossary,
                     complexity_score=score
                 )
 
                 # 再翻译标题
-                subject_translated = self.translate_with_ollama(
+                subject_translated = self.translate_with_vllm(
                     subject, target_lang, source_lang, glossary,
                     complexity_score=score
                 )
             else:
-                print(f"[SmartRouting] Simple email -> Ollama ({len(text)} chars, score={score})")
-                body_translated = self.translate_with_ollama(text, target_lang, source_lang, glossary,
+                print(f"[SmartRouting] Simple email -> vLLM ({len(text)} chars, score={score})")
+                body_translated = self.translate_with_vllm(text, target_lang, source_lang, glossary,
                                                               complexity_score=score)
 
             result = {
                 "translated_text": body_translated,
-                "provider_used": "ollama",
+                "provider_used": "vllm",
                 "complexity": {"level": "simple", "score": score},
                 "fallback_reason": None
             }
@@ -1280,7 +1267,7 @@ Please check the following items:
             return result
 
         except Exception as e:
-            print(f"[SmartRouting] Ollama failed: {e}, falling back to Claude")
+            print(f"[SmartRouting] vLLM failed: {e}, falling back to Claude")
             return self._translate_with_fallback(text, target_lang, source_lang, glossary,
                                                   {"level": "simple", "score": score})
 
@@ -1290,7 +1277,7 @@ Please check the following items:
         """
         复杂邮件翻译 - 拆分翻译策略
 
-        正文用 Claude（理解能力强），问候语/签名用 Ollama（免费）
+        正文用 Claude（理解能力强），问候语/签名用 vLLM（免费）
 
         Args:
             translate_subject: 是否同时翻译标题
@@ -1329,7 +1316,7 @@ Please check the following items:
 
         try:
             # 获取完整分析（包含结构拆分）
-            analyzer = get_email_analyzer(self.ollama_base_url, self.ollama_model)
+            analyzer = get_email_analyzer(self.vllm_base_url, self.vllm_model)
             analysis = analyzer.analyze_email(text, subject)
 
             if analysis.should_split and analysis.structure.body:
@@ -1337,14 +1324,15 @@ Please check the following items:
 
                 translated_parts = []
 
-                # 翻译问候语（用 Ollama）
+                # 翻译问候语（用 vLLM）
                 if analysis.structure.greeting:
                     try:
-                        greeting_translated = self._translate_with_ollama_or_fallback(
+                        greeting_translated = self._translate_with_vllm_or_fallback(
                             analysis.structure.greeting, target_lang, source_lang
                         )
                         translated_parts.append(greeting_translated)
-                    except:
+                    except Exception as e:
+                        print(f"[Translate] Greeting translation failed, using original: {e}")
                         translated_parts.append(analysis.structure.greeting)
 
                 # 翻译正文（用 Claude）
@@ -1353,28 +1341,29 @@ Please check the following items:
                 )
                 translated_parts.append(body_translated)
 
-                # 翻译签名（用 Ollama）
+                # 翻译签名（用 vLLM）
                 if analysis.structure.signature:
                     try:
-                        sig_translated = self._translate_with_ollama_or_fallback(
+                        sig_translated = self._translate_with_vllm_or_fallback(
                             analysis.structure.signature, target_lang, source_lang
                         )
                         translated_parts.append(sig_translated)
-                    except:
+                    except Exception as e:
+                        print(f"[Translate] Signature translation failed, using original: {e}")
                         translated_parts.append(analysis.structure.signature)
 
                 result = {
                     "translated_text": "\n\n".join(translated_parts),
-                    "provider_used": "claude+ollama",
+                    "provider_used": "claude+vllm",
                     "complexity": {"level": "complex", "score": score},
                     "fallback_reason": None,
                     "split_translation": True
                 }
 
-                # 如果需要翻译标题，单独用 Ollama 翻译
+                # 如果需要翻译标题，单独用 vLLM 翻译
                 if translate_subject and subject and not subject_translated:
                     try:
-                        subject_translated = self.translate_with_ollama(subject, target_lang, source_lang)
+                        subject_translated = self.translate_with_vllm(subject, target_lang, source_lang)
                         result["subject_translated"] = subject_translated
                     except Exception as e:
                         print(f"[SmartRouting] Subject translation failed: {e}")
@@ -1388,25 +1377,25 @@ Please check the following items:
         result = self._translate_with_claude_fallback(text, target_lang, source_lang, glossary,
                                                        {"level": "complex", "score": score})
 
-        # 如果需要翻译标题，单独用 Ollama 翻译
+        # 如果需要翻译标题，单独用 vLLM 翻译
         if translate_subject and subject:
             try:
-                subject_translated = self.translate_with_ollama(subject, target_lang, source_lang)
+                subject_translated = self.translate_with_vllm(subject, target_lang, source_lang)
                 result["subject_translated"] = subject_translated
             except Exception as e:
                 print(f"[SmartRouting] Subject translation failed: {e}")
 
         return result
 
-    def _translate_with_ollama_or_fallback(self, text: str, target_lang: str,
+    def _translate_with_vllm_or_fallback(self, text: str, target_lang: str,
                                             source_lang: str, glossary: List[Dict] = None) -> str:
-        """Ollama 翻译，失败则用 Claude 回退"""
-        # 首选 Ollama（免费，质量好）
-        if self.ollama_base_url:
+        """vLLM 翻译，失败则用 Claude 回退"""
+        # 首选 vLLM（免费，质量好）
+        if self.vllm_base_url:
             try:
-                return self.translate_with_ollama(text, target_lang, source_lang, glossary)
+                return self.translate_with_vllm(text, target_lang, source_lang, glossary)
             except Exception as e:
-                print(f"[SmartRouting] Ollama failed: {e}")
+                print(f"[SmartRouting] vLLM failed: {e}")
 
         # 回退到 Claude
         claude_key = self.api_key or os.environ.get("CLAUDE_API_KEY")
@@ -1424,7 +1413,7 @@ Please check the following items:
             except Exception as e:
                 print(f"[SmartRouting] Claude failed: {e}")
 
-        raise Exception("Ollama 和 Claude 都不可用")
+        raise Exception("vLLM 和 Claude 都不可用")
 
     def _translate_body_with_claude(self, text: str, target_lang: str,
                                      source_lang: str, glossary: List[Dict]) -> str:
@@ -1445,12 +1434,12 @@ Please check the following items:
             except Exception as e:
                 print(f"[SmartRouting] Claude failed: {e}")
 
-        # Claude 不可用，回退到 Ollama
-        return self._translate_with_ollama_or_fallback(text, target_lang, source_lang, glossary)
+        # Claude 不可用，回退到 vLLM
+        return self._translate_with_vllm_or_fallback(text, target_lang, source_lang, glossary)
 
     def _translate_with_fallback(self, text: str, target_lang: str, source_lang: str,
                                   glossary: List[Dict], complexity: Dict) -> Dict:
-        """带回退的翻译（Ollama → Claude，跳过腾讯和DeepL）
+        """带回退的翻译（vLLM → Claude，跳过腾讯和DeepL）
 
         对于邮件链，只翻译最新内容，历史引用保持原样
         """
@@ -1466,12 +1455,12 @@ Please check the following items:
         else:
             text_to_translate = text
 
-        # 1. Ollama 优先（免费，质量好）
-        if self.ollama_base_url:
+        # 1. vLLM 优先（免费，质量好）
+        if self.vllm_base_url:
             try:
-                # 传递复杂度分数，决定是否启用 think 模式
+                # 传递复杂度分数
                 complexity_score = complexity.get("score") if complexity else None
-                translated = self.translate_with_ollama(text_to_translate, target_lang, source_lang, glossary,
+                translated = self.translate_with_vllm(text_to_translate, target_lang, source_lang, glossary,
                                                          complexity_score=complexity_score)
 
                 # 注意：不在此处拼接引用内容，由 emails.py 统一处理
@@ -1479,14 +1468,14 @@ Please check the following items:
 
                 return {
                     "translated_text": translated,
-                    "provider_used": "ollama",
+                    "provider_used": "vllm",
                     "complexity": complexity,
                     "fallback_reason": None,
                     "has_quote": has_quote
                 }
             except Exception as e:
-                providers_tried.append(("ollama", str(e)))
-                print(f"[SmartRouting] Ollama failed in fallback: {e}")
+                providers_tried.append(("vllm", str(e)))
+                print(f"[SmartRouting] vLLM failed in fallback: {e}")
 
         # 2. Claude 兜底（同样只翻译最新内容）
         result = self._translate_with_claude_fallback(text_to_translate, target_lang, source_lang, glossary, complexity)

@@ -296,8 +296,8 @@ class PortalIntegrationService:
                 try:
                     error_data = response.json()
                     error_msg = error_data.get('error') or error_data.get('message') or str(error_data)
-                except:
-                    pass
+                except (ValueError, KeyError) as json_err:
+                    logger.debug(f"Failed to parse error response as JSON: {json_err}")
                 return {
                     'success': False,
                     'error': f'创建项目失败: {error_msg}'
@@ -384,8 +384,8 @@ class PortalIntegrationService:
                 try:
                     error_data = response.json()
                     error_msg = error_data.get('error') or error_data.get('message') or str(error_data)
-                except:
-                    pass
+                except (ValueError, KeyError) as json_err:
+                    logger.debug(f"Failed to parse error response as JSON: {json_err}")
                 return {
                     'success': False,
                     'error': f'创建任务失败: {error_msg}'

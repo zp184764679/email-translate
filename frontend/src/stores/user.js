@@ -40,17 +40,21 @@ export const useUserStore = defineStore('user', () => {
     return response
   }
 
-  function logout() {
+  async function logout() {
     // 停止自动拉取定时器
     stopAutoFetch()
     // 清除选中的邮件
     selectedEmailIds.value = []
 
     // 重置邮件 store（需要延迟导入避免循环依赖）
-    import('./emails').then(({ useEmailStore }) => {
+    // 使用 await 确保在导航到登录页之前完成重置
+    try {
+      const { useEmailStore } = await import('./emails')
       const emailStore = useEmailStore()
       emailStore.reset()
-    })
+    } catch (e) {
+      console.error('[Logout] Failed to reset email store:', e)
+    }
 
     token.value = ''
     email.value = ''

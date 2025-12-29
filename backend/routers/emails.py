@@ -17,6 +17,7 @@ from services.notification_service import notification_manager
 from routers.users import get_current_account
 from config import get_settings
 from utils.crypto import decrypt_password, mask_email
+from utils.rate_limit import fetch_limiter, send_limiter, batch_limiter
 from shared.cache_config import cache_get, cache_set
 import re
 
@@ -444,6 +445,9 @@ async def fetch_emails(
     db: AsyncSession = Depends(get_db)
 ):
     """手动拉取当前账户的邮件"""
+    # 速率限制：每用户每分钟 5 次
+    fetch_limiter.check(f"user:{account.id}")
+
     import asyncio
     # 使用 asyncio.create_task 来正确运行异步后台任务
     asyncio.create_task(fetch_emails_background(account, request.since_days))
@@ -518,12 +522,12 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
         print(f"[Background] Fetched {len(emails)} new emails from IMAP")
 
         # 创建翻译服务（支持智能路由）
-        # 智能路由会根据邮件复杂度自动选择引擎：简单→Ollama，复杂→Claude
+        # 智能路由会根据邮件复杂度自动选择引擎：简单→vLLM，复杂→Claude
         translate_service = TranslateService(
             api_key=settings.claude_api_key,
             provider=settings.translate_provider,
-            ollama_base_url=settings.ollama_base_url,
-            ollama_model=settings.ollama_model,
+            vllm_base_url=settings.vllm_base_url,
+            vllm_model=settings.vllm_model,
             claude_model=getattr(settings, 'claude_model', None),
         )
 
@@ -690,7 +694,7 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                             # 标题与正文一起翻译，提高上下文理解深度
                             subject_translated = ""
                             body_translated = ""
-                            provider_used = "ollama"
+                            provider_used = "vllm"
                             complexity_info = None
 
                             if email_data.get("body_original"):
@@ -1782,8 +1786,8 @@ async def translate_email(
             service = TranslateService(
                 api_key=settings.claude_api_key,
                 provider=settings.translate_provider,
-                ollama_base_url=settings.ollama_base_url,
-                ollama_model=settings.ollama_model,
+                vllm_base_url=settings.vllm_base_url,
+                vllm_model=settings.vllm_model,
                 claude_model=getattr(settings, 'claude_model', None),
             )
 
@@ -1827,8 +1831,8 @@ async def translate_email(
             service = TranslateService(
                 api_key=settings.claude_api_key,
                 provider=settings.translate_provider,
-                ollama_base_url=settings.ollama_base_url,
-                ollama_model=settings.ollama_model,
+                vllm_base_url=settings.vllm_base_url,
+                vllm_model=settings.vllm_model,
                 claude_model=getattr(settings, 'claude_model', None),
             )
 
@@ -1981,6 +1985,9 @@ async def send_email(
     db: AsyncSession = Depends(get_db)
 ):
     """直接发送邮件（非回复）"""
+    # 速率限制：每用户每分钟 10 次
+    send_limiter.check(f"user:{account.id}")
+
     try:
         service = EmailService(
             imap_server=account.imap_server,

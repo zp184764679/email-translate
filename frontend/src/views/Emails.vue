@@ -717,8 +717,13 @@ onMounted(async () => {
   window.addEventListener('email-translation-failed', handleEmailTranslationFailed)
 })
 
-// 清理事件监听器
+// 清理事件监听器和 AbortController
 onUnmounted(() => {
+  // 取消正在进行的请求，防止内存泄漏
+  if (abortController) {
+    abortController.abort()
+    abortController = null
+  }
   window.removeEventListener('email-status-changed', handleRemoteStatusChange)
   window.removeEventListener('email-deleted', handleRemoteDelete)
   window.removeEventListener('ws:reconnected', handleWsReconnected)

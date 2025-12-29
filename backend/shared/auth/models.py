@@ -53,7 +53,7 @@ class User(Base):
         # Parse permissions JSON
         try:
             perms = json.loads(self.permissions) if self.permissions else []
-        except:
+        except (json.JSONDecodeError, ValueError, TypeError):
             perms = []
 
         return {
@@ -91,7 +91,7 @@ class User(Base):
         try:
             perms = json.loads(self.permissions) if self.permissions else []
             return system_name in perms
-        except:
+        except (json.JSONDecodeError, ValueError, TypeError):
             return False
 
     def get_role_level(self):

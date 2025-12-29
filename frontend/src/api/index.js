@@ -303,11 +303,6 @@ const api = {
   },
 
   // 附件下载
-  getAttachmentUrl(emailId, attachmentId) {
-    const token = localStorage.getItem(getStorageKey('token'))
-    return `${baseURL}/emails/${emailId}/attachment/${attachmentId}?token=${token}`
-  },
-
   async downloadAttachment(emailId, attachmentId, filename) {
     const response = await instance.get(
       `/emails/${emailId}/attachment/${attachmentId}`,
@@ -322,6 +317,15 @@ const api = {
     link.click()
     link.remove()
     window.URL.revokeObjectURL(url)
+  },
+
+  // 附件预览（返回 blob URL，调用者需要在使用后调用 revokeObjectURL）
+  async previewAttachment(emailId, attachmentId) {
+    const response = await instance.get(
+      `/emails/${emailId}/attachment/${attachmentId}`,
+      { responseType: 'blob' }
+    )
+    return window.URL.createObjectURL(new Blob([response]))
   },
 
   // 邮件导出

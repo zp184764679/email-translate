@@ -898,10 +898,19 @@ async function handleAttachmentMenuSelect(key) {
   }
 }
 
-// 预览附件
-function previewAttachment(attachment) {
-  const url = api.getAttachmentUrl(email.value.id, attachment.id)
-  window.open(url, '_blank')
+// 预览附件（使用 blob URL 避免 token 暴露）
+async function previewAttachment(attachment) {
+  try {
+    const blobUrl = await api.previewAttachment(email.value.id, attachment.id)
+    const newWindow = window.open(blobUrl, '_blank')
+    // 延迟释放 blob URL（等待新窗口加载完成）
+    setTimeout(() => {
+      window.URL.revokeObjectURL(blobUrl)
+    }, 60000) // 1分钟后释放
+  } catch (error) {
+    console.error('Preview attachment failed:', error)
+    ElMessage.error('预览附件失败')
+  }
 }
 
 // 发件人右键菜单处理

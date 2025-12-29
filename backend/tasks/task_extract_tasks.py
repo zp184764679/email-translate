@@ -89,8 +89,8 @@ TASK_EXTRACTION_PROMPT = """请分析以下供应商邮件内容，提取项目�
 """
 
 
-def call_ollama_extract(subject: str, body: str, settings) -> dict:
-    """调用 Ollama 提取任务信息"""
+def call_vllm_extract(subject: str, body: str, settings) -> dict:
+    """调用 vLLM 提取任务信息（OpenAI 兼容 API）"""
     prompt = TASK_EXTRACTION_PROMPT.format(
         subject=subject or "(无主题)",
         body=body or "(无正文)"
@@ -98,22 +98,19 @@ def call_ollama_extract(subject: str, body: str, settings) -> dict:
 
     try:
         response = requests.post(
-            f"{settings.ollama_base_url}/api/generate",
+            f"{settings.vllm_base_url}/v1/chat/completions",
             json={
-                "model": settings.ollama_model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.3,  # 降低温度，保证输出稳定
-                    "num_predict": 3000,  # 增加 token 限制，qwen3 的 thinking 模式会消耗额外 token
-                }
+                "model": settings.vllm_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.3,
+                "max_tokens": 3000
             },
             timeout=300  # 5分钟超时
         )
         response.raise_for_status()
 
         result = response.json()
-        response_text = result.get("response", "")
+        response_text = result["choices"][0]["message"]["content"].strip()
 
         # 尝试解析 JSON
         # 有时 LLM 会返回 ```json ... ``` 格式
@@ -132,9 +129,9 @@ def call_ollama_extract(subject: str, body: str, settings) -> dict:
             }
 
     except requests.exceptions.Timeout:
-        return {"success": False, "error": "Ollama 请求超时"}
+        return {"success": False, "error": "vLLM 请求超时"}
     except requests.exceptions.ConnectionError:
-        return {"success": False, "error": "无法连接到 Ollama 服务"}
+        return {"success": False, "error": "无法连接到 vLLM 服务"}
     except json.JSONDecodeError as e:
         return {"success": False, "error": f"JSON 解析失败: {e}"}
     except Exception as e:
@@ -220,9 +217,9 @@ def extract_task_info_for_email(self, email_id: int, account_id: int = None):
         subject = email.subject_translated or email.subject_original or ""
         body = email.body_translated or email.body_original or ""
 
-        # 5. 调用 Ollama 提取
+        # 5. 调用 vLLM 提取
         print(f"[TaskExtract] Extracting task info for email {email_id}...")
-        result = call_ollama_extract(subject, body, settings)
+        result = call_vllm_extract(subject, body, settings)
 
         if not result.get("success"):
             # 提取失败
@@ -291,8 +288,8 @@ def extract_task_info_for_email(self, email_id: int, account_id: int = None):
                 extraction.status = "failed"
                 extraction.error_message = "提取超时"
                 db.commit()
-        except:
-            pass
+        except Exception as cleanup_err:
+            print(f"[TaskExtract] Cleanup failed during timeout: {cleanup_err}")
 
         raise self.retry(countdown=30 * (2 ** self.request.retries))
 
@@ -309,8 +306,8 @@ def extract_task_info_for_email(self, email_id: int, account_id: int = None):
                 extraction.status = "failed"
                 extraction.error_message = str(e)[:500]
                 db.commit()
-        except:
-            pass
+        except Exception as cleanup_err:
+            print(f"[TaskExtract] Cleanup failed: {cleanup_err}")
 
         if account_id:
             notify_completion(account_id, "task_extraction_failed", {

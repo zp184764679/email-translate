@@ -75,17 +75,25 @@ def decrypt_password(encrypted_password: str) -> str:
     if not encrypted_password:
         return ""
 
-    # 兼容旧数据：如果不是加密格式，直接返回（假设是明文）
+    # 兼容旧数据：如果不是加密格式，记录警告并返回
     # Fernet 加密的数据以 'gAAAAA' 开头
+    # 注意：这是临时兼容措施，应尽快运行 migrations.encrypt_passwords 加密所有密码
     if not encrypted_password.startswith('gAAAAA'):
+        import warnings
+        warnings.warn(
+            "检测到未加密密码！请运行 'python -m migrations.encrypt_passwords' 加密所有密码。",
+            DeprecationWarning
+        )
+        print("[Security Warning] Detected unencrypted password. Run 'python -m migrations.encrypt_passwords' to encrypt all passwords.")
         return encrypted_password
 
     try:
         fernet = _get_fernet()
         decrypted = fernet.decrypt(encrypted_password.encode('utf-8'))
         return decrypted.decode('utf-8')
-    except Exception:
-        # 解密失败，可能是旧的明文密码
+    except Exception as e:
+        # 解密失败，记录错误并返回原值（可能是损坏的数据）
+        print(f"[Security Warning] Password decryption failed: {e}")
         return encrypted_password
 
 

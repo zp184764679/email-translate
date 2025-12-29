@@ -4,10 +4,40 @@ WebSocket 连接管理
 提供实时推送功能，用于通知任务完成等事件
 """
 from fastapi import WebSocket, WebSocketDisconnect
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import json
 import asyncio
 from datetime import datetime
+import jwt
+from config import get_settings
+
+
+def verify_websocket_token(token: str) -> Tuple[bool, Optional[int], Optional[str]]:
+    """
+    验证 WebSocket 连接的 JWT token
+
+    Args:
+        token: JWT token 字符串
+
+    Returns:
+        (is_valid, account_id, error_message)
+    """
+    if not token:
+        return False, None, "Token is required"
+
+    settings = get_settings()
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+        account_id = payload.get("account_id")
+        if account_id is None:
+            return False, None, "Invalid token payload"
+        return True, account_id, None
+    except jwt.ExpiredSignatureError:
+        return False, None, "Token has expired"
+    except jwt.InvalidTokenError:
+        return False, None, "Invalid token"
+    except Exception as e:
+        return False, None, f"Token verification failed: {str(e)}"
 
 
 class ConnectionManager:
@@ -148,14 +178,31 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-async def websocket_endpoint(websocket: WebSocket, account_id: int):
+async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None, account_id: Optional[int] = None):
     """
-    WebSocket 端点处理函数
+    WebSocket 端点处理函数（带 JWT 认证）
 
     Args:
         websocket: WebSocket 连接
-        account_id: 账户ID
+        token: JWT token（优先使用）
+        account_id: 账户ID（兼容旧版，但会被 token 覆盖）
+
+    Note:
+        - 如果提供了 token，会验证并从中提取 account_id
+        - 如果只提供 account_id 但无 token，将被拒绝（安全考虑）
     """
+    # 验证 token
+    if token:
+        is_valid, verified_account_id, error = verify_websocket_token(token)
+        if not is_valid:
+            await websocket.close(code=4001, reason=error or "Authentication failed")
+            return
+        account_id = verified_account_id
+    else:
+        # 没有 token 的连接被拒绝
+        await websocket.close(code=4001, reason="Token is required")
+        return
+
     await manager.connect(websocket, account_id)
 
     try:

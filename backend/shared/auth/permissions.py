@@ -107,7 +107,7 @@ def has_system_permission(permissions, system_name):
     if isinstance(permissions, str):
         try:
             permissions = json.loads(permissions)
-        except:
+        except (json.JSONDecodeError, ValueError):
             return False
     
     if not isinstance(permissions, list):
@@ -158,9 +158,9 @@ def parse_permissions(permissions_json):
     """
     if not permissions_json:
         return []
-    
+
     try:
         perms = json.loads(permissions_json) if isinstance(permissions_json, str) else permissions_json
         return perms if isinstance(perms, list) else []
-    except:
+    except (json.JSONDecodeError, ValueError, TypeError):
         return []

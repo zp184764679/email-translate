@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from pydantic import BaseModel
@@ -13,6 +13,7 @@ from services.translate_service import TranslateService
 from routers.users import get_current_account
 from config import get_settings
 from shared.cache_config import cache_get, cache_set
+from utils.rate_limit import translate_limiter, batch_limiter
 
 router = APIRouter(prefix="/api/translate", tags=["translate"])
 settings = get_settings()
@@ -117,7 +118,7 @@ def get_translate_service(for_smart_routing: bool = False) -> TranslateService:
 
     智能路由模式（smart_routing_enabled=True 或 for_smart_routing=True）：
     创建包含所有引擎配置的服务，支持自动切换：
-    优先级：Ollama → Claude
+    优先级：vLLM → Claude
 
     单引擎模式：
     根据 TRANSLATE_PROVIDER 使用单一引擎
@@ -129,9 +130,9 @@ def get_translate_service(for_smart_routing: bool = False) -> TranslateService:
             provider=settings.translate_provider,
             # API key (Claude)
             api_key=settings.claude_api_key,
-            # Ollama 配置
-            ollama_base_url=settings.ollama_base_url,
-            ollama_model=settings.ollama_model,
+            # vLLM 配置
+            vllm_base_url=settings.vllm_base_url,
+            vllm_model=settings.vllm_model,
             # Claude 配置
             claude_model=settings.claude_model,
         )
@@ -143,11 +144,11 @@ def get_translate_service(for_smart_routing: bool = False) -> TranslateService:
             provider="claude",
             claude_model=settings.claude_model
         )
-    else:  # ollama (default for local testing)
+    else:  # vllm (default)
         return TranslateService(
-            provider="ollama",
-            ollama_base_url=settings.ollama_base_url,
-            ollama_model=settings.ollama_model
+            provider="vllm",
+            vllm_base_url=settings.vllm_base_url,
+            vllm_model=settings.vllm_model
         )
 
 
@@ -197,9 +198,12 @@ async def translate_text(
 ):
     """Translate text using smart routing (with cache)
 
-    智能路由优先级：Ollama → Claude
+    智能路由优先级：vLLM → Claude
     自动根据复杂度选择引擎
     """
+    # 速率限制：每用户每分钟 30 次
+    translate_limiter.check(f"user:{account.id}")
+
     if not settings.translate_enabled:
         return TranslateResponse(translated_text=request.text, source_lang="disabled")
 
@@ -250,7 +254,7 @@ async def translate_reply(
 ):
     """Translate Chinese reply to target language using smart routing (with cache)
 
-    智能路由优先级：Ollama → Claude
+    智能路由优先级：vLLM → Claude
     """
     if not settings.translate_enabled:
         return TranslateResponse(translated_text=request.text, source_lang="disabled")
@@ -302,6 +306,9 @@ async def create_batch_translation(
     db: AsyncSession = Depends(get_db)
 ):
     """Translate multiple emails"""
+    # 速率限制：每用户每分钟 20 次批量操作
+    batch_limiter.check(f"user:{account.id}")
+
     if not settings.translate_enabled:
         return {"message": "翻译已禁用", "results": []}
 
@@ -447,7 +454,7 @@ async def get_usage_stats(
     获取翻译 API 用量统计
 
     参数:
-    - provider: 可选，指定翻译引擎 (ollama, claude)
+    - provider: 可选，指定翻译引擎 (vllm, claude)
                 不指定则返回所有引擎的用量
 
     返回:
@@ -479,7 +486,7 @@ async def get_provider_usage_stats(
     获取指定翻译引擎的用量统计
 
     路径参数:
-    - provider: 翻译引擎名称 (ollama, claude)
+    - provider: 翻译引擎名称 (vllm, claude)
     """
     from services.usage_service import check_translation_quota
 

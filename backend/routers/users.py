@@ -3,68 +3,22 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
-from typing import Optional, Dict
+from typing import Optional
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
-from collections import defaultdict
 import imaplib
-import time
 
 from database.database import get_db
 from database.models import EmailAccount
 from config import get_settings
 from utils.crypto import encrypt_password, decrypt_password, mask_email
+from utils.rate_limit import login_limiter, get_client_ip
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 settings = get_settings()
 
 
-# ============ 速率限制 ============
-class RateLimiter:
-    """简单的内存速率限制器"""
-
-    def __init__(self, max_requests: int = 5, window_seconds: int = 60):
-        """
-        Args:
-            max_requests: 时间窗口内允许的最大请求数
-            window_seconds: 时间窗口大小（秒）
-        """
-        self.max_requests = max_requests
-        self.window_seconds = window_seconds
-        self.requests: Dict[str, list] = defaultdict(list)
-
-    def is_allowed(self, key: str) -> tuple[bool, int]:
-        """检查是否允许请求
-
-        Returns:
-            (allowed, retry_after_seconds)
-        """
-        now = time.time()
-        window_start = now - self.window_seconds
-
-        # 清理过期记录
-        self.requests[key] = [t for t in self.requests[key] if t > window_start]
-
-        if len(self.requests[key]) >= self.max_requests:
-            # 计算需要等待的时间
-            oldest = min(self.requests[key])
-            retry_after = int(oldest + self.window_seconds - now) + 1
-            return False, retry_after
-
-        # 记录本次请求
-        self.requests[key].append(now)
-        return True, 0
-
-    def get_remaining(self, key: str) -> int:
-        """获取剩余请求次数"""
-        now = time.time()
-        window_start = now - self.window_seconds
-        self.requests[key] = [t for t in self.requests[key] if t > window_start]
-        return max(0, self.max_requests - len(self.requests[key]))
-
-
-# 登录接口速率限制：每IP每分钟最多5次
-login_limiter = RateLimiter(max_requests=5, window_seconds=60)
+# RateLimiter 类和 login_limiter 已移至 utils/rate_limit.py
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/users/login", auto_error=False)
 
@@ -194,18 +148,7 @@ def create_access_token(data: dict, expires_delta: timedelta = None):
     return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
 
 
-# ============ Helper: Get Client IP ============
-def get_client_ip(request: Request) -> str:
-    """获取客户端真实IP"""
-    # 优先检查代理头
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip
-    # 直接连接
-    return request.client.host if request.client else "unknown"
+# get_client_ip 已移至 utils/rate_limit.py
 
 
 # ============ Routes ============
