@@ -191,7 +191,125 @@ async def root():
 @app.get("/health")
 @app.get("/api/health")
 async def health_check():
+    """基础健康检查 - 用于负载均衡器"""
     return {"status": "healthy"}
+
+
+@app.get("/api/health/detail")
+async def health_check_detail():
+    """
+    详细健康检查 - 检查所有依赖服务
+    返回各组件状态和响应时间
+    """
+    import time
+    from datetime import datetime
+    import redis.asyncio as aioredis
+
+    results = {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "checks": {}
+    }
+
+    # 检查数据库连接
+    try:
+        from database.database import async_session
+        from sqlalchemy import text
+        start = time.time()
+        async with async_session() as session:
+            await session.execute(text("SELECT 1"))
+        db_latency = round((time.time() - start) * 1000, 2)
+        results["checks"]["database"] = {
+            "status": "healthy",
+            "latency_ms": db_latency
+        }
+    except Exception as e:
+        results["status"] = "unhealthy"
+        results["checks"]["database"] = {
+            "status": "unhealthy",
+            "error": str(e)
+        }
+
+    # 检查 Redis 连接
+    try:
+        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+        start = time.time()
+        redis_client = aioredis.from_url(redis_url)
+        await redis_client.ping()
+        await redis_client.close()
+        redis_latency = round((time.time() - start) * 1000, 2)
+        results["checks"]["redis"] = {
+            "status": "healthy",
+            "latency_ms": redis_latency
+        }
+    except Exception as e:
+        # Redis 是可选的，不影响整体健康状态
+        results["checks"]["redis"] = {
+            "status": "unavailable",
+            "error": str(e)
+        }
+
+    # 检查 Celery 连接（通过 Redis broker）
+    try:
+        broker_url = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/1")
+        start = time.time()
+        broker_client = aioredis.from_url(broker_url)
+        await broker_client.ping()
+        await broker_client.close()
+        celery_latency = round((time.time() - start) * 1000, 2)
+        results["checks"]["celery_broker"] = {
+            "status": "healthy",
+            "latency_ms": celery_latency
+        }
+    except Exception as e:
+        results["checks"]["celery_broker"] = {
+            "status": "unavailable",
+            "error": str(e)
+        }
+
+    return results
+
+
+@app.get("/api/health/db")
+async def health_check_db():
+    """数据库健康检查"""
+    try:
+        from database.database import async_session
+        from sqlalchemy import text
+        async with async_session() as session:
+            result = await session.execute(text("SELECT VERSION()"))
+            version = result.scalar()
+        return {
+            "status": "healthy",
+            "database": "mysql",
+            "version": version
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e)
+        }
+
+
+@app.get("/api/health/redis")
+async def health_check_redis():
+    """Redis 健康检查"""
+    import redis.asyncio as aioredis
+    try:
+        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+        redis_client = aioredis.from_url(redis_url)
+        info = await redis_client.info("server")
+        await redis_client.close()
+        return {
+            "status": "healthy",
+            "redis_version": info.get("redis_version"),
+            "uptime_seconds": info.get("uptime_in_seconds")
+        }
+    except Exception as e:
+        return {
+            "status": "unavailable",
+            "error": str(e)
+        }
 
 
 # API for client version check
