@@ -13,10 +13,11 @@ engine = create_async_engine(
     echo=settings.debug,
     future=True,
     # 连接池优化
-    pool_size=5,           # 保持5个连接
-    max_overflow=10,       # 最多额外10个连接
-    pool_pre_ping=True,    # 检查连接是否有效
-    pool_recycle=3600,     # 1小时回收连接
+    pool_size=10,          # 保持10个常驻连接
+    max_overflow=20,       # 最多额外20个连接（峰值30）
+    pool_pre_ping=True,    # 使用前检查连接有效性
+    pool_recycle=1800,     # 30分钟回收连接（避免MySQL wait_timeout）
+    pool_timeout=30,       # 获取连接超时时间（秒）
 )
 
 async_session = async_sessionmaker(

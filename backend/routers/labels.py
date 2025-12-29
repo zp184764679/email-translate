@@ -2,9 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, update, func, case
 from sqlalchemy.orm import selectinload
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional
 from datetime import datetime
+import re
 
 from database.database import get_db
 from database.models import EmailLabel, Email, EmailAccount, email_label_mappings
@@ -15,16 +16,47 @@ router = APIRouter(prefix="/api/labels", tags=["labels"])
 
 # ============ Schemas ============
 class LabelCreate(BaseModel):
-    name: str
-    color: str = "#409EFF"
-    description: Optional[str] = None
+    name: str = Field(..., min_length=1, max_length=50, description="标签名称")
+    color: str = Field("#409EFF", max_length=20, description="颜色代码")
+    description: Optional[str] = Field(None, max_length=200, description="标签描述")
+
+    @field_validator('name')
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("标签名称不能为空")
+        return v
+
+    @field_validator('color')
+    @classmethod
+    def validate_color(cls, v: str) -> str:
+        if v and not re.match(r'^#[0-9A-Fa-f]{6}$', v):
+            raise ValueError("颜色格式无效，应为 #RRGGBB")
+        return v
 
 
 class LabelUpdate(BaseModel):
-    name: Optional[str] = None
-    color: Optional[str] = None
-    description: Optional[str] = None
-    sort_order: Optional[int] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=50)
+    color: Optional[str] = Field(None, max_length=20)
+    description: Optional[str] = Field(None, max_length=200)
+    sort_order: Optional[int] = Field(None, ge=0)
+
+    @field_validator('name')
+    @classmethod
+    def validate_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            v = v.strip()
+            if not v:
+                raise ValueError("标签名称不能为空")
+        return v
+
+    @field_validator('color')
+    @classmethod
+    def validate_color(cls, v: Optional[str]) -> Optional[str]:
+        if v and not re.match(r'^#[0-9A-Fa-f]{6}$', v):
+            raise ValueError("颜色格式无效，应为 #RRGGBB")
+        return v
 
 
 class LabelResponse(BaseModel):

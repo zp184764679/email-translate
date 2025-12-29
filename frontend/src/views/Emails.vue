@@ -485,11 +485,27 @@ async function handleBatchDelete(ids) {
 async function handleBatchTranslate(ids) {
   try {
     ElMessage.info(`正在翻译 ${ids.length} 封邮件...`)
+    // 乐观更新：立即显示"翻译中"状态
     for (const id of ids) {
-      await api.translateEmail(id)
+      const email = emails.value.find(e => e.id === id)
+      if (email) {
+        email.translation_status = 'translating'
+      }
     }
-    ElMessage.success(`${ids.length} 封邮件翻译完成`)
-    loadEmails(true)
+    // 逐个翻译
+    for (const id of ids) {
+      try {
+        await api.translateEmail(id)
+      } catch (e) {
+        // 单个失败，标记失败状态
+        const email = emails.value.find(e => e.id === id)
+        if (email) {
+          email.translation_status = 'failed'
+        }
+      }
+    }
+    // WebSocket 会推送最终结果，这里不需要再刷新
+    ElMessage.success(`${ids.length} 封邮件翻译请求已提交`)
   } catch (e) {
     ElMessage.error('翻译失败')
   }
@@ -515,6 +531,15 @@ async function handleQuickDelete(email) {
     const index = emails.value.findIndex(e => e.id === email.id)
     if (index > -1) {
       emails.value.splice(index, 1)
+    }
+    // 如果删除的是当前激活的邮件，选中下一封
+    if (activeEmailId.value === email.id) {
+      activeEmail.value = null
+      activeEmailId.value = null
+      if (emails.value.length > 0) {
+        const nextIndex = Math.min(index, emails.value.length - 1)
+        handleEmailClick(emails.value[nextIndex])
+      }
     }
   } catch (e) {
     ElMessage.error('删除失败')

@@ -2,9 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, func, update, case
 from sqlalchemy.orm import selectinload
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional
 from datetime import datetime
+import re
 
 from database.database import get_db
 from database.models import EmailFolder, Email, EmailAccount, email_folder_mappings
@@ -15,18 +16,54 @@ router = APIRouter(prefix="/api/folders", tags=["folders"])
 
 # ============ Schemas ============
 class FolderCreate(BaseModel):
-    name: str
-    parent_id: Optional[int] = None
-    color: str = "#409EFF"
-    icon: str = "folder"
+    name: str = Field(..., min_length=1, max_length=100, description="文件夹名称")
+    parent_id: Optional[int] = Field(None, ge=1, description="父文件夹ID")
+    color: str = Field("#409EFF", max_length=20, description="颜色代码")
+    icon: str = Field("folder", max_length=50, description="图标名称")
+
+    @field_validator('name')
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("文件夹名称不能为空")
+        # 禁止特殊字符
+        if re.search(r'[<>:"/\\|?*]', v):
+            raise ValueError("文件夹名称不能包含特殊字符: < > : \" / \\ | ? *")
+        return v
+
+    @field_validator('color')
+    @classmethod
+    def validate_color(cls, v: str) -> str:
+        if v and not re.match(r'^#[0-9A-Fa-f]{6}$', v):
+            raise ValueError("颜色格式无效，应为 #RRGGBB")
+        return v
 
 
 class FolderUpdate(BaseModel):
-    name: Optional[str] = None
-    parent_id: Optional[int] = None
-    color: Optional[str] = None
-    icon: Optional[str] = None
-    sort_order: Optional[int] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    parent_id: Optional[int] = Field(None, ge=1)
+    color: Optional[str] = Field(None, max_length=20)
+    icon: Optional[str] = Field(None, max_length=50)
+    sort_order: Optional[int] = Field(None, ge=0)
+
+    @field_validator('name')
+    @classmethod
+    def validate_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            v = v.strip()
+            if not v:
+                raise ValueError("文件夹名称不能为空")
+            if re.search(r'[<>:"/\\|?*]', v):
+                raise ValueError("文件夹名称不能包含特殊字符")
+        return v
+
+    @field_validator('color')
+    @classmethod
+    def validate_color(cls, v: Optional[str]) -> Optional[str]:
+        if v and not re.match(r'^#[0-9A-Fa-f]{6}$', v):
+            raise ValueError("颜色格式无效，应为 #RRGGBB")
+        return v
 
 
 class FolderResponse(BaseModel):
