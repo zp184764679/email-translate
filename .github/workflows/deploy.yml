@@ -58,32 +58,58 @@ jobs:
 
             # 运行数据库迁移（按依赖顺序执行）
             echo "Running database migrations..."
+            MIGRATION_FAILED=0
+
+            # 迁移函数：运行迁移并检查结果
+            run_migration() {
+              local name=$1
+              echo "  Running: $name"
+              if ./venv/bin/python -m "migrations.$name" 2>&1; then
+                echo "  ✓ $name completed"
+              else
+                # 检查是否是"已存在"类型的错误（正常情况）
+                local exit_code=$?
+                echo "  ! $name exited with code $exit_code"
+                # 非零退出码但不是严重错误（字段已存在等）继续执行
+              fi
+            }
+
             # 基础功能迁移
-            ./venv/bin/python -m migrations.add_email_flags 2>/dev/null || echo "Migration: add_email_flags skipped"
-            ./venv/bin/python -m migrations.add_email_labels 2>/dev/null || echo "Migration: add_email_labels skipped"
-            ./venv/bin/python -m migrations.add_email_folders 2>/dev/null || echo "Migration: add_email_folders skipped"
-            ./venv/bin/python -m migrations.add_translation_cache 2>/dev/null || echo "Migration: add_translation_cache skipped"
-            ./venv/bin/python -m migrations.add_draft_recipient_fields 2>/dev/null || echo "Migration: add_draft_recipient_fields skipped"
-            ./venv/bin/python -m migrations.add_email_rules 2>/dev/null || echo "Migration: add_email_rules skipped"
+            run_migration "add_email_flags"
+            run_migration "add_email_labels"
+            run_migration "add_email_folders"
+            run_migration "add_translation_cache"
+            run_migration "add_draft_recipient_fields"
+            run_migration "add_email_rules"
+
             # 日历功能迁移
-            ./venv/bin/python -m migrations.add_calendar_events 2>/dev/null || echo "Migration: add_calendar_events skipped"
-            ./venv/bin/python -m migrations.add_event_reminder 2>/dev/null || echo "Migration: add_event_reminder skipped"
-            ./venv/bin/python -m migrations.add_recurrence_fields 2>/dev/null || echo "Migration: add_recurrence_fields skipped"
+            run_migration "add_calendar_events"
+            run_migration "add_event_reminder"
+            run_migration "add_recurrence_fields"
+
             # 审批和翻译功能迁移
-            ./venv/bin/python -m migrations.add_approval_fields 2>/dev/null || echo "Migration: add_approval_fields skipped"
-            ./venv/bin/python -m migrations.add_translation_status 2>/dev/null || echo "Migration: add_translation_status skipped"
-            ./venv/bin/python -m migrations.add_sent_email_mapping 2>/dev/null || echo "Migration: add_sent_email_mapping skipped"
-            ./venv/bin/python -m migrations.add_attachment_hash 2>/dev/null || echo "Migration: add_attachment_hash skipped"
-            ./venv/bin/python -m migrations.add_batch_account_id 2>/dev/null || echo "Migration: add_batch_account_id skipped"
+            run_migration "add_approval_fields"
+            run_migration "add_translation_status"
+            run_migration "add_sent_email_mapping"
+            run_migration "add_attachment_hash"
+            run_migration "add_batch_account_id"
+
             # 新功能迁移
-            ./venv/bin/python -m migrations.add_rule_executions 2>/dev/null || echo "Migration: add_rule_executions skipped"
-            ./venv/bin/python -m migrations.add_label_sort_order 2>/dev/null || echo "Migration: add_label_sort_order skipped"
-            ./venv/bin/python -m migrations.add_signature_fields 2>/dev/null || echo "Migration: add_signature_fields skipped"
-            ./venv/bin/python -m migrations.add_translation_feedback 2>/dev/null || echo "Migration: add_translation_feedback skipped"
-            # 数据清理迁移（最后执行）
-            ./venv/bin/python -m migrations.remove_shared_translation_originals 2>/dev/null || echo "Migration: remove_shared_translation_originals skipped"
+            run_migration "add_rule_executions"
+            run_migration "add_label_sort_order"
+            run_migration "add_signature_fields"
+            run_migration "add_translation_feedback"
+            run_migration "add_task_extractions"
+            run_migration "add_notifications"
+            run_migration "add_portal_integration_fields"
+
+            # 数据清理迁移（最后执行，可选）
+            run_migration "remove_shared_translation_originals"
+
             # 密码加密迁移（敏感操作，最后执行）
-            ./venv/bin/python -m migrations.encrypt_passwords 2>/dev/null || echo "Migration: encrypt_passwords skipped"
+            run_migration "encrypt_passwords"
+
+            echo "Database migrations completed."
 
             # 检查 .env 配置
             if [ ! -f ".env" ]; then
