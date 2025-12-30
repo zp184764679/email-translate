@@ -130,6 +130,15 @@
           <span class="folder-name">规则</span>
         </div>
 
+        <div
+          class="folder-item"
+          :class="{ active: currentFolder === 'statistics' }"
+          @click="navigateTo('/statistics', 'statistics')"
+        >
+          <el-icon><TrendCharts /></el-icon>
+          <span class="folder-name">统计报表</span>
+        </div>
+
         <div class="folder-divider"></div>
 
         <div
@@ -355,7 +364,7 @@ import {
   Refresh, RefreshRight, Message, EditPen, Document, Delete,
   OfficeBuilding, Setting, Promotion, Star, ChatDotSquare,
   SwitchButton, Checked, Reading, DocumentCopy, Grid, List,
-  Operation, Histogram, ArrowDown, Plus, Folder, Edit, Calendar, DataLine, Filter, Collection, Bell
+  Operation, Histogram, ArrowDown, Plus, Folder, Edit, Calendar, DataLine, Filter, Collection, Bell, TrendCharts
 } from '@element-plus/icons-vue'
 import api from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -485,6 +494,10 @@ function updateCurrentFolder() {
     currentFolder.value = 'calendar'
   } else if (path.startsWith('/settings')) {
     currentFolder.value = 'settings'
+  } else if (path.startsWith('/statistics')) {
+    currentFolder.value = 'statistics'
+  } else if (path.startsWith('/rules')) {
+    currentFolder.value = 'rules'
   }
 }
 
