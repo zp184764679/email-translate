@@ -1,18 +1,11 @@
 {
   "name": "supplier-email-translator",
   "version": "1.0.50",
-  "description": "供应商邮件翻译管理系统",
-  "main": "electron/main.js",
+  "description": "供应商邮件翻译管理系统 - Web版",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --port 4567",
     "build": "vite build",
-    "preview": "vite preview",
-    "vite:dev": "vite --port 4567",
-    "electron:dev": "concurrently --kill-others-on-fail \"npm run vite:dev\" \"wait-on http://localhost:4567 && electron .\"",
-    "electron:start": "cross-env NODE_ENV=development electron .",
-    "electron:build": "vite build && electron-builder",
-    "electron:build:win": "vite build && electron-builder --win",
-    "electron:build:mac": "vite build && electron-builder --mac"
+    "preview": "vite preview"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
@@ -25,7 +18,6 @@
     "dayjs": "^1.11.10",
     "dompurify": "^3.3.0",
     "echarts": "^6.0.0",
-    "electron-updater": "^6.1.0",
     "element-plus": "^2.5.0",
     "pinia": "^2.1.7",
     "vue": "^3.4.0",
@@ -34,54 +26,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.0",
-    "concurrently": "^8.2.0",
-    "cross-env": "^7.0.3",
-    "electron": "^39.2.6",
-    "electron-builder": "^25.0.0",
     "sass": "^1.69.0",
-    "vite": "^6.0.0",
-    "wait-on": "^7.2.0"
-  },
-  "build": {
-    "appId": "com.supplier.email.translator",
-    "productName": "供应商邮件翻译系统",
-    "directories": {
-      "output": "dist_electron"
-    },
-    "files": [
-      "dist/**/*",
-      "electron/**/*"
-    ],
-    "extraResources": [
-      {
-        "from": "../backend/dist/backend.exe",
-        "to": "backend/backend.exe"
-      }
-    ],
-    "win": {
-      "target": [
-        "nsis"
-      ],
-      "signAndEditExecutable": false
-    },
-    "mac": {
-      "target": [
-        "dmg"
-      ],
-      "icon": "public/icon.icns"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "供应商邮件翻译系统",
-      "deleteAppDataOnUninstall": true,
-      "artifactName": "${productName} Setup ${version}.${ext}"
-    },
-    "publish": {
-      "provider": "generic",
-      "url": "https://jzchardware.cn/email-updates"
-    }
+    "vite": "^6.0.0"
   }
 }

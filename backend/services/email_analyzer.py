@@ -1,5 +1,5 @@
 """
-邮件分析服务 - 使用 Ollama 分析邮件结构和复杂度
+邮件分析服务 - 使用 vLLM 分析邮件结构和复杂度
 
 功能：
 1. 快速评估邮件复杂度（简单/中等/复杂）
@@ -42,13 +42,18 @@ class AnalysisResult:
 
 
 class EmailAnalyzer:
-    """邮件分析器 - 使用 Ollama 本地模型"""
+    """邮件分析器 - 使用 vLLM 本地模型 (OpenAI 兼容 API)"""
 
-    def __init__(self, ollama_base_url: str = "http://localhost:11434",
-                 ollama_model: str = "qwen3:8b"):
-        self.ollama_base_url = ollama_base_url
-        self.ollama_model = ollama_model
-        self.http_client = httpx.Client(timeout=60.0)
+    def __init__(self, vllm_base_url: str = "http://localhost:5081",
+                 vllm_model: str = "/home/aaa/models/Qwen3-VL-8B-Instruct",
+                 vllm_api_key: str = None):
+        self.vllm_base_url = vllm_base_url
+        self.vllm_model = vllm_model
+        # 构建认证 headers
+        headers = {}
+        if vllm_api_key:
+            headers["Authorization"] = f"Bearer {vllm_api_key}"
+        self.http_client = httpx.Client(timeout=60.0, headers=headers)
 
     def analyze_email(self, text: str, subject: str = "") -> AnalysisResult:
         """
@@ -66,7 +71,7 @@ class EmailAnalyzer:
         if quick_result:
             return quick_result
 
-        # 复杂邮件用 Ollama 分析
+        # 复杂邮件用 vLLM 分析
         return self._llm_analysis(text, subject)
 
     def _quick_analysis(self, text: str, subject: str = "") -> Optional[AnalysisResult]:
@@ -199,13 +204,12 @@ class EmailAnalyzer:
         return structure
 
     def _llm_analysis(self, text: str, subject: str = "") -> AnalysisResult:
-        """使用 Ollama 分析复杂邮件（使用 /think 模式提高准确性）"""
-        prompt = f"""/think
-分析以下邮件，返回 JSON 格式结果。
+        """使用 vLLM 分析复杂邮件"""
+        prompt = f"""分析以下邮件，返回 JSON 格式结果。
 
 邮件主题：{subject}
 邮件内容：
-{text[:3000]}  # 限制长度
+{text[:3000]}
 
 请返回以下 JSON 格式（只返回JSON，不要其他内容）：
 {{
@@ -227,24 +231,17 @@ should_split: 只有 complex 级别且正文>500字符时才为 true"""
 
         try:
             response = self.http_client.post(
-                f"{self.ollama_base_url}/api/generate",
+                f"{self.vllm_base_url}/v1/chat/completions",
                 json={
-                    "model": self.ollama_model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {
-                        "temperature": 0.1,
-                        "num_predict": 1024
-                    }
+                    "model": self.vllm_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": 1024
                 }
             )
             response.raise_for_status()
 
-            result_text = response.json().get("response", "")
-
-            # 去除 qwen3 的思考标签
-            result_text = re.sub(r'<think>.*?</think>', '', result_text, flags=re.DOTALL)
-            result_text = result_text.strip()
+            result_text = response.json()["choices"][0]["message"]["content"].strip()
 
             # 提取 JSON
             json_match = re.search(r'\{[\s\S]*\}', result_text)
@@ -291,9 +288,8 @@ should_split: 只有 complex 级别且正文>500字符时才为 true"""
         if result:
             return result.complexity, result.score
 
-        # 需要 LLM 判断的情况，用简化 prompt（使用 /think 模式提高准确性）
-        prompt = f"""/think
-评估邮件复杂度，只返回一个数字（0-100）：
+        # 需要 LLM 判断的情况，用简化 prompt
+        prompt = f"""评估邮件复杂度，只返回一个数字（0-100）：
 - 0-30: 简单（短邮件、单一事项）
 - 31-70: 中等（一般业务）
 - 71-100: 复杂（技术文档、表格、合同）
@@ -305,19 +301,17 @@ should_split: 只有 complex 级别且正文>500字符时才为 true"""
 
         try:
             response = self.http_client.post(
-                f"{self.ollama_base_url}/api/generate",
+                f"{self.vllm_base_url}/v1/chat/completions",
                 json={
-                    "model": self.ollama_model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": 0, "num_predict": 10}
+                    "model": self.vllm_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0,
+                    "max_tokens": 10
                 }
             )
             response.raise_for_status()
 
-            result_text = response.json().get("response", "").strip()
-            # 去除思考标签
-            result_text = re.sub(r'<think>.*?</think>', '', result_text, flags=re.DOTALL).strip()
+            result_text = response.json()["choices"][0]["message"]["content"].strip()
 
             # 提取数字
             score_match = re.search(r'\d+', result_text)
@@ -342,13 +336,14 @@ should_split: 只有 complex 级别且正文>500字符时才为 true"""
 _analyzer: Optional[EmailAnalyzer] = None
 
 
-def get_email_analyzer(ollama_base_url: str = None, ollama_model: str = None) -> EmailAnalyzer:
+def get_email_analyzer(vllm_base_url: str = None, vllm_model: str = None) -> EmailAnalyzer:
     """获取邮件分析器单例"""
     global _analyzer
     if _analyzer is None:
         import os
         _analyzer = EmailAnalyzer(
-            ollama_base_url=ollama_base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
-            ollama_model=ollama_model or os.environ.get("OLLAMA_MODEL", "qwen3:8b")
+            vllm_base_url=vllm_base_url or os.environ.get("VLLM_BASE_URL", "http://localhost:5081"),
+            vllm_model=vllm_model or os.environ.get("VLLM_MODEL", "/home/aaa/models/Qwen3-VL-8B-Instruct"),
+            vllm_api_key=os.environ.get("VLLM_API_KEY")
         )
     return _analyzer

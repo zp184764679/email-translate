@@ -506,13 +506,7 @@ function handleLinkClick(event) {
     event.stopPropagation()
     const url = target.getAttribute('href')
     if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
-      // Electron 环境
-      if (window.electronAPI?.openExternal) {
-        window.electronAPI.openExternal(url)
-      } else {
-        // 浏览器环境
-        window.open(url, '_blank', 'noopener,noreferrer')
-      }
+      window.open(url, '_blank', 'noopener,noreferrer')
     }
   }
 }

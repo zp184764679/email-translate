@@ -5,6 +5,7 @@
 - fetch_emails_task: 拉取邮件
 - send_email_task: 发送邮件
 - export_emails_task: 导出邮件
+- check_scheduled_emails: 检查并发送定时邮件
 """
 import asyncio
 import os
@@ -350,5 +351,146 @@ def export_emails_task(self, email_ids: List[int], account_id: int, export_forma
         })
 
         raise self.retry(exc=e, countdown=10)
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, max_retries=2, soft_time_limit=120, time_limit=150)
+def check_scheduled_emails(self):
+    """
+    检查并发送定时邮件
+
+    每分钟由 Celery Beat 调用，检查所有到期的定时邮件并发送。
+    """
+    from database.models import EmailAccount, Draft, SentEmailMapping
+    from services.email_service import EmailService
+    from utils.crypto import decrypt_password
+
+    db = get_db_session()
+    now = datetime.utcnow()
+    sent_count = 0
+    failed_count = 0
+
+    try:
+        # 查询所有到期的定时邮件
+        pending_drafts = db.query(Draft).filter(
+            Draft.scheduled_status == "pending",
+            Draft.scheduled_at <= now
+        ).all()
+
+        if not pending_drafts:
+            return {"checked": 0, "sent": 0, "failed": 0}
+
+        print(f"[ScheduledEmails] Found {len(pending_drafts)} scheduled emails to send")
+
+        for draft in pending_drafts:
+            try:
+                # 获取作者账户
+                author = db.query(EmailAccount).filter(
+                    EmailAccount.id == draft.author_id
+                ).first()
+
+                if not author:
+                    print(f"[ScheduledEmails] Author not found for draft {draft.id}")
+                    draft.scheduled_status = "failed"
+                    failed_count += 1
+                    continue
+
+                # 准备发送参数
+                to_addr = draft.to_address
+                if not to_addr:
+                    print(f"[ScheduledEmails] No recipient for draft {draft.id}")
+                    draft.scheduled_status = "failed"
+                    failed_count += 1
+                    continue
+
+                subject = draft.subject or ""
+                body_to_send = draft.body_translated or draft.body_chinese
+
+                if not body_to_send:
+                    print(f"[ScheduledEmails] No body for draft {draft.id}")
+                    draft.scheduled_status = "failed"
+                    failed_count += 1
+                    continue
+
+                # 创建邮件服务并发送
+                service = EmailService(
+                    imap_server=author.imap_server,
+                    smtp_server=author.smtp_server,
+                    email_address=author.email,
+                    password=decrypt_password(author.password),
+                    smtp_port=author.smtp_port
+                )
+
+                success, sent_message_id = service.send_email(
+                    to=to_addr,
+                    cc=draft.cc_address,
+                    subject=subject,
+                    body=body_to_send
+                )
+
+                if success:
+                    # 更新状态
+                    draft.scheduled_status = "sent"
+                    draft.status = "sent"
+                    draft.sent_at = datetime.utcnow()
+                    draft.sent_message_id = sent_message_id
+
+                    # 保存发送映射
+                    if sent_message_id:
+                        try:
+                            mapping = SentEmailMapping(
+                                message_id=sent_message_id,
+                                draft_id=draft.id,
+                                account_id=author.id,
+                                subject_original=draft.subject,
+                                subject_sent=subject,
+                                body_original=draft.body_chinese or draft.body_translated,
+                                body_sent=body_to_send,
+                                was_translated=bool(
+                                    draft.body_chinese and draft.body_translated
+                                    and draft.body_chinese.strip() != draft.body_translated.strip()
+                                ),
+                                to_email=to_addr
+                            )
+                            db.add(mapping)
+                        except Exception as e:
+                            print(f"[ScheduledEmails] Failed to save mapping: {e}")
+
+                    sent_count += 1
+
+                    # 发送成功通知
+                    notify_completion(author.id, "scheduled_email_sent", {
+                        "draft_id": draft.id,
+                        "to": to_addr,
+                        "subject": subject,
+                        "scheduled_at": draft.scheduled_at.isoformat() if draft.scheduled_at else None
+                    })
+
+                    print(f"[ScheduledEmails] Successfully sent draft {draft.id} to {to_addr}")
+                else:
+                    draft.scheduled_status = "failed"
+                    failed_count += 1
+                    print(f"[ScheduledEmails] Failed to send draft {draft.id}: SMTP error")
+
+            except Exception as e:
+                print(f"[ScheduledEmails] Error sending draft {draft.id}: {e}")
+                draft.scheduled_status = "failed"
+                failed_count += 1
+
+        db.commit()
+
+        result = {
+            "checked": len(pending_drafts),
+            "sent": sent_count,
+            "failed": failed_count
+        }
+        print(f"[ScheduledEmails] Completed: {result}")
+        return result
+
+    except Exception as e:
+        db.rollback()
+        print(f"[ScheduledEmails] Task error: {e}")
+        raise self.retry(exc=e, countdown=30)
     finally:
         db.close()

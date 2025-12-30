@@ -1,7 +1,7 @@
 """
 修复未翻译邮件的脚本
 
-问题：当 Ollama 服务不可用时，拉丁字母语言（英文、德文等）的邮件
+问题：当 vLLM 服务不可用时，拉丁字母语言（英文、德文等）的邮件
 无法检测语言，导致 language_detected = "unknown"，没有触发翻译。
 
 解决：重新检测语言 + 翻译这些邮件
@@ -41,8 +41,8 @@ async def fix_untranslated_emails():
     translate_service = TranslateService(
         provider=settings.translate_provider,
         api_key=settings.claude_api_key,
-        ollama_base_url=settings.ollama_base_url,
-        ollama_model=settings.ollama_model,
+        vllm_base_url=settings.vllm_base_url,
+        vllm_model=settings.vllm_model,
         claude_model=settings.claude_model,
     )
 

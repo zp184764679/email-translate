@@ -39,7 +39,7 @@ def notify_completion(account_id: int, event_type: str, data: dict):
 @celery_app.task(bind=True, max_retries=2, soft_time_limit=60, time_limit=90)
 def extract_email_info_task(self, email_id: int, account_id: int, force: bool = False):
     """
-    异步提取邮件信息（使用 Ollama AI）
+    异步提取邮件信息（使用 vLLM AI）
 
     Args:
         email_id: 邮件ID
@@ -210,3 +210,103 @@ def batch_extract_task(self, email_ids: list, account_id: int):
         "completed": completed,
         "failed": failed
     }
+
+
+@celery_app.task(bind=True, max_retries=2, soft_time_limit=120, time_limit=150)
+def classify_email_task(self, email_id: int, account_id: int, force: bool = False):
+    """
+    异步分类单封邮件
+
+    Args:
+        email_id: 邮件ID
+        account_id: 账户ID
+        force: 是否强制重新分类
+
+    Returns:
+        dict: 分类结果
+    """
+    from database.models import Email
+    from services.email_classifier_service import classifier_service
+    from database.database import async_session
+    import asyncio
+
+    async def do_classify():
+        async with async_session() as db:
+            result = await classifier_service.classify_and_save(db, email_id, force)
+            return result
+
+    try:
+        result = asyncio.run(do_classify())
+
+        if result:
+            notify_completion(account_id, "classification_complete", {
+                "email_id": email_id,
+                "category": result.get("category"),
+                "confidence": result.get("confidence")
+            })
+
+        return {
+            "success": True,
+            "email_id": email_id,
+            "data": result
+        }
+
+    except Exception as e:
+        print(f"[ClassifyTask] Error classifying email {email_id}: {e}")
+
+        notify_completion(account_id, "classification_failed", {
+            "email_id": email_id,
+            "error": str(e)
+        })
+
+        raise self.retry(exc=e, countdown=10)
+
+
+@celery_app.task(bind=True, max_retries=1, soft_time_limit=600, time_limit=660)
+def auto_classify_pending_emails(self, account_id: int = None, limit: int = 100):
+    """
+    自动分类未分类的邮件（定时任务）
+
+    Args:
+        account_id: 账户ID（可选，不传则处理所有账户）
+        limit: 每次处理的邮件数量
+
+    Returns:
+        dict: 分类统计
+    """
+    from database.models import Email
+    from services.email_classifier_service import classifier_service
+    from database.database import async_session
+    from sqlalchemy import select
+    import asyncio
+
+    async def do_batch_classify():
+        async with async_session() as db:
+            # 构建查询
+            query = select(Email.id, Email.account_id).where(
+                Email.ai_category.is_(None),
+                Email.is_translated == True  # 只分类已翻译的邮件
+            )
+            if account_id:
+                query = query.where(Email.account_id == account_id)
+
+            query = query.order_by(Email.received_at.desc()).limit(limit)
+
+            result = await db.execute(query)
+            emails = result.fetchall()
+
+            if not emails:
+                return {"total": 0, "success": 0, "failed": 0}
+
+            email_ids = [e[0] for e in emails]
+            stats = await classifier_service.batch_classify(db, email_ids, force=False)
+            return stats
+
+    try:
+        stats = asyncio.run(do_batch_classify())
+        print(f"[AutoClassify] Completed: {stats}")
+        return stats
+
+    except Exception as e:
+        print(f"[AutoClassify] Error: {e}")
+        return {"error": str(e)}

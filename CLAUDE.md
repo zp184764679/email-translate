@@ -54,7 +54,7 @@
 │   └── services/           # 业务服务
 │       ├── email_service.py        # IMAP/SMTP 邮件收发
 │       ├── translate_service.py    # 翻译引擎
-│       ├── language_service.py     # Ollama 语言检测
+│       ├── language_service.py     # vLLM 语言检测
 │       └── notification_service.py # WebSocket 推送
 ├── frontend/               # Vue3 + Electron 前端（桌面客户端）
 │   ├── electron/           # Electron 主进程
@@ -82,13 +82,13 @@
 | 认证 | JWT (邮箱IMAP验证) |
 | 前端 | Vue 3 + Vite + Element Plus |
 | 桌面端 | Electron 28 |
-| 翻译 | Ollama (本地) / Claude API |
+| 翻译 | vLLM (服务器) / Claude API |
 
 ## 核心功能
 
 1. **邮箱登录** - 使用公司邮箱密码验证IMAP连接
-2. **邮件收取** - IMAP协议拉取邮件，Ollama智能检测语言
-3. **智能翻译** - 外语邮件翻译为中文（Ollama/Claude）
+2. **邮件收取** - IMAP协议拉取邮件，vLLM智能检测语言
+3. **智能翻译** - 外语邮件翻译为中文（vLLM/Claude）
 4. **回复撰写** - 中文撰写，翻译为目标语言发送
 5. **审批流程** - 草稿提交审批，审批人审核后发送
 6. **术语表** - 按供应商维护专业术语翻译
@@ -252,13 +252,13 @@ MYSQL_PASSWORD=your-password
 MYSQL_DATABASE=email_translate
 
 # ===== 翻译引擎配置 =====
-# ollama: 本地大模型（主力，免费）
+# vllm: 服务器大模型（主力，免费）
 # claude: Claude API（复杂邮件备用）
-TRANSLATE_PROVIDER=ollama
+TRANSLATE_PROVIDER=vllm
 
-# Ollama 本地模型 - 主力翻译引擎
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=qwen3:8b
+# vLLM (服务器本地 OpenAI 兼容 API) - 主力翻译引擎
+VLLM_BASE_URL=http://localhost:5080
+VLLM_MODEL=/home/aaa/models/Qwen3-VL-8B-Instruct
 
 # Claude API (Anthropic) - 复杂邮件备用
 CLAUDE_API_KEY=your-claude-api-key
@@ -272,7 +272,7 @@ SECRET_KEY=your-secret-key
 
 | Provider | 说明 | 费用 | 用量统计 |
 |----------|------|------|----------|
-| `ollama` | 本地大模型（主力） | 免费 | 不统计 |
+| `vllm` | 服务器大模型（主力） | 免费 | 不统计 |
 | `claude` | Claude API（复杂邮件备用） | 按量付费 | ✓ 自动记录 |
 
 ### 智能路由模式（推荐）
@@ -282,24 +282,24 @@ SECRET_KEY=your-secret-key
 ```
 邮件进入
     ↓
-Ollama 评估复杂度（规则优先，必要时用LLM打分）
+vLLM 评估复杂度（规则优先，必要时用LLM打分）
     ↓
 ┌─────────────────┬─────────────────────┬─────────────────────┐
 │ 简单(≤50分)     │ 中等(51-70)          │ 复杂(>70)           │
 │                 │                      │                     │
-│ Ollama直接翻译  │ Ollama拆分邮件结构   │ Ollama拆分邮件结构  │
-│ (免费快速)      │ ├─ 正文 → Ollama     │ ├─ 正文 → Claude    │
-│                 │ └─ 签名 → Ollama     │ └─ 签名 → Ollama    │
+│ vLLM直接翻译    │ vLLM拆分邮件结构     │ vLLM拆分邮件结构    │
+│ (免费快速)      │ ├─ 正文 → vLLM       │ ├─ 正文 → Claude    │
+│                 │ └─ 签名 → vLLM       │ └─ 签名 → vLLM      │
 └─────────────────┴─────────────────────┴─────────────────────┘
     ↓ 失败时自动回退
-Ollama → Claude
+vLLM → Claude
 ```
 
 **智能拆分翻译**：
-- Ollama 使用 `/think` 模式分析邮件结构，识别问候语、正文、签名
+- vLLM 分析邮件结构，识别问候语、正文、签名
 - 复杂邮件正文使用 Claude（理解能力强）
-- 问候语、签名等固定格式内容使用 Ollama（免费、格式保持好）
-- Ollama 超时 600 秒，num_predict=4096 支持长文本
+- 问候语、签名等固定格式内容使用 vLLM（免费、格式保持好）
+- vLLM 超时 600 秒，max_tokens=4096 支持长文本
 
 **复杂度判断标准**：
 - 简单：<500字符，无表格/列表，日常问候确认
@@ -352,7 +352,25 @@ VITE_API_URL=http://localhost:8000/api
 | GET | /api/drafts | 获取草稿 |
 | POST | /api/drafts | 创建草稿 |
 | POST | /api/drafts/{id}/send | 发送草稿 |
-| GET | /api/suppliers | 供应商列表 |
+| GET | /api/suppliers | 供应商列表（含分类、标签、统计） |
+| GET | /api/suppliers/{id} | 供应商详情 |
+| POST | /api/suppliers/{id}/analyze-category | AI 分析供应商分类 |
+| POST | /api/suppliers/batch-analyze | 批量 AI 分析 |
+| GET | /api/suppliers/category-stats | 分类统计 |
+| PUT | /api/suppliers/{id}/category | 手动设置分类 |
+| GET | /api/suppliers/{id}/domains | 获取供应商域名列表 |
+| POST | /api/suppliers/{id}/domains | 添加域名 |
+| DELETE | /api/suppliers/{id}/domains/{domain_id} | 删除域名 |
+| GET | /api/suppliers/{id}/contacts | 获取联系人列表 |
+| POST | /api/suppliers/{id}/contacts | 添加联系人 |
+| PUT | /api/suppliers/{id}/contacts/{contact_id} | 更新联系人 |
+| DELETE | /api/suppliers/{id}/contacts/{contact_id} | 删除联系人 |
+| GET | /api/suppliers/tags | 获取供应商标签 |
+| POST | /api/suppliers/tags | 创建标签 |
+| PUT | /api/suppliers/tags/{tag_id} | 更新标签 |
+| DELETE | /api/suppliers/tags/{tag_id} | 删除标签 |
+| POST | /api/suppliers/{id}/tags/{tag_id} | 为供应商添加标签 |
+| DELETE | /api/suppliers/{id}/tags/{tag_id} | 移除供应商标签 |
 | GET | /api/translate/glossary/{id} | 术语表 |
 | GET | /api/labels | 获取标签列表 |
 | POST | /api/labels | 创建标签 |
@@ -377,13 +395,30 @@ VITE_API_URL=http://localhost:8000/api
 | POST | /api/ai/extract/{email_id} | AI 提取邮件信息（force=true 强制重新提取） |
 | GET | /api/ai/extract/{email_id} | 获取已提取的信息 |
 | DELETE | /api/ai/extract/{email_id} | 删除提取结果 |
+| GET | /api/templates | 获取模板列表（个人+共享） |
+| GET | /api/templates/categories | 获取模板分类列表 |
+| GET | /api/templates/variables | 获取可用变量列表 |
+| GET | /api/templates/languages | 获取支持的翻译语言 |
+| GET | /api/templates/{id} | 获取模板详情（含翻译版本） |
+| POST | /api/templates | 创建模板 |
+| PUT | /api/templates/{id} | 更新模板 |
+| DELETE | /api/templates/{id} | 删除模板 |
+| POST | /api/templates/{id}/translate | 翻译模板为指定语言 |
+| POST | /api/templates/{id}/share | 共享模板 |
+| POST | /api/templates/{id}/unshare | 取消共享 |
+| POST | /api/templates/{id}/use | 使用模板（增加计数+替换变量） |
 | WS | /ws/{account_id} | WebSocket 实时推送连接 |
 
 ## 数据模型
 
 - **EmailAccount** - 邮箱账户（IMAP/SMTP配置，登录后自动创建）
 - **Email** - 邮件（原文、译文、语言检测、is_read、is_flagged、labels、folders）
-- **Supplier** - 供应商（域名、联系邮箱）
+- **Supplier** - 供应商（域名、联系邮箱、AI分类、标签）
+- **SupplierDomain** - 供应商多域名（一个供应商可有多个邮箱域名）
+- **SupplierContact** - 供应商联系人（姓名、邮箱、电话、角色）
+- **SupplierTag** - 供应商标签（用于标记和筛选供应商）
+- **EmailTemplate** - 邮件模板（中文模板、分类、变量、共享）
+- **EmailTemplateTranslation** - 模板翻译版本（多语言翻译）
 - **Glossary** - 术语表（原文→译文）
 - **Draft** - 回复草稿（中文、译文、状态、approver_id、approver_group_id）
 - **ApproverGroup** - 审批人组（name、description、owner_id）
@@ -417,6 +452,15 @@ python -m migrations.add_translation_status
 python -m migrations.add_sent_email_mapping
 python -m migrations.add_attachment_hash
 python -m migrations.add_batch_account_id
+
+# 供应商管理增强
+python -m migrations.add_supplier_category   # AI 分类字段
+python -m migrations.add_supplier_domains    # 多域名支持
+python -m migrations.add_supplier_contacts   # 联系人管理
+python -m migrations.add_supplier_tags       # 标签系统
+
+# 邮件模板
+python -m migrations.add_email_templates     # 模板表和翻译表
 
 # 数据清理（可选）
 python -m migrations.remove_shared_translation_originals
@@ -699,7 +743,7 @@ emails 表（新增字段）
 3. 添加轮询任务（每 5 分钟检查 Batch 状态）
 4. 集成 Claude Batch API
 
-**当前测试**：先用本地 Ollama 模型测试定时任务流程，确认无误后再切换到 Claude Batch API
+**当前测试**：先用本地 vLLM 模型测试定时任务流程，确认无误后再切换到 Claude Batch API
 
 ## Celery 异步任务系统
 
@@ -820,7 +864,7 @@ CELERY_RESULT_BACKEND=redis://localhost:6379/2
 | 手动拉取邮件 | 点击"同步"按钮 |
 | 自动定时拉取 | 每5分钟自动检查新邮件（前端定时器实现） |
 | 新邮件桌面通知 | Electron Notification API |
-| 智能翻译 | 支持 Ollama/Claude |
+| 智能翻译 | 支持 vLLM/Claude |
 | 翻译后台化 | 翻译时不阻塞 UI，用户可继续操作 |
 | 翻译缓存 | 相同文本只翻译一次 |
 | 邮件翻译共享 | 同一封邮件跨用户只翻译一次 |
@@ -831,10 +875,10 @@ CELERY_RESULT_BACKEND=redis://localhost:6379/2
 | 批量删除 | POST /api/emails/batch/delete |
 | 回复邮件 | 中文撰写 → 翻译 → 发送 |
 | 草稿保存 | 保存回复草稿 |
-| 供应商管理 | 按域名分类供应商 |
+| 供应商管理 | 按域名分类、AI 智能分类、多域名支持、联系人管理、标签筛选 |
 | 邮件搜索 | 按主题、发件人搜索 |
 | 邮件排序 | 按时间、发件人排序 |
-| 语言检测 | Ollama 智能识别邮件语言（替代 langdetect，解决英德混淆） |
+| 语言检测 | vLLM 智能识别邮件语言（替代 langdetect，解决英德混淆） |
 | 附件存储 | 保存到服务器 |
 | 附件下载 | 单个下载、批量下载 |
 | 登录后自动拉取 | 首次登录自动同步邮件 |
@@ -903,96 +947,75 @@ DELETE /api/signatures/{id}     # 删除签名
 POST /api/signatures/{id}/set-default  # 设为默认签名
 ```
 
-## CI/CD 自动化部署
+## 文件自动同步 (rsync)
 
-项目使用 GitHub Actions 实现自动化部署，包括后端部署和桌面端发布。
+本地开发文件会**自动同步**到服务器，无需手动上传。GitHub Actions 已废弃。
 
-### 后端自动部署
+### 同步状态
 
-推送到 `main` 分支时自动触发：
+| 项目 | 本地路径 | 服务器路径 | 状态 |
+|------|----------|------------|------|
+| email-translate | `C:\Users\Admin\Desktop\供应商邮件翻译系统` | `/www/email-translate` | ✅ 自动 |
+| jzc_systems | `C:\Users\Admin\Desktop\jzc_systems` | `/www/jzc_systems` | ✅ 自动 |
+
+### 工作原理
 
 ```
-git push origin main
-    ↓
-GitHub Actions (.github/workflows/deploy.yml)
-    ↓
-SSH 连接服务器 → 拉取代码 → 安装依赖 → 重启 PM2
+文件修改 → 5秒检测 → rsync over SSH → 服务器更新
 ```
 
-### 桌面端发布流程
+- Windows 开机自动启动后台监听进程 (WSL Ubuntu)
+- 每 5 秒检测文件变化
+- 有变化时通过 rsync 同步到服务器
+- 排除 `.git`, `node_modules`, `venv`, `dist`, `logs`, `backend/data` 等目录
 
-两种方式触发发布：
+### 手动操作
 
-#### 方式一：打 Tag 发布（推荐）
+```bash
+# 单次同步
+sync.bat
+
+# 同步后重启服务
+sync.bat restart
+
+# 启动监听模式（开机已自动启动）
+sync.bat watch
+
+# 监听 + 自动重启
+sync.bat watch restart
+```
+
+### 相关文件
+
+| 文件 | 用途 |
+|------|------|
+| `sync.sh` | 同步脚本 (WSL 执行) |
+| `sync.bat` | Windows 启动器 |
+| `sync-watch.vbs` | 后台监听启动器 |
+| `create-startup.ps1` | 添加开机启动项 |
+
+### 排除目录
+
+**不同步到服务器：**
+- `.git`, `node_modules`, `__pycache__`, `.env`, `dist_electron`, `venv`
+
+**服务器上保留（不删除）：**
+- `logs/`, `updates/`, `frontend-web/`, `backend/data/`
+
+### 桌面端发布
+
+桌面端 Electron 应用需要手动打包发布：
 
 ```bash
 # 1. 修改版本号
 cd frontend
-npm version 1.0.1  # 自动更新 package.json 并创建 git tag
+npm version 1.0.50
 
-# 2. 推送代码和 tag
-git push origin main --tags
-```
+# 2. 打包
+npm run electron:build
 
-#### 方式二：手动触发
-
-1. 打开 GitHub 仓库 → Actions → "Build and Release Desktop App"
-2. 点击 "Run workflow"
-3. 输入版本号（如 1.0.1）
-4. 点击运行
-
-### 发布流程详情
-
-```
-触发发布（推送 v* 标签）
-    ↓
-GitHub Actions (Windows Runner)
-    ↓
-├── 打包后端 (PyInstaller)
-├── 构建前端 (Vite)
-├── 打包 Electron (electron-builder)
-    ↓
-上传到 GitHub Releases
-├── 供应商邮件翻译系统 Setup x.x.x.exe
-└── latest.yml
-    ↓
-用户端自动检测更新 → 从 GitHub 下载安装
-```
-
-### 更新托管配置
-
-| 配置项 | 值 |
-|--------|-----|
-| 托管方式 | GitHub Releases |
-| 仓库 | `zp184764679/email-translate` |
-| electron-updater provider | `github` |
-
-**为什么使用 GitHub Releases 而不是自建服务器：**
-- GitHub Actions 在美国，上传到中国服务器跨国传输很慢（100MB+ 文件需要 20+ 分钟）
-- GitHub CDN 全球分布，用户下载更快
-- 无需维护文件服务器
-- 发布记录自动保存，便于版本管理
-
-### GitHub Secrets 配置
-
-| Secret 名称 | 说明 | 用途 |
-|-------------|------|------|
-| `SERVER_HOST` | 服务器 IP (61.145.212.28) | 后端部署 |
-| `SERVER_USER` | SSH 用户名 (root) | 后端部署 |
-| `SSH_PRIVATE_KEY` | SSH 私钥 (email_deploy) | 后端部署 |
-| `GITHUB_TOKEN` | 自动提供 | 发布到 GitHub Releases |
-
-### 快速发布命令
-
-```bash
-# 发布新版本（一行命令）
-git tag -a v1.0.5 -m "release: 新功能描述" && git push origin v1.0.5
-
-# 查看所有版本
-git tag -l
-
-# 删除错误的标签（本地+远程）
-git tag -d v1.0.5 && git push origin :refs/tags/v1.0.5
+# 3. 上传安装包到 updates/ 目录
+# 产物: frontend/dist_electron/供应商邮件翻译系统 Setup x.x.x.exe
 ```
 
 ### 版本号规范
@@ -1047,7 +1070,7 @@ python -m migrations.add_batch_account_id
 #### 稳定性改进
 - **翻译锁改用数据库**：从内存 `set` 改为 `translation_status` 字段，支持多进程
 - **共享翻译表防重复**：使用 MySQL `ON DUPLICATE KEY UPDATE` 防止并发插入冲突
-- **语言检测备用方案**：添加基于字符特征的快速检测（中/日/韩/俄），Ollama 作为备用
+- **语言检测备用方案**：添加基于字符特征的快速检测（中/日/韩/俄），vLLM 作为备用
 - **搜索长度限制**：限制搜索字符串最大 500 字符
 - **文件夹删除确认**：检查子文件夹和关联邮件，添加 `force` 参数
 

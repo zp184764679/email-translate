@@ -8,7 +8,7 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [vue()],
-    base: './',
+    base: '/email/',  // Web 部署路径
     resolve: {
       alias: {
         '@': path.resolve(__dirname, 'src')

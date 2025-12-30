@@ -116,11 +116,16 @@ celery_app.conf.update(
             "task": "tasks.maintenance_tasks.reset_monthly_quota",
             "schedule": crontab(day_of_month=1, hour=0, minute=0),
         },
-        # 收集未翻译邮件并翻译（Ollama）- 每5分钟
+        # 收集未翻译邮件并翻译（vLLM）- 每5分钟
         "collect-and-translate-pending": {
             "task": "tasks.translate_tasks.collect_and_translate_pending",
             "schedule": 300.0,  # 5分钟
             "kwargs": {"limit": 500},
+        },
+        # 检查并发送定时邮件 - 每分钟
+        "check-scheduled-emails": {
+            "task": "tasks.email_tasks.check_scheduled_emails",
+            "schedule": 60.0,  # 每分钟
         },
     },
 )

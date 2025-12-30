@@ -2,7 +2,7 @@
 邮件复杂度评估服务
 
 智能路由策略：
-- 简单邮件 → Ollama (免费)
+- 简单邮件 → vLLM (免费)
 - 中等邮件 → Claude Batch (半价)
 - 复杂邮件 → DeepL / Claude 实时
 
@@ -18,7 +18,7 @@ from typing import Optional, Tuple
 
 class ComplexityLevel(Enum):
     """复杂度等级"""
-    LOW = "low"         # 简单 → Ollama
+    LOW = "low"         # 简单 → vLLM
     MEDIUM = "medium"   # 中等 → Claude Batch
     HIGH = "high"       # 复杂 → DeepL/Claude 实时
 
@@ -68,11 +68,16 @@ class ComplexityService:
         r'(address:|website:|www\.)',
     ]
 
-    def __init__(self, ollama_base_url: str = "http://172.24.228.215:11434",
-                 ollama_model: str = "qwen3:8b"):
-        self.ollama_base_url = ollama_base_url
-        self.ollama_model = ollama_model
-        self.http_client = httpx.Client(timeout=60.0)
+    def __init__(self, vllm_base_url: str = "http://localhost:5081",
+                 vllm_model: str = "/home/aaa/models/Qwen3-VL-8B-Instruct",
+                 vllm_api_key: str = None):
+        self.vllm_base_url = vllm_base_url
+        self.vllm_model = vllm_model
+        # 构建认证 headers
+        headers = {}
+        if vllm_api_key:
+            headers["Authorization"] = f"Bearer {vllm_api_key}"
+        self.http_client = httpx.Client(timeout=60.0, headers=headers)
 
     def evaluate(self, text: str, subject: str = "") -> ComplexityResult:
         """
@@ -195,17 +200,15 @@ class ComplexityService:
 
         try:
             response = self.http_client.post(
-                f"{self.ollama_base_url}/api/generate",
+                f"{self.vllm_base_url}/v1/chat/completions",
                 json={
-                    "model": self.ollama_model,
-                    "prompt": prompt,
-                    "stream": False
+                    "model": self.vllm_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                    "max_tokens": 256
                 }
             )
-            result_text = response.json().get("response", "")
-
-            # 去除思考标签
-            result_text = re.sub(r'<think>.*?</think>', '', result_text, flags=re.DOTALL)
+            result_text = response.json()["choices"][0]["message"]["content"].strip()
 
             # 解析 JSON
             json_match = re.search(r'\{[^}]+\}', result_text)
@@ -277,9 +280,9 @@ class ComplexityService:
     def get_recommended_provider(self, result: ComplexityResult) -> str:
         """根据复杂度推荐翻译引擎"""
         if result.level == ComplexityLevel.LOW:
-            return "ollama"
+            return "vllm"
         elif result.level == ComplexityLevel.MEDIUM:
-            return "claude_batch"  # 或 ollama，取决于成本考量
+            return "claude_batch"  # 或 vllm，取决于成本考量
         else:
             return "deepl"  # 或 claude
 
@@ -287,13 +290,15 @@ class ComplexityService:
 # 便捷函数
 _service_instance: Optional[ComplexityService] = None
 
-def get_complexity_service(ollama_base_url: str = None, ollama_model: str = None) -> ComplexityService:
+def get_complexity_service(vllm_base_url: str = None, vllm_model: str = None) -> ComplexityService:
     """获取单例服务"""
     global _service_instance
     if _service_instance is None:
+        import os
         _service_instance = ComplexityService(
-            ollama_base_url=ollama_base_url or "http://172.24.228.215:11434",
-            ollama_model=ollama_model or "qwen3:8b"
+            vllm_base_url=vllm_base_url or os.environ.get("VLLM_BASE_URL", "http://localhost:5081"),
+            vllm_model=vllm_model or os.environ.get("VLLM_MODEL", "/home/aaa/models/Qwen3-VL-8B-Instruct"),
+            vllm_api_key=os.environ.get("VLLM_API_KEY")
         )
     return _service_instance
 

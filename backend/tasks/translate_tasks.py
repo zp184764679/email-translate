@@ -2,17 +2,24 @@
 翻译相关 Celery 任务
 
 包含：
-- translate_email_task: 翻译单封邮件
+- translate_email_task: 翻译单封邮件（支持超长邮件分段翻译）
 - batch_translate_task: 批量翻译邮件
 - poll_batch_status: 轮询 Claude Batch API 状态
+- collect_and_translate_pending: 收集并翻译待处理邮件
 """
 import asyncio
+import re
 from celery import shared_task
 from celery.exceptions import SoftTimeLimitExceeded
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Tuple
 
 from celery_app import celery_app
+
+# 超长邮件阈值（字节）
+LONG_EMAIL_THRESHOLD = 25000  # 25KB
+# 每段最大长度（字符）
+CHUNK_MAX_SIZE = 8000
 
 
 def get_db_session():
@@ -27,6 +34,94 @@ def get_db_session():
     return SessionLocal()
 
 
+def split_email_into_chunks(text: str, max_chunk_size: int = CHUNK_MAX_SIZE) -> List[str]:
+    """
+    将长邮件文本分割成多个片段，在段落或句子边界处分割
+
+    Args:
+        text: 原始文本
+        max_chunk_size: 每个片段的最大长度
+
+    Returns:
+        List[str]: 分割后的文本片段列表
+    """
+    if len(text) <= max_chunk_size:
+        return [text]
+
+    chunks = []
+    current_pos = 0
+
+    while current_pos < len(text):
+        # 如果剩余内容不超过限制，直接添加
+        if current_pos + max_chunk_size >= len(text):
+            chunks.append(text[current_pos:])
+            break
+
+        # 找到合适的分割点（优先级：段落 > 换行 > 句号 > 空格）
+        end_pos = current_pos + max_chunk_size
+        chunk_text = text[current_pos:end_pos]
+
+        # 从后向前查找最佳分割点
+        split_patterns = [
+            r'\n\n',  # 段落分隔
+            r'\n',    # 换行
+            r'[.。！!?？](?=\s|$)',  # 句末标点
+            r'[,，;；](?=\s)',  # 子句分隔
+            r'\s',    # 空格
+        ]
+
+        best_split = len(chunk_text)
+
+        for pattern in split_patterns:
+            # 在后半部分查找分割点
+            search_start = max(0, len(chunk_text) // 2)
+            matches = list(re.finditer(pattern, chunk_text[search_start:]))
+            if matches:
+                # 取最后一个匹配
+                last_match = matches[-1]
+                split_pos = search_start + last_match.end()
+                if split_pos > search_start:
+                    best_split = split_pos
+                    break
+
+        # 添加片段
+        chunks.append(text[current_pos:current_pos + best_split])
+        current_pos += best_split
+
+    return chunks
+
+
+def translate_long_email(service, text: str, target_lang: str, source_lang: str, glossary=None) -> str:
+    """
+    翻译超长邮件，自动分段处理
+
+    Args:
+        service: TranslateService 实例
+        text: 原始文本
+        target_lang: 目标语言
+        source_lang: 源语言
+        glossary: 术语表
+
+    Returns:
+        str: 完整翻译结果
+    """
+    chunks = split_email_into_chunks(text)
+    print(f"[TranslateTask] Long email split into {len(chunks)} chunks")
+
+    translated_chunks = []
+    for i, chunk in enumerate(chunks):
+        print(f"[TranslateTask] Translating chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
+        translated = service.translate_text(
+            text=chunk,
+            target_lang=target_lang,
+            source_lang=source_lang,
+            glossary=glossary
+        )
+        translated_chunks.append(translated)
+
+    return "\n".join(translated_chunks)
+
+
 def notify_completion(account_id: int, event_type: str, data: dict):
     """发送任务完成通知"""
     try:
@@ -39,7 +134,7 @@ def notify_completion(account_id: int, event_type: str, data: dict):
         print(f"[Notify] Failed to send notification: {e}")
 
 
-@celery_app.task(bind=True, max_retries=3, soft_time_limit=180, time_limit=240)
+@celery_app.task(bind=True, max_retries=3, soft_time_limit=300, time_limit=360)
 def translate_email_task(self, email_id: int, account_id: int, force: bool = False):
     """
     异步翻译单封邮件
@@ -105,7 +200,21 @@ def translate_email_task(self, email_id: int, account_id: int, force: bool = Fal
 
         # 执行翻译
         provider_used = settings.translate_provider
-        if settings.smart_routing_enabled and email.body_original:
+        body_len = len(email.body_original or "")
+        is_long_email = body_len > LONG_EMAIL_THRESHOLD
+
+        if is_long_email:
+            # 超长邮件：使用分段翻译
+            print(f"[TranslateTask] Long email detected ({body_len} bytes), using chunked translation")
+            body_translated = translate_long_email(
+                service=service,
+                text=email.body_original,
+                target_lang="zh",
+                source_lang=email.language_detected,
+                glossary=None
+            )
+            provider_used = f"{settings.translate_provider}+chunked"
+        elif settings.smart_routing_enabled and email.body_original:
             # 智能路由翻译
             result = service.translate_with_smart_routing(
                 text=email.body_original,
@@ -359,10 +468,11 @@ def collect_and_translate_pending(self, limit: int = 500):
     db = get_db_session()
 
     try:
-        # 查找未翻译的邮件
+        # 查找未翻译的邮件（包括 none、NULL、pending 状态）
+        # 'pending' 状态是由 cleanup_stuck_translations 重置的邮件
         pending_emails = db.query(Email).filter(
             Email.is_translated == False,
-            Email.translation_status.in_(['none', None])
+            Email.translation_status.in_(['none', 'pending', None])
         ).order_by(Email.received_at.desc()).limit(limit).all()
 
         if not pending_emails:
@@ -371,9 +481,9 @@ def collect_and_translate_pending(self, limit: int = 500):
         email_ids = [(e.id, e.account_id) for e in pending_emails]
         print(f"[CollectTranslate] Found {len(email_ids)} pending emails")
 
-        # 标记为处理中
+        # 标记为 translating（正在处理）
         for email in pending_emails:
-            email.translation_status = 'pending'
+            email.translation_status = 'translating'
         db.commit()
 
         # 创建翻译任务组

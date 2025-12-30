@@ -127,9 +127,17 @@ class DraftResponse(BaseModel):
     approver_group_id: Optional[int] = None
     submitted_at: Optional[datetime] = None
     reject_reason: Optional[str] = None
+    # 定时发送相关
+    scheduled_at: Optional[datetime] = None
+    scheduled_status: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+
+class ScheduleDraftRequest(BaseModel):
+    """定时发送请求"""
+    scheduled_at: datetime  # 预定发送时间 (UTC)
 
 
 class SubmitForApprovalRequest(BaseModel):
@@ -1030,6 +1038,173 @@ class ApprovalStats(BaseModel):
     my_pending: int
     my_approved: int
     my_rejected: int
+
+
+# ============ 定时发送 ============
+
+class ScheduledDraftResponse(BaseModel):
+    """定时发送草稿响应"""
+    id: int
+    to_address: Optional[str] = None
+    subject: Optional[str] = None
+    scheduled_at: datetime
+    scheduled_status: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+@router.get("/scheduled", response_model=List[ScheduledDraftResponse])
+async def get_scheduled_drafts(
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """获取当前用户的定时发送列表"""
+    result = await db.execute(
+        select(Draft)
+        .where(
+            Draft.author_id == account.id,
+            Draft.scheduled_status == "pending"
+        )
+        .order_by(Draft.scheduled_at.asc())
+    )
+    return result.scalars().all()
+
+
+@router.post("/{draft_id}/schedule")
+async def schedule_draft(
+    draft_id: int,
+    request: ScheduleDraftRequest,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """设置草稿定时发送
+
+    注意：定时发送不需要审批流程，由作者直接设置
+    """
+    # 验证时间不能是过去
+    if request.scheduled_at <= datetime.utcnow():
+        raise HTTPException(status_code=400, detail="预定发送时间必须在当前时间之后")
+
+    # 获取草稿
+    result = await db.execute(
+        select(Draft).where(Draft.id == draft_id)
+    )
+    draft = result.scalar_one_or_none()
+
+    if not draft:
+        raise HTTPException(status_code=404, detail="草稿不存在")
+
+    # 只有作者可以设置定时发送
+    if draft.author_id != account.id:
+        raise HTTPException(status_code=403, detail="只有草稿作者可以设置定时发送")
+
+    # 已发送的邮件不能再设置
+    if draft.status == "sent":
+        raise HTTPException(status_code=400, detail="邮件已发送，无法设置定时发送")
+
+    # 待审批的邮件不能设置定时发送
+    if draft.status == "pending":
+        raise HTTPException(status_code=400, detail="邮件正在审批中，请先撤回审批再设置定时发送")
+
+    # 验证收件人
+    if not draft.to_address:
+        raise HTTPException(status_code=400, detail="收件人地址为空，无法设置定时发送")
+
+    is_valid, error, _ = validate_email_list(draft.to_address)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=f"收件人格式错误: {error}")
+
+    # 验证翻译内容
+    if not draft.body_translated and not draft.body_chinese:
+        raise HTTPException(status_code=400, detail="邮件正文为空，无法发送")
+
+    # 设置定时发送
+    draft.scheduled_at = request.scheduled_at
+    draft.scheduled_status = "pending"
+    draft.status = "scheduled"  # 新状态：已安排定时发送
+
+    await db.commit()
+
+    return {
+        "status": "scheduled",
+        "message": "已设置定时发送",
+        "scheduled_at": request.scheduled_at.isoformat()
+    }
+
+
+@router.post("/{draft_id}/cancel-schedule")
+async def cancel_scheduled_draft(
+    draft_id: int,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """取消定时发送"""
+    result = await db.execute(
+        select(Draft).where(Draft.id == draft_id)
+    )
+    draft = result.scalar_one_or_none()
+
+    if not draft:
+        raise HTTPException(status_code=404, detail="草稿不存在")
+
+    # 只有作者可以取消
+    if draft.author_id != account.id:
+        raise HTTPException(status_code=403, detail="只有草稿作者可以取消定时发送")
+
+    # 检查是否是定时发送状态
+    if draft.scheduled_status != "pending":
+        raise HTTPException(status_code=400, detail="此草稿没有待发送的定时任务")
+
+    # 取消定时发送
+    draft.scheduled_at = None
+    draft.scheduled_status = "cancelled"
+    draft.status = "draft"  # 恢复为草稿状态
+
+    await db.commit()
+
+    return {"status": "cancelled", "message": "已取消定时发送"}
+
+
+@router.put("/{draft_id}/reschedule")
+async def reschedule_draft(
+    draft_id: int,
+    request: ScheduleDraftRequest,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """修改定时发送时间"""
+    # 验证时间不能是过去
+    if request.scheduled_at <= datetime.utcnow():
+        raise HTTPException(status_code=400, detail="预定发送时间必须在当前时间之后")
+
+    result = await db.execute(
+        select(Draft).where(Draft.id == draft_id)
+    )
+    draft = result.scalar_one_or_none()
+
+    if not draft:
+        raise HTTPException(status_code=404, detail="草稿不存在")
+
+    # 只有作者可以修改
+    if draft.author_id != account.id:
+        raise HTTPException(status_code=403, detail="只有草稿作者可以修改定时发送")
+
+    # 检查是否是定时发送状态
+    if draft.scheduled_status != "pending":
+        raise HTTPException(status_code=400, detail="此草稿没有待发送的定时任务")
+
+    # 更新时间
+    draft.scheduled_at = request.scheduled_at
+
+    await db.commit()
+
+    return {
+        "status": "rescheduled",
+        "message": "已更新发送时间",
+        "scheduled_at": request.scheduled_at.isoformat()
+    }
 
 
 @router.get("/stats/summary", response_model=ApprovalStats)

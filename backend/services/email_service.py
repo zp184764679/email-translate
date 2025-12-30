@@ -857,7 +857,7 @@ class EmailService:
 
     def _detect_language(self, text: str) -> str:
         """
-        使用 Ollama 检测文本语言
+        使用 vLLM 检测文本语言
 
         替代原有的 langdetect 库，提高准确率
         特别是对于英德混淆等问题

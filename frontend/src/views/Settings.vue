@@ -216,6 +216,14 @@
       </template>
     </el-dialog>
 
+    <!-- 邮件模板 -->
+    <el-card style="margin-top: 20px;">
+      <template #header>
+        <span>邮件模板</span>
+      </template>
+      <TemplateManager @use="handleTemplateUse" />
+    </el-card>
+
     <!-- 关于 -->
     <el-card style="margin-top: 20px;">
       <template #header>
@@ -227,22 +235,16 @@
           <el-tag type="primary">v{{ appVersion }}</el-tag>
         </el-descriptions-item>
         <el-descriptions-item label="运行环境">
-          <el-tag :type="isElectron ? 'success' : 'info'">{{ isElectron ? 'Electron 桌面端' : '浏览器' }}</el-tag>
+          <el-tag type="info">Web 版</el-tag>
         </el-descriptions-item>
         <el-descriptions-item label="服务器地址">
           <span class="text-muted">{{ apiBaseUrl }}</span>
         </el-descriptions-item>
       </el-descriptions>
-      <div style="margin-top: 16px; display: flex; gap: 10px;">
-        <el-button type="primary" @click="checkForUpdates" :loading="checkingUpdate">
-          检查更新
-        </el-button>
+      <div style="margin-top: 16px;">
         <el-button @click="openGitHub">
           GitHub 仓库
         </el-button>
-      </div>
-      <div v-if="updateStatus" style="margin-top: 12px;">
-        <el-alert :title="updateStatus" :type="updateStatusType" show-icon :closable="false" />
       </div>
     </el-card>
   </div>
@@ -253,62 +255,21 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
 import api, { API_BASE_URL } from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import TemplateManager from '@/components/TemplateManager.vue'
 
 // 关于信息
-const appVersion = ref('unknown')
-const isElectron = ref(false)
+const appVersion = ref('1.0.50')  // Web 版本号
 const apiBaseUrl = ref(API_BASE_URL)
-const checkingUpdate = ref(false)
-const updateStatus = ref('')
-const updateStatusType = ref('info')
-
-// 初始化应用信息
-function initAppInfo() {
-  // 检测是否在 Electron 环境
-  isElectron.value = !!(window.electronAPI)
-
-  // 获取版本号
-  if (window.electronAPI?.getAppVersion) {
-    window.electronAPI.getAppVersion().then(version => {
-      appVersion.value = version
-    }).catch(() => {
-      appVersion.value = import.meta.env.VITE_APP_VERSION || '1.0.37'
-    })
-  } else {
-    appVersion.value = import.meta.env.VITE_APP_VERSION || '1.0.37'
-  }
-}
-
-// 检查更新
-async function checkForUpdates() {
-  checkingUpdate.value = true
-  updateStatus.value = ''
-
-  try {
-    if (window.electronAPI?.checkForUpdates) {
-      await window.electronAPI.checkForUpdates()
-      updateStatus.value = '正在检查更新...'
-      updateStatusType.value = 'info'
-    } else {
-      updateStatus.value = '请在桌面端应用中检查更新'
-      updateStatusType.value = 'warning'
-    }
-  } catch (e) {
-    updateStatus.value = '检查更新失败: ' + (e.message || '未知错误')
-    updateStatusType.value = 'error'
-  } finally {
-    checkingUpdate.value = false
-  }
-}
 
 // 打开 GitHub
 function openGitHub() {
-  const url = 'https://github.com/zp184764679/email-translate'
-  if (window.electronAPI?.openExternal) {
-    window.electronAPI.openExternal(url)
-  } else {
-    window.open(url, '_blank')
-  }
+  window.open('https://github.com/zp184764679/email-translate', '_blank', 'noopener,noreferrer')
+}
+
+// 处理模板使用事件
+function handleTemplateUse(result) {
+  ElMessage.success('模板内容已复制到剪贴板')
+  console.log('Template used:', result)
 }
 
 const signatures = ref([])
@@ -364,7 +325,6 @@ function getLanguageName(code) {
 }
 
 onMounted(() => {
-  initAppInfo()
   loadSignatures()
   loadApprovers()
   loadApprovalGroups()

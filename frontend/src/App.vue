@@ -1,38 +1,6 @@
 <template>
   <div id="app">
     <router-view />
-
-    <!-- 下载进度弹窗 -->
-    <el-dialog
-      v-model="showDownloadProgress"
-      title="正在下载更新"
-      width="400px"
-      :close-on-click-modal="false"
-      :close-on-press-escape="true"
-      :show-close="true"
-      center
-      @close="cancelDownload"
-    >
-      <div class="download-progress">
-        <div class="version-info">新版本: {{ downloadVersion }}</div>
-        <el-progress
-          :percentage="downloadPercent"
-          :stroke-width="20"
-          :format="() => `${downloadPercent}%`"
-          :status="downloadError ? 'exception' : ''"
-        />
-        <div class="download-details">
-          <span>{{ formatBytes(downloadTransferred) }} / {{ formatBytes(downloadTotal) }}</span>
-          <span>{{ formatBytes(downloadSpeed) }}/s</span>
-        </div>
-        <div v-if="downloadError" class="download-error">
-          {{ downloadError }}
-        </div>
-      </div>
-      <template #footer>
-        <el-button @click="cancelDownload">稍后更新</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
@@ -48,28 +16,6 @@ import api, { getStorageKey } from './api'
 const router = useRouter()
 const userStore = useUserStore()
 const emailStore = useEmailStore()
-
-const showDownloadProgress = ref(false)
-const downloadVersion = ref('')
-const downloadPercent = ref(0)
-const downloadTransferred = ref(0)
-const downloadTotal = ref(0)
-const downloadSpeed = ref(0)
-const downloadError = ref('')
-
-function cancelDownload() {
-  showDownloadProgress.value = false
-  downloadError.value = ''
-  ElMessage.info('已取消更新，下次启动时会再次检查')
-}
-
-function formatBytes(bytes) {
-  if (bytes === 0) return '0 B'
-  const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
-}
 
 // 处理认证过期事件
 function handleAuthExpired(event) {
@@ -88,49 +34,28 @@ function handleAuthExpired(event) {
   ElMessage.error(message || '登录已过期，请重新登录')
 }
 
+// 显示桌面通知（Web Notifications API）
+function showDesktopNotification(title, body) {
+  if (!('Notification' in window)) return
+
+  if (Notification.permission === 'granted') {
+    new Notification(title, { body, icon: '/email/favicon.ico' })
+  } else if (Notification.permission !== 'denied') {
+    Notification.requestPermission().then(permission => {
+      if (permission === 'granted') {
+        new Notification(title, { body, icon: '/email/favicon.ico' })
+      }
+    })
+  }
+}
+
 onMounted(() => {
   // 监听认证过期事件
   window.addEventListener('auth:expired', handleAuthExpired)
 
-  // Listen for update events from Electron
-  if (window.electronAPI) {
-    window.electronAPI.onUpdateAvailable((version) => {
-      ElMessage.info(`发现新版本 ${version}，正在下载...`)
-    })
-
-    window.electronAPI.onDownloadStarted((version) => {
-      downloadVersion.value = version
-      downloadPercent.value = 0
-      downloadTransferred.value = 0
-      downloadTotal.value = 0
-      showDownloadProgress.value = true
-    })
-
-    window.electronAPI.onDownloadProgress((progress) => {
-      downloadPercent.value = progress.percent
-      downloadTransferred.value = progress.transferred
-      downloadTotal.value = progress.total
-      downloadSpeed.value = progress.bytesPerSecond
-    })
-
-    window.electronAPI.onDownloadComplete((version) => {
-      showDownloadProgress.value = false
-      ElMessage.success(`版本 ${version} 下载完成！`)
-    })
-
-    window.electronAPI.onUpdateDownloaded(() => {
-      showDownloadProgress.value = false
-      ElMessage.success({
-        message: '新版本已下载完成，重启后生效',
-        duration: 0,
-        showClose: true
-      })
-    })
-
-    window.electronAPI.onUpdateError((error) => {
-      downloadError.value = error || '下载失败，请稍后重试'
-      // 不自动关闭弹窗，让用户看到错误信息后手动关闭
-    })
+  // 请求桌面通知权限
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission()
   }
 
   // 初始化 WebSocket 连接
@@ -231,6 +156,8 @@ function initWebSocket() {
           message: `收到 ${data.new_count} 封新邮件`,
           duration: 3000
         })
+        // 显示桌面通知
+        showDesktopNotification('收到新邮件', `您有 ${data.new_count} 封新邮件`)
       } else {
         ElMessage.info('没有新邮件')
       }
@@ -331,13 +258,8 @@ function initWebSocket() {
         }
       })
 
-      // 显示桌面通知（Electron）
-      if (window.electronAPI?.showNotification) {
-        window.electronAPI.showNotification(
-          `📅 ${data.title}`,
-          message
-        )
-      }
+      // 显示桌面通知（Web Notifications API）
+      showDesktopNotification(`📅 ${data.title}`, message)
 
       // 触发全局事件
       window.dispatchEvent(new CustomEvent('calendar-reminder', { detail: data }))
@@ -360,33 +282,5 @@ onUnmounted(() => {
   width: 100%;
   height: 100vh;
   overflow: hidden;
-}
-
-.download-progress {
-  text-align: center;
-}
-
-.download-progress .version-info {
-  font-size: 16px;
-  color: #409eff;
-  margin-bottom: 20px;
-}
-
-.download-progress .download-details {
-  display: flex;
-  justify-content: space-between;
-  margin-top: 15px;
-  color: #909399;
-  font-size: 13px;
-}
-
-.download-progress .download-error {
-  margin-top: 15px;
-  padding: 10px;
-  background-color: #fef0f0;
-  border: 1px solid #fbc4c4;
-  border-radius: 4px;
-  color: #f56c6c;
-  font-size: 13px;
 }
 </style>

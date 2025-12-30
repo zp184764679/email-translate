@@ -1,6 +1,6 @@
 """
 AI 邮件信息提取服务
-使用 Ollama 本地模型提取邮件中的关键信息
+使用 vLLM 本地模型提取邮件中的关键信息
 
 改进功能：
 - 智能文本截断（保留重要部分）
@@ -117,7 +117,7 @@ async def extract_email_info(
     body_translated: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    使用 Ollama 提取邮件中的关键信息
+    使用 vLLM 提取邮件中的关键信息
 
     优先使用翻译后的内容（如果有），因为中文更容易理解
 
@@ -155,23 +155,20 @@ async def extract_email_info(
     )
 
     try:
-        # 调用 Ollama API（增加超时时间）
+        # 调用 vLLM API（增加超时时间）
         async with httpx.AsyncClient(timeout=90.0) as client:
             response = await client.post(
-                f"{settings.ollama_base_url}/api/generate",
+                f"{settings.vllm_base_url}/v1/chat/completions",
                 json={
-                    "model": settings.ollama_model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {
-                        "temperature": 0.1,  # 低温度，更确定性的输出
-                        "num_predict": 2500  # 增加输出长度
-                    }
+                    "model": settings.vllm_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": 2500
                 }
             )
 
             if response.status_code != 200:
-                error_msg = f"Ollama API 返回错误 (HTTP {response.status_code})"
+                error_msg = f"vLLM API 返回错误 (HTTP {response.status_code})"
                 print(f"[AIExtract] {error_msg}")
                 result = get_empty_extraction()
                 result["status"] = EXTRACTION_STATUS_ERROR
@@ -179,7 +176,7 @@ async def extract_email_info(
                 return result
 
             result = response.json()
-            response_text = result.get("response", "")
+            response_text = result["choices"][0]["message"]["content"].strip()
 
             # 尝试解析 JSON
             extraction = parse_extraction_response(response_text)
@@ -200,7 +197,7 @@ async def extract_email_info(
         return result
 
     except httpx.ConnectError:
-        error_msg = "无法连接到 AI 服务，请检查 Ollama 是否启动"
+        error_msg = "无法连接到 AI 服务，请检查 vLLM 是否启动"
         print(f"[AIExtract] {error_msg}")
         result = get_empty_extraction()
         result["status"] = EXTRACTION_STATUS_ERROR

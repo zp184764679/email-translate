@@ -21,11 +21,11 @@ engine = create_engine(sync_url, echo=False)
 def translate_latest_emails(count: int = 5):
     """翻译最新的几封邮件"""
     # 根据配置初始化翻译服务
-    if settings.translate_provider == "ollama":
+    if settings.translate_provider == "vllm":
         translate_service = TranslateService(
-            provider="ollama",
-            ollama_base_url=settings.ollama_base_url,
-            ollama_model=settings.ollama_model
+            provider="vllm",
+            vllm_base_url=settings.vllm_base_url,
+            vllm_model=settings.vllm_model
         )
     elif settings.translate_provider == "claude":
         translate_service = TranslateService(

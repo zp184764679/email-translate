@@ -1,13 +1,13 @@
 """
-Ollama 语言检测服务
+vLLM 语言检测服务
 
-使用本地 Ollama 模型进行语言检测，替代 langdetect 库
+使用本地 vLLM 模型进行语言检测，替代 langdetect 库
 提供更高的准确率，特别是对于英德混淆等问题
 
 检测策略：
 1. 先用快速规则检测（基于字符特征）
-2. 规则不确定时，调用 Ollama
-3. Ollama 失败时，回退到规则结果或 unknown
+2. 规则不确定时，调用 vLLM
+3. vLLM 失败时，回退到规则结果或 unknown
 """
 
 import httpx
@@ -29,15 +29,19 @@ def get_language_service():
 
 
 class LanguageService:
-    """使用 Ollama 进行语言检测，带规则回退"""
+    """使用 vLLM 进行语言检测，带规则回退"""
 
     def __init__(self):
         from config import get_settings
         settings = get_settings()
-        self.ollama_base_url = settings.ollama_base_url
-        self.ollama_model = settings.ollama_model
+        self.vllm_base_url = settings.vllm_base_url
+        self.vllm_model = settings.vllm_model
+        # 构建认证 headers
+        headers = {}
+        if settings.vllm_api_key:
+            headers["Authorization"] = f"Bearer {settings.vllm_api_key}"
         # 使用较短超时，避免长时间阻塞
-        self.http_client = httpx.Client(timeout=15.0)
+        self.http_client = httpx.Client(timeout=15.0, headers=headers)
 
     def detect_language(self, text: str) -> str:
         """
@@ -45,8 +49,8 @@ class LanguageService:
 
         检测策略（带降级方案）：
         1. 先用快速规则检测（中/日/韩/俄等非拉丁语言）
-        2. 规则不确定时（返回 unknown），调用 Ollama
-        3. Ollama 失败时，回退到规则结果
+        2. 规则不确定时（返回 unknown），调用 vLLM
+        3. vLLM 失败时，回退到规则结果
 
         Args:
             text: 要检测的文本
@@ -68,12 +72,12 @@ class LanguageService:
             print(f"[LanguageService] Quick detect: {quick_result}")
             return quick_result
 
-        # 2. 规则不确定（可能是拉丁语言），尝试 Ollama
-        ollama_result = self._ollama_detect(clean_text)
-        if ollama_result != "unknown":
-            return ollama_result
+        # 2. 规则不确定（可能是拉丁语言），尝试 vLLM
+        vllm_result = self._vllm_detect(clean_text)
+        if vllm_result != "unknown":
+            return vllm_result
 
-        # 3. Ollama 也失败了，尝试一些启发式规则
+        # 3. vLLM 也失败了，尝试一些启发式规则
         # 对于拉丁字母文本，默认假设是英语（因为这是最常见的商务语言）
         latin_text = re.sub(r'[^a-zA-ZäöüßÄÖÜàâçéèêëïîôùûüÿœæÀÂÇÉÈÊËÏÎÔÙÛÜŸŒÆñÑáéíóúüÁÉÍÓÚÜ]', '', clean_text)
         if len(latin_text) > len(clean_text) * 0.3:
@@ -108,7 +112,7 @@ class LanguageService:
         基于字符特征的快速语言检测
 
         适用于明显的语言特征（如中文字符、日文假名等）
-        对于拉丁字母语言（英德法等）返回 unknown，交给 Ollama
+        对于拉丁字母语言（英德法等）返回 unknown，交给 vLLM
         """
         # 统计各类字符数量
         chinese_count = len(_CHINESE_PATTERN.findall(text))
@@ -145,12 +149,12 @@ class LanguageService:
         if cyrillic_ratio > 0.2:
             return "ru"
 
-        # 拉丁字母语言无法通过字符判断，交给 Ollama
+        # 拉丁字母语言无法通过字符判断，交给 vLLM
         return "unknown"
 
-    def _ollama_detect(self, text: str) -> str:
+    def _vllm_detect(self, text: str) -> str:
         """
-        使用 Ollama 进行语言检测
+        使用 vLLM 进行语言检测 (OpenAI 兼容 API)
         """
         # 截取前500字符
         sample = text[:500].strip()
@@ -178,33 +182,30 @@ class LanguageService:
 
         try:
             response = self.http_client.post(
-                f"{self.ollama_base_url}/api/generate",
+                f"{self.vllm_base_url}/v1/chat/completions",
                 json={
-                    "model": self.ollama_model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {
-                        "temperature": 0.1,
-                        "num_predict": 16
-                    }
+                    "model": self.vllm_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": 16
                 }
             )
             response.raise_for_status()
             result = response.json()
-            raw_response = result.get("response", "").strip()
+            raw_response = result["choices"][0]["message"]["content"].strip()
 
             lang_code = self._parse_language_code(raw_response)
-            print(f"[LanguageService] Ollama detect: {lang_code} (raw: {raw_response[:50]}...)")
+            print(f"[LanguageService] vLLM detect: {lang_code} (raw: {raw_response[:50]}...)")
             return lang_code
 
         except httpx.TimeoutException:
-            print("[LanguageService] Ollama timeout, using fallback")
+            print("[LanguageService] vLLM timeout, using fallback")
             return "unknown"
         except httpx.ConnectError:
-            print("[LanguageService] Ollama connection failed, using fallback")
+            print("[LanguageService] vLLM connection failed, using fallback")
             return "unknown"
         except Exception as e:
-            print(f"[LanguageService] Ollama detection failed: {e}")
+            print(f"[LanguageService] vLLM detection failed: {e}")
             return "unknown"
 
     def _clean_text(self, text: str) -> str:
@@ -221,7 +222,7 @@ class LanguageService:
 
     def _parse_language_code(self, response: str) -> str:
         """
-        解析 Ollama 返回的语言代码
+        解析 vLLM 返回的语言代码
         处理可能的 /think 模式输出或额外内容
         """
         # 使用全局预定义的有效代码集合
