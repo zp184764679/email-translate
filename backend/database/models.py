@@ -50,13 +50,23 @@ class Supplier(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False)
-    email_domain = Column(String(255))
-    contact_email = Column(String(255))
+    email_domain = Column(String(255))  # 保留主域名（向后兼容）
+    contact_email = Column(String(255))  # 保留主联系邮箱（向后兼容）
     notes = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    # AI 分类相关字段
+    category = Column(String(50), index=True)  # AI分析的类别
+    category_confidence = Column(Float)  # 置信度(0-1)
+    category_reason = Column(Text)  # 分类依据说明
+    category_analyzed_at = Column(DateTime)  # 分析时间
+    category_manual = Column(Boolean, default=False)  # 是否人工修改
+
     emails = relationship("Email", back_populates="supplier")
     glossary = relationship("Glossary", back_populates="supplier")
+    domains = relationship("SupplierDomain", back_populates="supplier", cascade="all, delete-orphan")
+    contacts = relationship("SupplierContact", back_populates="supplier", cascade="all, delete-orphan")
+    tags = relationship("SupplierTag", secondary="supplier_tag_mappings", back_populates="suppliers")
 
 
 class Email(Base):
@@ -96,10 +106,20 @@ class Email(Base):
     received_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    # 归档相关
+    archived_at = Column(DateTime)  # 归档时间
+    archive_folder_id = Column(Integer, ForeignKey("archive_folders.id"))  # 归档文件夹
+
+    # AI 分类相关
+    ai_category = Column(String(50))  # inquiry/order/logistics/payment/quality/urgent/other
+    ai_category_confidence = Column(Float)  # 置信度 0-1
+    ai_categorized_at = Column(DateTime)  # 分类时间
+
     account = relationship("EmailAccount", back_populates="emails")
     supplier = relationship("Supplier", back_populates="emails")
     attachments = relationship("Attachment", back_populates="email")
     labels = relationship("EmailLabel", secondary=email_label_mappings, back_populates="emails")
+    archive_folder = relationship("ArchiveFolder", back_populates="emails")
     folders = relationship("EmailFolder", secondary=email_folder_mappings, back_populates="emails")
 
 
@@ -156,6 +176,10 @@ class Draft(Base):
     submitted_at = Column(DateTime)  # 提交审批时间
     reject_reason = Column(Text)  # 驳回原因
 
+    # 定时发送字段
+    scheduled_at = Column(DateTime)  # 预定发送时间
+    scheduled_status = Column(String(20))  # pending/sent/cancelled/failed
+
     reply_to_email = relationship("Email")
     approver = relationship("EmailAccount", foreign_keys=[approver_id])
     approver_group = relationship("ApproverGroup")
@@ -198,6 +222,42 @@ class Glossary(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     supplier = relationship("Supplier", back_populates="glossary")
+
+
+class GlossaryHistory(Base):
+    """术语表修改历史记录
+
+    记录每次术语表的创建、更新、删除操作，支持版本回滚
+    """
+    __tablename__ = "glossary_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    glossary_id = Column(Integer, nullable=False, index=True)
+    supplier_id = Column(Integer, ForeignKey("suppliers.id", ondelete="SET NULL"), nullable=True)
+
+    # 当前值
+    term_source = Column(String(255), nullable=False)
+    term_target = Column(String(255), nullable=False)
+
+    # 旧值（更新时记录）
+    term_source_old = Column(String(255), nullable=True)
+    term_target_old = Column(String(255), nullable=True)
+
+    source_lang = Column(String(10))
+    target_lang = Column(String(10))
+    context = Column(Text)
+
+    # 操作类型: create, update, delete
+    action = Column(String(20), nullable=False)
+
+    # 操作者
+    changed_by = Column(Integer, ForeignKey("email_accounts.id", ondelete="SET NULL"), nullable=True)
+    changed_at = Column(DateTime, default=datetime.utcnow)
+    change_reason = Column(String(255), nullable=True)
+
+    # 关系
+    supplier = relationship("Supplier", foreign_keys=[supplier_id])
+    changer = relationship("EmailAccount", foreign_keys=[changed_by])
 
 
 class TranslationBatch(Base):
@@ -319,7 +379,7 @@ class TranslationUsage(Base):
     __tablename__ = "translation_usage"
 
     id = Column(Integer, primary_key=True, index=True)
-    provider = Column(String(20), nullable=False)  # tencent, deepl, claude, ollama
+    provider = Column(String(20), nullable=False)  # vllm, claude
     year_month = Column(String(7), nullable=False)  # 格式: 2024-12
 
     # 用量统计
@@ -382,6 +442,31 @@ class EmailFolder(Base):
     )
 
 
+class ArchiveFolder(Base):
+    """归档文件夹表 - 用于组织归档邮件"""
+    __tablename__ = "archive_folders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("email_accounts.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String(100), nullable=False)  # 文件夹名称
+    folder_type = Column(String(20), default="custom")  # 类型：year/project/supplier/custom
+    parent_id = Column(Integer, ForeignKey("archive_folders.id", ondelete="SET NULL"), nullable=True)
+    description = Column(String(255))  # 描述
+    color = Column(String(20), default="#409EFF")  # 颜色标识
+    email_count = Column(Integer, default=0)  # 邮件数量（缓存）
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # 关系
+    account = relationship("EmailAccount")
+    emails = relationship("Email", back_populates="archive_folder")
+    children = relationship("ArchiveFolder", backref="parent", remote_side=[id], foreign_keys=[parent_id])
+
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
+
+
 class CalendarEvent(Base):
     """日历事件表 - 支持从邮件创建日程，支持重复事件"""
     __tablename__ = "calendar_events"
@@ -420,7 +505,7 @@ class CalendarEvent(Base):
 
 
 class EmailExtraction(Base):
-    """AI 邮件信息提取表 - 存储 Ollama 提取的结构化信息"""
+    """AI 邮件信息提取表 - 存储 vLLM 提取的结构化信息"""
     __tablename__ = "email_extractions"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -736,5 +821,125 @@ class Notification(Base):
     account = relationship("EmailAccount")
 
     __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
+
+
+# 供应商-标签 多对多关联表
+supplier_tag_mappings = Table(
+    'supplier_tag_mappings',
+    Base.metadata,
+    Column('supplier_id', Integer, ForeignKey('suppliers.id', ondelete='CASCADE'), primary_key=True),
+    Column('tag_id', Integer, ForeignKey('supplier_tags.id', ondelete='CASCADE'), primary_key=True),
+    Column('created_at', DateTime, default=datetime.utcnow)
+)
+
+
+class SupplierDomain(Base):
+    """供应商多域名表 - 一个供应商可关联多个邮箱域名"""
+    __tablename__ = "supplier_domains"
+
+    id = Column(Integer, primary_key=True, index=True)
+    supplier_id = Column(Integer, ForeignKey("suppliers.id", ondelete="CASCADE"), nullable=False)
+    email_domain = Column(String(255), nullable=False, unique=True)  # 邮箱域名
+    is_primary = Column(Boolean, default=False)  # 是否主域名
+    description = Column(String(100))  # 域名描述，如"销售部"、"技术支持"
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # 关系
+    supplier = relationship("Supplier", back_populates="domains")
+
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
+
+
+class SupplierContact(Base):
+    """供应商联系人表 - 管理供应商的多个联系人"""
+    __tablename__ = "supplier_contacts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    supplier_id = Column(Integer, ForeignKey("suppliers.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String(100), nullable=False)  # 联系人姓名
+    email = Column(String(255), nullable=False)  # 邮箱地址
+    phone = Column(String(50))  # 电话号码
+    role = Column(String(50))  # 角色：sales/tech/finance/logistics/manager/other
+    department = Column(String(100))  # 部门
+    is_primary = Column(Boolean, default=False)  # 是否主要联系人
+    notes = Column(Text)  # 备注
+    last_contact_at = Column(DateTime)  # 最后联系时间
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # 关系
+    supplier = relationship("Supplier", back_populates="contacts")
+
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
+
+
+class SupplierTag(Base):
+    """供应商标签表 - 用于标记和筛选供应商"""
+    __tablename__ = "supplier_tags"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("email_accounts.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String(50), nullable=False)  # 标签名称
+    color = Column(String(20), default="#409EFF")  # 标签颜色
+    description = Column(String(255))  # 标签描述
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # 关系
+    account = relationship("EmailAccount")
+    suppliers = relationship("Supplier", secondary=supplier_tag_mappings, back_populates="tags")
+
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
+
+
+class EmailTemplate(Base):
+    """邮件模板表 - 个人模板和共享模板"""
+    __tablename__ = "email_templates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("email_accounts.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String(100), nullable=False)  # 模板名称
+    description = Column(String(255))  # 模板描述
+    category = Column(String(50), index=True)  # 分类：inquiry/order/logistics/payment/quality/general
+    subject_cn = Column(String(255))  # 中文主题
+    body_cn = Column(Text, nullable=False)  # 中文正文
+    variables = Column(JSON)  # 可用变量列表 ["supplier_name", "contact_name", "order_number"]
+    is_shared = Column(Boolean, default=False, index=True)  # 是否共享
+    use_count = Column(Integer, default=0)  # 使用次数
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # 关系
+    account = relationship("EmailAccount")
+    translations = relationship("EmailTemplateTranslation", back_populates="template", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
+
+
+class EmailTemplateTranslation(Base):
+    """邮件模板翻译版本表 - 每个模板可有多个语言版本"""
+    __tablename__ = "email_template_translations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    template_id = Column(Integer, ForeignKey("email_templates.id", ondelete="CASCADE"), nullable=False)
+    target_lang = Column(String(10), nullable=False)  # 目标语言：en/ja/ko/de/fr等
+    subject_translated = Column(String(255))  # 翻译后主题
+    body_translated = Column(Text)  # 翻译后正文
+    translated_at = Column(DateTime, default=datetime.utcnow)  # 翻译时间
+
+    # 关系
+    template = relationship("EmailTemplate", back_populates="translations")
+
+    __table_args__ = (
+        # 每个模板只能有一个相同语言的翻译
         {'mysql_engine': 'InnoDB'},
     )

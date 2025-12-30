@@ -245,6 +245,24 @@ const api = {
     return instance.delete(`/approval-groups/${groupId}/members/${memberId}`)
   },
 
+  // 定时发送
+  async getScheduledDrafts() {
+    return instance.get('/drafts/scheduled')
+  },
+
+  async scheduleDraft(id, scheduledAt) {
+    // scheduledAt 应该是 ISO 格式的 UTC 时间字符串
+    return instance.post(`/drafts/${id}/schedule`, { scheduled_at: scheduledAt })
+  },
+
+  async cancelScheduledDraft(id) {
+    return instance.post(`/drafts/${id}/cancel-schedule`)
+  },
+
+  async rescheduleDraft(id, scheduledAt) {
+    return instance.put(`/drafts/${id}/reschedule`, { scheduled_at: scheduledAt })
+  },
+
   // Email Actions
   async translateEmail(id, { force = false, signal = null } = {}) {
     // 翻译可能需要较长时间（Ollama），设置 10 分钟超时
@@ -364,6 +382,85 @@ const api = {
 
   async deleteSupplier(id) {
     return instance.delete(`/suppliers/${id}`)
+  },
+
+  // Supplier AI Classification - AI 供应商分类
+  async analyzeSupplierCategory(supplierId) {
+    return instance.post(`/suppliers/${supplierId}/analyze-category`, null, { timeout: 60000 })
+  },
+
+  async batchAnalyzeSuppliers(supplierIds = null, forceReanalyze = false) {
+    return instance.post('/suppliers/batch-analyze', {
+      supplier_ids: supplierIds,
+      force_reanalyze: forceReanalyze
+    }, { timeout: 300000 })
+  },
+
+  async getSupplierCategoryStats() {
+    return instance.get('/suppliers/category-stats')
+  },
+
+  async updateSupplierCategory(supplierId, category) {
+    return instance.put(`/suppliers/${supplierId}/category`, { category })
+  },
+
+  // Supplier Domains - 供应商多域名管理
+  async getSupplierDomains(supplierId) {
+    return instance.get(`/suppliers/${supplierId}/domains`)
+  },
+
+  async addSupplierDomain(supplierId, data) {
+    return instance.post(`/suppliers/${supplierId}/domains`, data)
+  },
+
+  async deleteSupplierDomain(supplierId, domainId) {
+    return instance.delete(`/suppliers/${supplierId}/domains/${domainId}`)
+  },
+
+  // Supplier Contacts - 供应商联系人管理
+  async getSupplierContacts(supplierId) {
+    return instance.get(`/suppliers/${supplierId}/contacts`)
+  },
+
+  async addSupplierContact(supplierId, data) {
+    return instance.post(`/suppliers/${supplierId}/contacts`, data)
+  },
+
+  async updateSupplierContact(supplierId, contactId, data) {
+    return instance.put(`/suppliers/${supplierId}/contacts/${contactId}`, data)
+  },
+
+  async deleteSupplierContact(supplierId, contactId) {
+    return instance.delete(`/suppliers/${supplierId}/contacts/${contactId}`)
+  },
+
+  // Supplier Tags - 供应商标签管理
+  async getSupplierTags() {
+    return instance.get('/suppliers/tags')
+  },
+
+  async createSupplierTag(data) {
+    return instance.post('/suppliers/tags', data)
+  },
+
+  async updateSupplierTag(tagId, data) {
+    return instance.put(`/suppliers/tags/${tagId}`, data)
+  },
+
+  async deleteSupplierTag(tagId) {
+    return instance.delete(`/suppliers/tags/${tagId}`)
+  },
+
+  async getSupplierTagMappings(supplierId) {
+    return instance.get(`/suppliers/${supplierId}/tags`)
+  },
+
+  async addTagToSupplier(supplierId, tagId) {
+    return instance.post(`/suppliers/${supplierId}/tags/${tagId}`)
+  },
+
+  async removeTagFromSupplier(supplierId, tagId) {
+    return instance.delete(`/suppliers/${supplierId}/tags/${tagId}`)
   },
 
   // Signatures
@@ -605,6 +702,294 @@ const api = {
 
   async getImportStatus(emailId) {
     return instance.get(`/task-extractions/emails/${emailId}/import-status`)
+  },
+
+  // ============ Email Templates - 邮件模板 ============
+  // 模板列表
+  async getTemplates(params = {}) {
+    return instance.get('/templates', { params })
+  },
+
+  // 模板详情
+  async getTemplate(id) {
+    return instance.get(`/templates/${id}`)
+  },
+
+  // 创建模板
+  async createTemplate(data) {
+    return instance.post('/templates', data)
+  },
+
+  // 更新模板
+  async updateTemplate(id, data) {
+    return instance.put(`/templates/${id}`, data)
+  },
+
+  // 删除模板
+  async deleteTemplate(id) {
+    return instance.delete(`/templates/${id}`)
+  },
+
+  // 翻译模板
+  async translateTemplate(id, targetLang, forceRetranslate = false) {
+    return instance.post(`/templates/${id}/translate`, {
+      target_lang: targetLang,
+      force_retranslate: forceRetranslate
+    }, { timeout: 60000 })
+  },
+
+  // 共享模板
+  async shareTemplate(id) {
+    return instance.post(`/templates/${id}/share`)
+  },
+
+  // 取消共享模板
+  async unshareTemplate(id) {
+    return instance.post(`/templates/${id}/unshare`)
+  },
+
+  // 使用模板（增加计数+替换变量）
+  async useTemplate(id, targetLang = null, variables = null) {
+    return instance.post(`/templates/${id}/use`, {
+      target_lang: targetLang,
+      variables
+    })
+  },
+
+  // 获取模板分类列表
+  async getTemplateCategories() {
+    return instance.get('/templates/categories')
+  },
+
+  // 获取可用变量列表
+  async getTemplateVariables() {
+    return instance.get('/templates/variables')
+  },
+
+  // 获取支持的翻译语言
+  async getTemplateLanguages() {
+    return instance.get('/templates/languages')
+  },
+
+  // ============ Archive - 邮件归档 ============
+  // 归档文件夹列表
+  async getArchiveFolders() {
+    return instance.get('/archive/folders')
+  },
+
+  // 创建归档文件夹
+  async createArchiveFolder(data) {
+    return instance.post('/archive/folders', data)
+  },
+
+  // 更新归档文件夹
+  async updateArchiveFolder(id, data) {
+    return instance.put(`/archive/folders/${id}`, data)
+  },
+
+  // 删除归档文件夹
+  async deleteArchiveFolder(id, force = false) {
+    return instance.delete(`/archive/folders/${id}`, { params: { force } })
+  },
+
+  // 归档邮件
+  async archiveEmail(emailId, folderId) {
+    return instance.post(`/archive/emails/${emailId}`, { folder_id: folderId })
+  },
+
+  // 取消归档
+  async unarchiveEmail(emailId) {
+    return instance.post(`/archive/emails/${emailId}/unarchive`)
+  },
+
+  // 批量归档
+  async batchArchiveEmails(emailIds, folderId) {
+    return instance.post('/archive/batch', { email_ids: emailIds, folder_id: folderId })
+  },
+
+  // 批量取消归档
+  async batchUnarchiveEmails(emailIds) {
+    return instance.post('/archive/batch/unarchive', emailIds)
+  },
+
+  // 获取归档邮件列表
+  async getArchivedEmails(params = {}) {
+    return instance.get('/archive/emails', { params })
+  },
+
+  // 归档统计
+  async getArchiveStats() {
+    return instance.get('/archive/stats')
+  },
+
+  // 自动创建年份文件夹
+  async autoCreateYearFolder(year) {
+    return instance.post('/archive/folders/auto-create-year', null, { params: { year } })
+  },
+
+  // ============ Classification - 邮件分类 ============
+  // 获取分类定义
+  async getCategories() {
+    return instance.get('/classification/categories')
+  },
+
+  // 分类单封邮件
+  async classifyEmail(emailId, force = false) {
+    return instance.post(`/classification/emails/${emailId}`, null, { params: { force } })
+  },
+
+  // 批量分类
+  async batchClassifyEmails(emailIds, force = false) {
+    return instance.post('/classification/batch', { email_ids: emailIds, force })
+  },
+
+  // 获取分类统计
+  async getClassificationStats() {
+    return instance.get('/classification/stats')
+  },
+
+  // 自动分类未分类邮件
+  async autoClassifyEmails(limit = 100) {
+    return instance.post('/classification/auto-classify', null, { params: { limit } })
+  },
+
+  // 获取邮件分类结果
+  async getEmailClassification(emailId) {
+    return instance.get(`/classification/emails/${emailId}`)
+  },
+
+  // ============ Statistics - 统计报表 ============
+  // 概览统计
+  async getStatisticsOverview() {
+    return instance.get('/statistics/overview')
+  },
+
+  // 邮件量趋势
+  async getEmailTrend(period = 'daily', days = 30) {
+    return instance.get('/statistics/email-trend', { params: { period, days } })
+  },
+
+  // 供应商排行
+  async getSupplierRanking(limit = 10, days = 30) {
+    return instance.get('/statistics/supplier-ranking', { params: { limit, days } })
+  },
+
+  // 翻译引擎统计
+  async getTranslationEngineStats(months = 1) {
+    return instance.get('/statistics/translation-engine-stats', { params: { months } })
+  },
+
+  // 分类分布
+  async getCategoryDistribution(days = 30) {
+    return instance.get('/statistics/category-distribution', { params: { days } })
+  },
+
+  // 响应时间分析
+  async getResponseTimeStats(days = 30) {
+    return instance.get('/statistics/response-time', { params: { days } })
+  },
+
+  // 缓存统计
+  async getCacheStats() {
+    return instance.get('/statistics/cache-stats')
+  },
+
+  // 每日活动热力图
+  async getDailyActivity(days = 7) {
+    return instance.get('/statistics/daily-activity', { params: { days } })
+  },
+
+  // ============ Supplier Import/Export - 供应商导入导出 ============
+  // 导出供应商CSV
+  async exportSuppliersCsv() {
+    return instance.get('/suppliers/export/csv', { responseType: 'blob' })
+  },
+
+  // 导入供应商CSV
+  async importSuppliersCsv(file, skipExisting = true) {
+    const formData = new FormData()
+    formData.append('file', file)
+    return instance.post('/suppliers/import/csv', formData, {
+      params: { skip_existing: skipExisting },
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  },
+
+  // 获取导入模板
+  async getSupplierImportTemplate() {
+    return instance.get('/suppliers/export/template', { responseType: 'blob' })
+  },
+
+  // ============ 术语表版本控制 API ============
+
+  // 获取供应商术语表修改历史
+  async getGlossaryHistory(supplierId, limit = 50, offset = 0) {
+    return instance.get(`/translate/glossary/${supplierId}/history`, {
+      params: { limit, offset }
+    })
+  },
+
+  // 获取单个术语的修改历史
+  async getTermHistory(termId) {
+    return instance.get(`/translate/glossary/term/${termId}/history`)
+  },
+
+  // 回滚术语到指定历史版本
+  async rollbackGlossaryTerm(termId, historyId) {
+    return instance.post(`/translate/glossary/term/${termId}/rollback`, null, {
+      params: { history_id: historyId }
+    })
+  },
+
+  // 获取术语表修改统计
+  async getGlossaryHistoryStats(supplierId = null, days = 30) {
+    return instance.get('/translate/glossary/history/stats', {
+      params: { supplier_id: supplierId, days }
+    })
+  },
+
+  // 更新术语（带历史记录）
+  async updateGlossaryTerm(termId, termSource, termTarget, reason = null) {
+    return instance.put(`/translate/glossary/${termId}`, null, {
+      params: { term_source: termSource, term_target: termTarget, reason }
+    })
+  },
+
+  // 删除术语（带历史记录）
+  async deleteGlossaryTermWithHistory(termId, reason = null) {
+    return instance.delete(`/translate/glossary/${termId}`, {
+      params: { reason }
+    })
+  },
+
+  // ============ AI 回复建议 API ============
+
+  // 获取回复模板类型列表
+  async getReplyTemplates() {
+    return instance.get('/ai/reply/templates')
+  },
+
+  // 为邮件生成回复建议
+  async generateReplySuggestions(emailId, replyType = 'general') {
+    return instance.post(`/ai/reply/${emailId}/suggest`, null, {
+      params: { reply_type: replyType }
+    })
+  },
+
+  // 为自定义内容生成回复建议
+  async generateCustomReplySuggestions(subject, body, sender = '', replyType = 'general') {
+    return instance.post('/ai/reply/custom/suggest', null, {
+      params: { subject, body, sender, reply_type: replyType }
+    })
+  },
+
+  // ============ 拼写和语法检查 API ============
+
+  // 检查文本的语法和拼写
+  async checkGrammar(text, language = 'zh') {
+    return instance.post('/ai/grammar/check', null, {
+      params: { text, language }
+    })
   }
 }
 

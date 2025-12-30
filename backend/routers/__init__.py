@@ -21,6 +21,10 @@ from .approval_groups import router as approval_groups_router
 from .task_extractions import router as task_extractions_router
 from .dashboard import router as dashboard_router
 from .notifications import router as notifications_router
+from .templates import router as templates_router
+from .archive import router as archive_router
+from .classification import router as classification_router
+from .statistics import router as statistics_router
 
 __all__ = [
     "emails_router",
@@ -39,4 +43,8 @@ __all__ = [
     "task_extractions_router",
     "dashboard_router",
     "notifications_router",
+    "templates_router",
+    "archive_router",
+    "classification_router",
+    "statistics_router",
 ]

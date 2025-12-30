@@ -542,7 +542,9 @@ async def add_glossary_term(
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """Add new glossary term"""
+    """Add new glossary term and record history"""
+    from database.models import GlossaryHistory
+
     new_term = await crud.add_glossary_term(
         db,
         supplier_id=term.supplier_id,
@@ -551,6 +553,21 @@ async def add_glossary_term(
         source_lang=term.source_lang,
         target_lang=term.target_lang
     )
+    await db.flush()  # 确保获取到 new_term.id
+
+    # 记录创建历史
+    history = GlossaryHistory(
+        glossary_id=new_term.id,
+        supplier_id=term.supplier_id,
+        term_source=term.term_source,
+        term_target=term.term_target,
+        source_lang=term.source_lang,
+        target_lang=term.target_lang,
+        action="create",
+        changed_by=account.id
+    )
+    db.add(history)
+
     await db.commit()
     return new_term
 
@@ -558,15 +575,325 @@ async def add_glossary_term(
 @router.delete("/glossary/{term_id}")
 async def delete_glossary_term(
     term_id: int,
+    reason: Optional[str] = None,
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """Delete glossary term"""
+    """Delete glossary term and record history"""
     from sqlalchemy import delete
+    from database.models import GlossaryHistory
 
-    await db.execute(delete(Glossary).where(Glossary.id == term_id))
-    await db.commit()
+    # 先获取术语信息用于记录历史
+    result = await db.execute(select(Glossary).where(Glossary.id == term_id))
+    term = result.scalar_one_or_none()
+
+    if term:
+        # 记录删除历史
+        history = GlossaryHistory(
+            glossary_id=term.id,
+            supplier_id=term.supplier_id,
+            term_source=term.term_source,
+            term_target=term.term_target,
+            source_lang=term.source_lang,
+            target_lang=term.target_lang,
+            context=term.context,
+            action="delete",
+            changed_by=account.id,
+            change_reason=reason
+        )
+        db.add(history)
+
+        await db.execute(delete(Glossary).where(Glossary.id == term_id))
+        await db.commit()
+
     return {"message": "术语已删除"}
+
+
+@router.put("/glossary/{term_id}", response_model=GlossaryResponse)
+async def update_glossary_term(
+    term_id: int,
+    term_source: str,
+    term_target: str,
+    reason: Optional[str] = None,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """Update glossary term and record history"""
+    from database.models import GlossaryHistory
+
+    result = await db.execute(select(Glossary).where(Glossary.id == term_id))
+    term = result.scalar_one_or_none()
+
+    if not term:
+        raise HTTPException(status_code=404, detail="术语不存在")
+
+    # 记录更新历史
+    history = GlossaryHistory(
+        glossary_id=term.id,
+        supplier_id=term.supplier_id,
+        term_source=term_source,
+        term_target=term_target,
+        term_source_old=term.term_source,
+        term_target_old=term.term_target,
+        source_lang=term.source_lang,
+        target_lang=term.target_lang,
+        context=term.context,
+        action="update",
+        changed_by=account.id,
+        change_reason=reason
+    )
+    db.add(history)
+
+    # 更新术语
+    term.term_source = term_source
+    term.term_target = term_target
+
+    await db.commit()
+    await db.refresh(term)
+    return term
+
+
+# ============ Glossary History Routes ============
+class GlossaryHistoryResponse(BaseModel):
+    id: int
+    glossary_id: int
+    supplier_id: Optional[int]
+    term_source: str
+    term_target: str
+    term_source_old: Optional[str]
+    term_target_old: Optional[str]
+    action: str
+    changed_by: Optional[int]
+    changed_at: datetime
+    change_reason: Optional[str]
+    changer_email: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+@router.get("/glossary/{supplier_id}/history", response_model=List[GlossaryHistoryResponse])
+async def get_glossary_history(
+    supplier_id: int,
+    limit: int = 50,
+    offset: int = 0,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """获取供应商术语表的修改历史"""
+    from database.models import GlossaryHistory
+
+    result = await db.execute(
+        select(GlossaryHistory, EmailAccount.email)
+        .outerjoin(EmailAccount, GlossaryHistory.changed_by == EmailAccount.id)
+        .where(GlossaryHistory.supplier_id == supplier_id)
+        .order_by(GlossaryHistory.changed_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+
+    histories = []
+    for row in result.all():
+        history = row[0]
+        changer_email = row[1]
+        histories.append(GlossaryHistoryResponse(
+            id=history.id,
+            glossary_id=history.glossary_id,
+            supplier_id=history.supplier_id,
+            term_source=history.term_source,
+            term_target=history.term_target,
+            term_source_old=history.term_source_old,
+            term_target_old=history.term_target_old,
+            action=history.action,
+            changed_by=history.changed_by,
+            changed_at=history.changed_at,
+            change_reason=history.change_reason,
+            changer_email=changer_email
+        ))
+
+    return histories
+
+
+@router.get("/glossary/term/{term_id}/history", response_model=List[GlossaryHistoryResponse])
+async def get_term_history(
+    term_id: int,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """获取单个术语的修改历史"""
+    from database.models import GlossaryHistory
+
+    result = await db.execute(
+        select(GlossaryHistory, EmailAccount.email)
+        .outerjoin(EmailAccount, GlossaryHistory.changed_by == EmailAccount.id)
+        .where(GlossaryHistory.glossary_id == term_id)
+        .order_by(GlossaryHistory.changed_at.desc())
+    )
+
+    histories = []
+    for row in result.all():
+        history = row[0]
+        changer_email = row[1]
+        histories.append(GlossaryHistoryResponse(
+            id=history.id,
+            glossary_id=history.glossary_id,
+            supplier_id=history.supplier_id,
+            term_source=history.term_source,
+            term_target=history.term_target,
+            term_source_old=history.term_source_old,
+            term_target_old=history.term_target_old,
+            action=history.action,
+            changed_by=history.changed_by,
+            changed_at=history.changed_at,
+            change_reason=history.change_reason,
+            changer_email=changer_email
+        ))
+
+    return histories
+
+
+@router.post("/glossary/term/{term_id}/rollback")
+async def rollback_glossary_term(
+    term_id: int,
+    history_id: int,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """回滚术语到指定历史版本"""
+    from database.models import GlossaryHistory
+
+    # 获取历史记录
+    history_result = await db.execute(
+        select(GlossaryHistory).where(
+            GlossaryHistory.id == history_id,
+            GlossaryHistory.glossary_id == term_id
+        )
+    )
+    history = history_result.scalar_one_or_none()
+
+    if not history:
+        raise HTTPException(status_code=404, detail="历史记录不存在")
+
+    # 获取当前术语
+    term_result = await db.execute(select(Glossary).where(Glossary.id == term_id))
+    term = term_result.scalar_one_or_none()
+
+    if not term:
+        # 如果术语已删除，需要重新创建
+        if history.action == "delete":
+            raise HTTPException(status_code=400, detail="无法回滚删除操作，术语已不存在")
+
+        # 重新创建术语
+        term = Glossary(
+            id=term_id,  # 使用原ID
+            supplier_id=history.supplier_id,
+            term_source=history.term_source_old or history.term_source,
+            term_target=history.term_target_old or history.term_target,
+            source_lang=history.source_lang,
+            target_lang=history.target_lang,
+            context=history.context
+        )
+        db.add(term)
+
+        # 记录回滚历史
+        rollback_history = GlossaryHistory(
+            glossary_id=term_id,
+            supplier_id=history.supplier_id,
+            term_source=term.term_source,
+            term_target=term.term_target,
+            source_lang=history.source_lang,
+            target_lang=history.target_lang,
+            action="create",
+            changed_by=account.id,
+            change_reason=f"回滚到历史记录 #{history_id}"
+        )
+        db.add(rollback_history)
+    else:
+        # 术语存在，回滚到历史版本的旧值
+        old_source = term.term_source
+        old_target = term.term_target
+
+        # 如果是更新操作，回滚到更新前的值
+        if history.action == "update" and history.term_source_old and history.term_target_old:
+            term.term_source = history.term_source_old
+            term.term_target = history.term_target_old
+        else:
+            # 否则使用历史记录中的当前值
+            term.term_source = history.term_source
+            term.term_target = history.term_target
+
+        # 记录回滚历史
+        rollback_history = GlossaryHistory(
+            glossary_id=term_id,
+            supplier_id=term.supplier_id,
+            term_source=term.term_source,
+            term_target=term.term_target,
+            term_source_old=old_source,
+            term_target_old=old_target,
+            source_lang=term.source_lang,
+            target_lang=term.target_lang,
+            action="update",
+            changed_by=account.id,
+            change_reason=f"回滚到历史记录 #{history_id}"
+        )
+        db.add(rollback_history)
+
+    await db.commit()
+    return {"message": "已回滚到指定版本", "history_id": history_id}
+
+
+@router.get("/glossary/history/stats")
+async def get_glossary_history_stats(
+    supplier_id: Optional[int] = None,
+    days: int = 30,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """获取术语表修改统计"""
+    from database.models import GlossaryHistory
+
+    cutoff = datetime.utcnow() - timedelta(days=days)
+
+    # 基础查询条件
+    conditions = [GlossaryHistory.changed_at >= cutoff]
+    if supplier_id:
+        conditions.append(GlossaryHistory.supplier_id == supplier_id)
+
+    # 按操作类型统计
+    action_stats = await db.execute(
+        select(GlossaryHistory.action, func.count(GlossaryHistory.id))
+        .where(*conditions)
+        .group_by(GlossaryHistory.action)
+    )
+    action_counts = {row[0]: row[1] for row in action_stats.all()}
+
+    # 按用户统计
+    user_stats = await db.execute(
+        select(EmailAccount.email, func.count(GlossaryHistory.id))
+        .join(GlossaryHistory, GlossaryHistory.changed_by == EmailAccount.id)
+        .where(*conditions)
+        .group_by(EmailAccount.email)
+        .order_by(func.count(GlossaryHistory.id).desc())
+        .limit(10)
+    )
+    top_contributors = [{"email": row[0], "changes": row[1]} for row in user_stats.all()]
+
+    # 总修改次数
+    total_result = await db.execute(
+        select(func.count(GlossaryHistory.id)).where(*conditions)
+    )
+    total_changes = total_result.scalar() or 0
+
+    return {
+        "period_days": days,
+        "total_changes": total_changes,
+        "action_stats": {
+            "created": action_counts.get("create", 0),
+            "updated": action_counts.get("update", 0),
+            "deleted": action_counts.get("delete", 0)
+        },
+        "top_contributors": top_contributors
+    }
 
 
 # ============ 缓存管理 API ============

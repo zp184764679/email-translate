@@ -1,6 +1,6 @@
 """
 AI 邮件信息提取 API 路由
-使用 Ollama 提取邮件中的关键信息（日期、金额、联系人、待办事项等）
+使用 vLLM 提取邮件中的关键信息（日期、金额、联系人、待办事项等）
 """
 
 from datetime import datetime
@@ -301,3 +301,187 @@ async def delete_extraction(
         await db.commit()
 
     return {"message": "提取结果已删除"}
+
+
+# ============ AI 回复建议 ============
+
+class ReplySuggestion(BaseModel):
+    style: str
+    subject: str
+    body: str
+
+
+class ReplySuggestionResponse(BaseModel):
+    success: bool
+    reply_type: Optional[str] = None
+    reply_type_name: Optional[str] = None
+    suggestions: List[ReplySuggestion] = []
+    key_points: List[str] = []
+    error: Optional[str] = None
+    generated_at: Optional[str] = None
+
+
+class ReplyTemplate(BaseModel):
+    id: str
+    name: str
+    description: str
+    context: str
+
+
+@router.get("/reply/templates", response_model=List[ReplyTemplate])
+async def get_reply_templates(
+    account: EmailAccount = Depends(get_current_account)
+):
+    """获取所有回复模板类型"""
+    from services.reply_suggestion_service import get_reply_suggestion_service
+    service = get_reply_suggestion_service()
+    return service.get_reply_templates()
+
+
+@router.post("/reply/{email_id}/suggest", response_model=ReplySuggestionResponse)
+async def generate_reply_suggestions(
+    email_id: int,
+    reply_type: str = "general",
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    为邮件生成 AI 回复建议
+
+    Args:
+        email_id: 邮件ID
+        reply_type: 回复类型（inquiry/order_confirm/logistics/quality/payment/general）
+
+    Returns:
+        包含多个风格回复建议的响应
+    """
+    from services.reply_suggestion_service import get_reply_suggestion_service
+
+    # 验证邮件属于当前用户
+    email_result = await db.execute(
+        select(Email).where(
+            and_(
+                Email.id == email_id,
+                Email.account_id == account.id
+            )
+        )
+    )
+    email = email_result.scalar_one_or_none()
+    if not email:
+        raise HTTPException(status_code=404, detail="邮件不存在")
+
+    # 获取 AI 提取信息（如果有）
+    extraction_result = await db.execute(
+        select(EmailExtraction).where(EmailExtraction.email_id == email_id)
+    )
+    extraction = extraction_result.scalar_one_or_none()
+
+    extraction_data = None
+    if extraction:
+        extraction_data = {
+            "summary": extraction.summary,
+            "key_dates": extraction.key_dates or [],
+            "amounts": extraction.amounts or [],
+            "action_items": extraction.action_items or []
+        }
+
+    # 使用原文或翻译后的内容
+    body = email.body_translated or email.body or ""
+    subject = email.subject_translated or email.subject or ""
+
+    # 生成建议
+    service = get_reply_suggestion_service()
+    result = await service.generate_suggestions(
+        subject=subject,
+        body=body,
+        sender=email.sender or "",
+        extraction=extraction_data,
+        reply_type=reply_type
+    )
+
+    return ReplySuggestionResponse(**result)
+
+
+@router.post("/reply/custom/suggest", response_model=ReplySuggestionResponse)
+async def generate_custom_reply_suggestions(
+    subject: str,
+    body: str,
+    sender: str = "",
+    reply_type: str = "general",
+    account: EmailAccount = Depends(get_current_account)
+):
+    """
+    为自定义内容生成 AI 回复建议（不需要邮件ID）
+
+    Args:
+        subject: 邮件主题
+        body: 邮件正文
+        sender: 发件人
+        reply_type: 回复类型
+
+    Returns:
+        包含多个风格回复建议的响应
+    """
+    from services.reply_suggestion_service import get_reply_suggestion_service
+
+    service = get_reply_suggestion_service()
+    result = await service.generate_suggestions(
+        subject=subject,
+        body=body,
+        sender=sender,
+        extraction=None,
+        reply_type=reply_type
+    )
+
+    return ReplySuggestionResponse(**result)
+
+
+# ============ 拼写和语法检查 ============
+
+class GrammarIssue(BaseModel):
+    type: str
+    text: str
+    suggestion: str
+    position: Optional[int] = None
+    explanation: Optional[str] = None
+
+
+class GrammarCheckResponse(BaseModel):
+    success: bool
+    issues: List[GrammarIssue] = []
+    corrected_text: Optional[str] = None
+    summary: Optional[str] = None
+    error: Optional[str] = None
+    checked_at: Optional[str] = None
+
+
+@router.post("/grammar/check", response_model=GrammarCheckResponse)
+async def check_grammar(
+    text: str,
+    language: str = "zh",
+    account: EmailAccount = Depends(get_current_account)
+):
+    """
+    检查文本的语法和拼写
+
+    Args:
+        text: 要检查的文本
+        language: 文本语言（zh/en/ja/ko/de/fr/es）
+
+    Returns:
+        包含问题列表和修正建议的响应
+    """
+    from services.grammar_check_service import get_grammar_check_service
+
+    if not text or len(text.strip()) < 5:
+        return GrammarCheckResponse(
+            success=True,
+            issues=[],
+            corrected_text=text,
+            summary="文本太短，无需检查"
+        )
+
+    service = get_grammar_check_service()
+    result = await service.check_grammar(text, language)
+
+    return GrammarCheckResponse(**result)
