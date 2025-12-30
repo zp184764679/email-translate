@@ -169,7 +169,7 @@
               @click="insertVariable(v.name)"
               style="cursor: pointer;"
             >
-              {{ `{${v.name}}` }} - {{ v.description }}
+              &#123;{{ v.name }}&#125; - {{ v.description }}
             </el-tag>
           </div>
         </el-form-item>
@@ -298,7 +298,7 @@
         <el-form-item label="填充变量" v-if="viewingTemplate?.variables?.length">
           <div class="variables-input">
             <div v-for="varName in viewingTemplate.variables" :key="varName" class="variable-row">
-              <span class="variable-name">{{ `{${varName}}` }}</span>
+              <span class="variable-name">&#123;{{ varName }}&#125;</span>
               <el-input
                 v-model="variableValues[varName]"
                 :placeholder="getVariableDescription(varName)"
@@ -857,4 +857,3 @@ onMounted(() => {
   border-bottom: 1px solid #e4e7ed;
 }
 </style>
-</template>

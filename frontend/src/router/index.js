@@ -66,6 +66,11 @@ const routes = [
         path: 'statistics',
         name: 'Statistics',
         component: () => import('@/views/Statistics.vue')
+      },
+      {
+        path: 'archive',
+        name: 'Archive',
+        component: () => import('@/views/Archive.vue')
       }
     ]
   }

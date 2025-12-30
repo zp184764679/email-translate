@@ -55,15 +55,56 @@
       <div class="attachments-header">
         <el-icon><Paperclip /></el-icon>
         <span>附件 ({{ email.attachments.length }})</span>
+        <el-button
+          v-if="email.attachments.length > 1"
+          text
+          size="small"
+          @click="downloadAllAttachments"
+        >
+          全部下载
+        </el-button>
       </div>
       <div class="attachments-list">
-        <div class="attachment-item" v-for="att in email.attachments" :key="att.id">
-          <el-icon><Document /></el-icon>
+        <div
+          class="attachment-item"
+          v-for="(att, index) in email.attachments"
+          :key="att.id"
+          :class="{ previewable: isPreviewable(att.filename) }"
+          @click="openPreview(index)"
+        >
+          <el-icon :color="getFileIconColor(att.filename)">
+            <component :is="getFileIcon(att.filename)" />
+          </el-icon>
           <span class="filename">{{ att.filename }}</span>
           <span class="filesize">({{ formatFileSize(att.file_size) }})</span>
+          <div class="attachment-actions" @click.stop>
+            <el-button
+              v-if="isPreviewable(att.filename)"
+              text
+              size="small"
+              @click="openPreview(index)"
+            >
+              <el-icon><View /></el-icon>
+            </el-button>
+            <el-button
+              text
+              size="small"
+              @click="downloadAttachment(att)"
+            >
+              <el-icon><Download /></el-icon>
+            </el-button>
+          </div>
         </div>
       </div>
     </div>
+
+    <!-- 附件预览对话框 -->
+    <AttachmentPreview
+      v-model="showAttachmentPreview"
+      :email-id="email.id"
+      :attachments="email.attachments || []"
+      :initial-index="previewIndex"
+    />
 
     <!-- 邮件正文 - 段落配对视图（所有邮件统一双栏显示）-->
     <div class="reader-body split-view">
@@ -147,6 +188,31 @@
 
     <!-- 快速回复区域 -->
     <div class="reader-quick-reply">
+      <div class="quick-reply-header">
+        <span>快速回复</span>
+        <el-button
+          size="small"
+          text
+          type="primary"
+          :icon="MagicStick"
+          @click="generateAiSuggestions"
+          :loading="generatingSuggestions"
+        >
+          AI 建议
+        </el-button>
+      </div>
+      <!-- 快速短语按钮 -->
+      <div class="quick-phrases">
+        <el-button
+          v-for="phrase in quickPhrases"
+          :key="phrase"
+          size="small"
+          round
+          @click="insertQuickPhrase(phrase)"
+        >
+          {{ phrase }}
+        </el-button>
+      </div>
       <el-input
         v-model="quickReply"
         type="textarea"
@@ -157,17 +223,46 @@
         <el-button type="primary" size="small" @click="sendQuickReply">发送</el-button>
       </div>
     </div>
+
+    <!-- AI 回复建议对话框 -->
+    <el-dialog v-model="showSuggestionsDialog" title="AI 回复建议" width="600px">
+      <div class="suggestions-container" v-loading="generatingSuggestions">
+        <el-empty v-if="!aiSuggestions.length && !generatingSuggestions" description="暂无建议" />
+        <div
+          v-else
+          v-for="(suggestion, index) in aiSuggestions"
+          :key="index"
+          class="suggestion-item"
+          :class="{ active: selectedSuggestion === index }"
+          @click="selectedSuggestion = index"
+        >
+          <div class="suggestion-header">
+            <el-tag :type="getSuggestionType(suggestion.style)" size="small">
+              {{ getSuggestionLabel(suggestion.style) }}
+            </el-tag>
+          </div>
+          <div class="suggestion-content">{{ suggestion.content }}</div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="showSuggestionsDialog = false">取消</el-button>
+        <el-button type="primary" @click="applySuggestion" :disabled="selectedSuggestion === null">
+          使用此建议
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { ref, watch, computed, onUnmounted } from 'vue'
-import { Back, Right, Delete, Star, Paperclip, Document, DocumentCopy, View } from '@element-plus/icons-vue'
+import { Back, Right, Delete, Star, Paperclip, Document, DocumentCopy, View, Download, Picture, Folder, MagicStick } from '@element-plus/icons-vue'
 import DOMPurify from 'dompurify'
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
 import api from '@/api'
 import { useUserStore } from '@/stores/user'
+import AttachmentPreview from '@/components/AttachmentPreview.vue'
 
 const userStore = useUserStore()
 
@@ -183,6 +278,33 @@ const emit = defineEmits(['reply', 'replyAll', 'forward', 'delete', 'flag', 'ref
 const quickReply = ref('')
 const translating = ref(false)
 const showHtmlDialog = ref(false)
+const showAttachmentPreview = ref(false)
+const previewIndex = ref(0)
+
+// AI 回复建议
+const showSuggestionsDialog = ref(false)
+const aiSuggestions = ref([])
+const selectedSuggestion = ref(null)
+const generatingSuggestions = ref(false)
+
+// 快速回复短语
+const quickPhrases = [
+  '收到，谢谢！',
+  '好的，已确认',
+  '请稍等，正在处理',
+  '尽快回复您',
+  '已转发相关同事'
+]
+
+// 插入快速短语
+function insertQuickPhrase(phrase) {
+  if (quickReply.value) {
+    quickReply.value += '\n' + phrase
+  } else {
+    quickReply.value = phrase
+  }
+}
+
 let isUnmounted = false  // 组件卸载状态标志
 
 // 组件卸载时标记状态，让翻译请求在后台继续运行
@@ -399,6 +521,56 @@ function sendQuickReply() {
   emit('reply', { ...props.email, quickReplyText: quickReply.value })
 }
 
+// ========== AI 回复建议 ==========
+async function generateAiSuggestions() {
+  generatingSuggestions.value = true
+  showSuggestionsDialog.value = true
+  aiSuggestions.value = []
+  selectedSuggestion.value = null
+
+  try {
+    const res = await api.generateReplySuggestions(props.email.id)
+    aiSuggestions.value = res.data?.suggestions || []
+    if (aiSuggestions.value.length > 0) {
+      selectedSuggestion.value = 0  // 默认选中第一个
+    }
+  } catch (e) {
+    console.error('Failed to generate suggestions:', e)
+    ElMessage.error('生成建议失败')
+  } finally {
+    generatingSuggestions.value = false
+  }
+}
+
+function getSuggestionType(style) {
+  const types = {
+    formal: '',
+    friendly: 'success',
+    brief: 'info'
+  }
+  return types[style] || 'info'
+}
+
+function getSuggestionLabel(style) {
+  const labels = {
+    formal: '正式',
+    friendly: '友好',
+    brief: '简洁'
+  }
+  return labels[style] || style
+}
+
+function applySuggestion() {
+  if (selectedSuggestion.value === null) return
+
+  const suggestion = aiSuggestions.value[selectedSuggestion.value]
+  if (suggestion) {
+    quickReply.value = suggestion.content
+    showSuggestionsDialog.value = false
+    ElMessage.success('已应用建议')
+  }
+}
+
 function formatDateTime(date) {
   if (!date) return ''
   return dayjs(date).format('YYYY年MM月DD日 HH:mm')
@@ -460,6 +632,68 @@ function formatFileSize(bytes) {
   const k = 1024
   const i = Math.floor(Math.log(bytes) / Math.log(k))
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + units[i]
+}
+
+// ========== 附件预览相关函数 ==========
+const PREVIEWABLE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'pdf', 'txt', 'log', 'md', 'json', 'xml', 'csv', 'html', 'css', 'js']
+const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg']
+
+function getFileExtension(filename) {
+  if (!filename) return ''
+  const parts = filename.split('.')
+  return parts.length > 1 ? parts.pop().toLowerCase() : ''
+}
+
+function isPreviewable(filename) {
+  return PREVIEWABLE_EXTENSIONS.includes(getFileExtension(filename))
+}
+
+function getFileIcon(filename) {
+  const ext = getFileExtension(filename)
+  if (IMAGE_EXTENSIONS.includes(ext)) return Picture
+  if (ext === 'pdf') return Document
+  if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) return Folder
+  return Document
+}
+
+function getFileIconColor(filename) {
+  const ext = getFileExtension(filename)
+  if (IMAGE_EXTENSIONS.includes(ext)) return '#67C23A'
+  if (ext === 'pdf') return '#F56C6C'
+  if (['doc', 'docx'].includes(ext)) return '#409EFF'
+  if (['xls', 'xlsx'].includes(ext)) return '#67C23A'
+  if (['ppt', 'pptx'].includes(ext)) return '#E6A23C'
+  if (['zip', 'rar', '7z'].includes(ext)) return '#909399'
+  return '#909399'
+}
+
+function openPreview(index) {
+  if (!props.email.attachments || !props.email.attachments[index]) return
+  const att = props.email.attachments[index]
+  if (isPreviewable(att.filename)) {
+    previewIndex.value = index
+    showAttachmentPreview.value = true
+  } else {
+    // 不可预览的文件直接下载
+    downloadAttachment(att)
+  }
+}
+
+async function downloadAttachment(att) {
+  try {
+    await api.downloadAttachment(props.email.id, att.id, att.filename)
+  } catch (e) {
+    console.error('Download failed:', e)
+    ElMessage.error('下载失败')
+  }
+}
+
+async function downloadAllAttachments() {
+  if (!props.email.attachments) return
+  for (const att of props.email.attachments) {
+    await downloadAttachment(att)
+  }
+  ElMessage.success(`已下载 ${props.email.attachments.length} 个附件`)
 }
 
 function sanitizeHtml(html) {
@@ -617,6 +851,10 @@ function handleLinkClick(event) {
   margin-bottom: 6px;
 }
 
+.attachments-header .el-button {
+  margin-left: auto;
+}
+
 .attachments-list {
   display: flex;
   flex-wrap: wrap;
@@ -641,8 +879,32 @@ function handleLinkClick(event) {
   border-color: #91d5ff;
 }
 
+.attachment-item.previewable {
+  cursor: pointer;
+}
+
+.attachment-item.previewable:hover {
+  background-color: #e1f3d8;
+  border-color: #a3d48e;
+}
+
 .attachment-item .filesize {
   color: #909399;
+  margin-right: auto;
+}
+
+.attachment-actions {
+  display: none;
+  gap: 4px;
+  margin-left: 8px;
+}
+
+.attachment-item:hover .attachment-actions {
+  display: flex;
+}
+
+.attachment-actions .el-button {
+  padding: 4px;
 }
 
 /* Split View 样式 */
@@ -874,10 +1136,79 @@ function handleLinkClick(event) {
   flex-shrink: 0;
 }
 
+.quick-reply-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: #606266;
+}
+
+.quick-phrases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.quick-phrases .el-button {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-color: #dcdfe6;
+  color: #606266;
+}
+
+.quick-phrases .el-button:hover {
+  color: #409eff;
+  border-color: #409eff;
+  background: rgba(64, 158, 255, 0.1);
+}
+
 .quick-reply-actions {
   display: flex;
   justify-content: flex-end;
   margin-top: 6px;
+}
+
+/* AI 建议样式 */
+.suggestions-container {
+  min-height: 200px;
+}
+
+.suggestion-item {
+  padding: 12px;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.suggestion-item:hover {
+  border-color: #409EFF;
+  background-color: #f5f7fa;
+}
+
+.suggestion-item.active {
+  border-color: #409EFF;
+  background-color: #ecf5ff;
+  box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.2);
+}
+
+.suggestion-item:last-child {
+  margin-bottom: 0;
+}
+
+.suggestion-header {
+  margin-bottom: 8px;
+}
+
+.suggestion-content {
+  font-size: 14px;
+  color: #303133;
+  line-height: 1.6;
+  white-space: pre-wrap;
 }
 /* Updated: paragraph pairing view applied v2 */
 </style>

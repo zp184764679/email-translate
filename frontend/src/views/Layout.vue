@@ -68,6 +68,15 @@
           <span class="folder-name">已删除</span>
         </div>
 
+        <div
+          class="folder-item"
+          :class="{ active: currentFolder === 'archive' }"
+          @click="navigateTo('/archive', 'archive')"
+        >
+          <el-icon><Box /></el-icon>
+          <span class="folder-name">归档</span>
+        </div>
+
         <div class="folder-divider"></div>
 
         <!-- 自定义文件夹 -->
@@ -364,7 +373,7 @@ import {
   Refresh, RefreshRight, Message, EditPen, Document, Delete,
   OfficeBuilding, Setting, Promotion, Star, ChatDotSquare,
   SwitchButton, Checked, Reading, DocumentCopy, Grid, List,
-  Operation, Histogram, ArrowDown, Plus, Folder, Edit, Calendar, DataLine, Filter, Collection, Bell, TrendCharts
+  Operation, Histogram, ArrowDown, Plus, Folder, Edit, Calendar, DataLine, Filter, Collection, Bell, TrendCharts, Box
 } from '@element-plus/icons-vue'
 import api from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -498,6 +507,8 @@ function updateCurrentFolder() {
     currentFolder.value = 'statistics'
   } else if (path.startsWith('/rules')) {
     currentFolder.value = 'rules'
+  } else if (path.startsWith('/archive')) {
+    currentFolder.value = 'archive'
   }
 }
 

@@ -10,6 +10,21 @@
         </el-radio-group>
       </div>
 
+      <!-- 快速过滤按钮 -->
+      <div class="quick-filters">
+        <el-button
+          v-for="filter in quickFilters"
+          :key="filter.key"
+          :type="activeFilter === filter.key ? 'primary' : ''"
+          size="small"
+          round
+          @click="setQuickFilter(filter.key)"
+        >
+          {{ filter.label }}
+          <el-badge v-if="filter.count > 0" :value="filter.count" :max="99" class="filter-badge" />
+        </el-button>
+      </div>
+
       <!-- 分组视图模式 -->
       <EmailGroupView
         v-if="viewMode === 'grouped'"
@@ -163,7 +178,26 @@
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <el-empty v-if="!loading && emails.length === 0" description="暂无邮件" />
+          <!-- 优化的空状态 -->
+          <div v-if="!loading && emails.length === 0" class="empty-state">
+            <el-empty :image-size="120">
+              <template #description>
+                <p class="empty-title">{{ activeFilter === 'all' ? '📭 收件箱是空的' : '没有符合条件的邮件' }}</p>
+                <p class="empty-hint" v-if="activeFilter === 'all'">点击"同步"拉取最新邮件，或新建邮件开始对话</p>
+                <p class="empty-hint" v-else>尝试切换到"全部"查看所有邮件</p>
+              </template>
+              <div class="empty-actions">
+                <el-button type="primary" @click="syncEmails" :loading="syncing">
+                  <el-icon><Refresh /></el-icon>
+                  同步邮件
+                </el-button>
+                <el-button @click="$router.push('/compose')">
+                  <el-icon><EditPen /></el-icon>
+                  新建邮件
+                </el-button>
+              </div>
+            </el-empty>
+          </div>
         </div>
       </div>
 
@@ -254,7 +288,10 @@
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <el-empty v-if="!loading && emails.length === 0" description="暂无邮件" />
+          <!-- 优化的空状态（译文面板） -->
+          <div v-if="!loading && emails.length === 0" class="empty-state">
+            <el-empty :image-size="100" description="暂无翻译内容" />
+          </div>
         </div>
       </div>
     </div>
@@ -327,7 +364,7 @@ import {
 } from '@element-plus/icons-vue'
 import api from '@/api'
 import dayjs from 'dayjs'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useKeyboardShortcuts } from '@/composables/useKeyboardShortcuts'
 import EmailPreview from '@/components/EmailPreview.vue'
 import LabelSelector from '@/components/LabelSelector.vue'
@@ -361,8 +398,71 @@ const folderPickerEmailId = ref(null)  // 当前操作的邮件ID
 // 操作锁：防止快速双击导致竞态
 const pendingFlagOps = ref(new Set())  // 正在进行星标操作的邮件 ID
 
+// 同步邮件状态
+const syncing = ref(false)
+
+// 同步邮件（从服务器拉取最新）
+async function syncEmails() {
+  if (syncing.value) return
+  syncing.value = true
+  try {
+    await api.fetchEmails()
+    await loadEmails()
+    ElMessage.success('邮件已同步')
+  } catch (e) {
+    console.error('Sync failed:', e)
+    ElMessage.error('同步失败，请稍后重试')
+  } finally {
+    syncing.value = false
+  }
+}
+
 // 视图模式：split(双栏) / grouped(分组)
 const viewMode = ref('split')
+
+// 快速过滤
+const activeFilter = ref('all')
+
+// 所有邮件（未过滤）
+const allEmails = ref([])
+
+// 快速过滤统计和选项
+const quickFilters = computed(() => [
+  { key: 'all', label: '全部', count: 0 },
+  { key: 'unread', label: '未读', count: allEmails.value.filter(e => !e.is_read).length },
+  { key: 'starred', label: '星标', count: allEmails.value.filter(e => e.is_flagged).length },
+  { key: 'has_attachment', label: '有附件', count: allEmails.value.filter(e => e.attachments && e.attachments.length > 0).length },
+  { key: 'not_translated', label: '未翻译', count: allEmails.value.filter(e => !e.subject_translated && !e.body_translated).length }
+])
+
+// 应用快速过滤
+function setQuickFilter(filterKey) {
+  activeFilter.value = filterKey
+  applyQuickFilter()
+}
+
+// 执行过滤
+function applyQuickFilter() {
+  if (activeFilter.value === 'all') {
+    emails.value = [...allEmails.value]
+    return
+  }
+
+  emails.value = allEmails.value.filter(email => {
+    switch (activeFilter.value) {
+      case 'unread':
+        return !email.is_read
+      case 'starred':
+        return email.is_flagged
+      case 'has_attachment':
+        return email.attachments && email.attachments.length > 0
+      case 'not_translated':
+        return !email.subject_translated && !email.body_translated
+      default:
+        return true
+    }
+  })
+}
 
 // 布局模式类名
 const layoutClass = computed(() => {
@@ -469,14 +569,30 @@ async function handleBatchToggleFlag(ids, flagged) {
   }
 }
 
-// 批量删除
+// 批量删除（带二次确认）
 async function handleBatchDelete(ids) {
+  if (ids.length === 0) return
+
   try {
+    // 二次确认
+    await ElMessageBox.confirm(
+      `确定要删除 ${ids.length} 封邮件吗？此操作不可恢复。`,
+      '删除确认',
+      {
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+        confirmButtonClass: 'el-button--danger'
+      }
+    )
+
     await api.batchDelete(ids)
     ElMessage.success(`已删除 ${ids.length} 封邮件`)
     selectedEmails.value = []
     loadEmails()
   } catch (e) {
+    // 用户取消不提示错误
+    if (e === 'cancel' || e?.toString?.().includes('cancel')) return
     ElMessage.error('删除失败')
   }
 }
@@ -525,6 +641,17 @@ function handleQuickReply(email) {
 
 async function handleQuickDelete(email) {
   try {
+    // 单封邮件也需要确认
+    await ElMessageBox.confirm(
+      '确定要删除这封邮件吗？',
+      '删除确认',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+
     await api.deleteEmail(email.id)
     ElMessage.success('邮件已删除')
     // 从列表中移除
@@ -542,6 +669,7 @@ async function handleQuickDelete(email) {
       }
     }
   } catch (e) {
+    if (e === 'cancel' || e?.toString?.().includes('cancel')) return
     ElMessage.error('删除失败')
   }
 }
@@ -625,20 +753,13 @@ useKeyboardShortcuts([
   {
     key: 'd',
     handler: async () => {
-      // 删除选中或聚焦的邮件
+      // 删除选中或聚焦的邮件（复用批量删除函数，已有二次确认）
       const idsToDelete = selectedEmails.value.length > 0
         ? [...selectedEmails.value]
         : (focusedEmail.value ? [focusedEmail.value.id] : [])
 
       if (idsToDelete.length > 0) {
-        try {
-          await api.batchDelete(idsToDelete)
-          ElMessage.success(`已删除 ${idsToDelete.length} 封邮件`)
-          selectedEmails.value = []
-          loadEmails()
-        } catch (e) {
-          ElMessage.error('删除失败')
-        }
+        await handleBatchDelete(idsToDelete)
       }
     }
   },
@@ -810,7 +931,9 @@ function handleRemoteDelete(event) {
   const { email_ids } = event.detail
   if (!email_ids) return
 
-  // 从列表中移除被删除的邮件
+  // 从所有邮件列表中移除被删除的邮件
+  allEmails.value = allEmails.value.filter(e => !email_ids.includes(e.id))
+  // 从过滤后的列表中移除
   emails.value = emails.value.filter(e => !email_ids.includes(e.id))
   // 从选中列表中移除
   selectedEmails.value = selectedEmails.value.filter(id => !email_ids.includes(id))
@@ -891,8 +1014,9 @@ async function loadEmails(silent = false) {
 
     // 只有当请求未被取消时才更新数据
     if (!signal.aborted) {
-      emails.value = result.emails
+      allEmails.value = result.emails
       total.value = result.total
+      applyQuickFilter()  // 应用当前过滤器
     }
   } catch (e) {
     // 忽略取消请求的错误
@@ -1126,14 +1250,46 @@ async function handleEmailFlag(email) {
 function formatTime(date) {
   if (!date) return ''
   const d = dayjs(date)
-  const today = dayjs()
+  const now = dayjs()
+  const diffMinutes = now.diff(d, 'minute')
+  const diffHours = now.diff(d, 'hour')
 
-  if (d.isSame(today, 'day')) {
-    return d.format('HH:mm')
-  } else if (d.isSame(today, 'year')) {
-    return d.format('MM/DD HH:mm')
+  // 刚刚 (1分钟内)
+  if (diffMinutes < 1) {
+    return '刚刚'
   }
-  return d.format('YYYY/MM/DD HH:mm')
+
+  // X分钟前 (1小时内)
+  if (diffMinutes < 60) {
+    return `${diffMinutes}分钟前`
+  }
+
+  // X小时前 (今天)
+  if (d.isSame(now, 'day')) {
+    if (diffHours < 6) {
+      return `${diffHours}小时前`
+    }
+    return `今天 ${d.format('HH:mm')}`
+  }
+
+  // 昨天
+  if (d.isSame(now.subtract(1, 'day'), 'day')) {
+    return `昨天 ${d.format('HH:mm')}`
+  }
+
+  // 本周内显示星期几
+  if (d.isAfter(now.subtract(7, 'day'))) {
+    const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+    return `${weekdays[d.day()]} ${d.format('HH:mm')}`
+  }
+
+  // 今年内显示月/日
+  if (d.isSame(now, 'year')) {
+    return d.format('M月D日')
+  }
+
+  // 往年显示完整日期
+  return d.format('YYYY年M月D日')
 }
 
 function getLanguageName(lang) {
@@ -1239,6 +1395,61 @@ function getTextColor(bgColor) {
   padding: 8px 12px;
   border-bottom: 1px solid var(--el-border-color-lighter);
   background: var(--el-bg-color);
+}
+
+/* 快速过滤按钮 */
+.quick-filters {
+  display: flex;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--el-fill-color-lighter);
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  flex-wrap: wrap;
+}
+
+.quick-filters .el-button {
+  position: relative;
+}
+
+.quick-filters .filter-badge {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+}
+
+.quick-filters .filter-badge :deep(.el-badge__content) {
+  font-size: 10px;
+  padding: 0 4px;
+  height: 14px;
+  line-height: 14px;
+}
+
+/* 空状态优化 */
+.empty-state {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100%;
+  min-height: 300px;
+}
+
+.empty-state .empty-title {
+  font-size: 16px;
+  font-weight: 500;
+  color: #303133;
+  margin-bottom: 8px;
+}
+
+.empty-state .empty-hint {
+  font-size: 13px;
+  color: #909399;
+  margin: 0;
+}
+
+.empty-state .empty-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 20px;
 }
 
 /* 列表头部 */
