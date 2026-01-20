@@ -26,6 +26,7 @@ from database.models import Email
 # vLLM 配置
 VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://localhost:5080")
 VLLM_MODEL = os.getenv("VLLM_MODEL", "/home/aaa/models/Qwen3-VL-8B-Instruct")
+VLLM_API_KEY = os.getenv("VLLM_API_KEY", "")
 
 # 分类定义
 EMAIL_CATEGORIES = {
@@ -67,7 +68,11 @@ class EmailClassifierService:
     """邮件分类服务"""
 
     def __init__(self):
-        self.client = httpx.AsyncClient(timeout=60.0)
+        # 构建请求头（包含 API Key 认证）
+        headers = {"Content-Type": "application/json"}
+        if VLLM_API_KEY:
+            headers["Authorization"] = f"Bearer {VLLM_API_KEY}"
+        self.client = httpx.AsyncClient(timeout=60.0, headers=headers)
 
     async def close(self):
         await self.client.aclose()

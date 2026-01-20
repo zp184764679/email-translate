@@ -39,11 +39,9 @@ async def fix_untranslated_emails():
     # 获取服务
     language_service = get_language_service()
     translate_service = TranslateService(
-        provider=settings.translate_provider,
-        api_key=settings.claude_api_key,
         vllm_base_url=settings.vllm_base_url,
         vllm_model=settings.vllm_model,
-        claude_model=settings.claude_model,
+        vllm_api_key=settings.vllm_api_key,
     )
 
     async with async_session() as db:
@@ -102,24 +100,16 @@ async def fix_untranslated_emails():
                                 source_lang=lang
                             )
 
-                        # 翻译正文
+                        # 翻译正文（使用 vLLM 智能路由）
                         if email.body_original:
-                            if settings.smart_routing_enabled:
-                                result = translate_service.translate_with_smart_routing(
-                                    text=email.body_original,
-                                    subject=email.subject_original or "",
-                                    target_lang="zh",
-                                    source_lang=lang
-                                )
-                                email.body_translated = result["translated_text"]
-                                print(f"  翻译成功 (provider: {result['provider_used']})")
-                            else:
-                                email.body_translated = translate_service.translate_text(
-                                    email.body_original,
-                                    target_lang="zh",
-                                    source_lang=lang
-                                )
-                                print(f"  翻译成功")
+                            result = translate_service.translate_with_smart_routing(
+                                text=email.body_original,
+                                subject=email.subject_original or "",
+                                target_lang="zh",
+                                source_lang=lang
+                            )
+                            email.body_translated = result["translated_text"]
+                            print(f"  翻译成功 (provider: {result['provider_used']})")
 
                         email.is_translated = True
 

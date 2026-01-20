@@ -1,16 +1,39 @@
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
 import uvicorn
 import os
 import sys
 import socket
 import atexit
-import asyncio
+import logging
+from uuid import uuid4
 
 from config import get_settings
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+
+class RequestIDFilter(logging.Filter):
+    """为日志记录添加 request_id 字段的过滤器"""
+    def filter(self, record):
+        if not hasattr(record, 'request_id'):
+            record.request_id = 'N/A'
+        return True
+
+
+# 添加过滤器到根日志记录器
+logging.getLogger().addFilter(RequestIDFilter())
 from database.database import init_db
-from routers import emails_router, users_router, translate_router, drafts_router, suppliers_router, signatures_router, labels_router, folders_router, calendar_router, ai_extract_router, tasks_router, rules_router, approval_groups_router, task_extractions_router, dashboard_router, notifications_router, templates_router, archive_router, classification_router, statistics_router
+from routers import emails_router, users_router, translate_router, drafts_router, suppliers_router, customers_router, signatures_router, labels_router, folders_router, calendar_router, ai_extract_router, tasks_router, rules_router, approval_groups_router, task_extractions_router, dashboard_router, notifications_router, templates_router, archive_router, classification_router, statistics_router, attachments_router
 from websocket import manager as ws_manager, websocket_endpoint
 
 settings = get_settings()
@@ -79,9 +102,8 @@ if not check_port_available(PORT):
 print(f"单实例检查通过，准备启动后端服务（端口 {PORT}）")
 
 
-# 注意：Batch API 轮询已迁移到 Celery 定时任务 (celery_app.py)
-# 任务名：poll-batch-status，每30秒执行一次
-# 这样更可靠，不依赖 FastAPI 进程存活
+# 翻译使用本地 vLLM 大模型，完全免费且数据本地化
+# 定时任务由 Celery Beat 处理
 
 
 @asynccontextmanager
@@ -99,8 +121,7 @@ async def lifespan(app: FastAPI):
         await session.execute(text("SELECT 1"))
     print("Connection pool ready")
 
-    # 注意：Batch API 轮询由 Celery Beat 处理，无需在此启动
-    print("Ready. Batch polling handled by Celery Beat (poll-batch-status task)")
+    print("Ready. Translation: vLLM local model (free, data local)")
 
     yield
 
@@ -114,6 +135,59 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+
+# ========== 请求追踪中间件 ==========
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    """
+    为每个请求添加唯一 ID，用于日志追踪和调试
+
+    - 如果请求头包含 X-Request-ID，则使用该值
+    - 否则生成新的 UUID
+    - 响应头中返回 X-Request-ID
+    """
+    async def dispatch(self, request: Request, call_next):
+        request_id = request.headers.get("X-Request-ID", str(uuid4())[:8])
+        # 将 request_id 存储在 request.state 中，供后续使用
+        request.state.request_id = request_id
+
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+
+app.add_middleware(RequestIDMiddleware)
+
+
+# ========== 全局异常处理 ==========
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """
+    全局异常处理器
+
+    - 记录详细错误日志（包含 request_id）
+    - 返回通用错误响应，不泄露内部细节
+    """
+    request_id = getattr(request.state, 'request_id', 'unknown')
+
+    # 记录详细错误（包含堆栈）
+    logger.exception(
+        f"Unhandled exception: {exc}",
+        extra={'request_id': request_id}
+    )
+
+    # 返回通用错误响应，不暴露内部细节
+    return JSONResponse(
+        status_code=500,
+        content={
+            "success": False,
+            "error": "服务器内部错误",
+            "request_id": request_id,
+            "message": "请稍后重试，如果问题持续请联系管理员"
+        },
+        headers={"X-Request-ID": request_id}
+    )
+
 
 # CORS middleware - 使用白名单模式（安全）
 ALLOWED_ORIGINS = [
@@ -139,6 +213,7 @@ app.include_router(emails_router)
 app.include_router(translate_router)
 app.include_router(drafts_router)
 app.include_router(suppliers_router)
+app.include_router(customers_router)
 app.include_router(signatures_router)
 app.include_router(labels_router)
 app.include_router(folders_router)
@@ -154,6 +229,7 @@ app.include_router(templates_router)
 app.include_router(archive_router)
 app.include_router(classification_router)
 app.include_router(statistics_router)
+app.include_router(attachments_router)
 
 
 # WebSocket 端点

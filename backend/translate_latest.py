@@ -20,25 +20,12 @@ engine = create_engine(sync_url, echo=False)
 
 def translate_latest_emails(count: int = 5):
     """翻译最新的几封邮件"""
-    # 根据配置初始化翻译服务
-    if settings.translate_provider == "vllm":
-        translate_service = TranslateService(
-            provider="vllm",
-            vllm_base_url=settings.vllm_base_url,
-            vllm_model=settings.vllm_model
-        )
-    elif settings.translate_provider == "claude":
-        translate_service = TranslateService(
-            provider="claude",
-            api_key=settings.claude_api_key,
-            claude_model=settings.claude_model
-        )
-    else:  # deepl
-        translate_service = TranslateService(
-            provider="deepl",
-            api_key=settings.deepl_api_key,
-            is_free_api=settings.deepl_free_api
-        )
+    # 初始化翻译服务（使用本地 vLLM）
+    translate_service = TranslateService(
+        vllm_base_url=settings.vllm_base_url,
+        vllm_model=settings.vllm_model,
+        vllm_api_key=settings.vllm_api_key,
+    )
 
     with Session(engine) as db:
         # 获取最新的非中文邮件
@@ -57,7 +44,7 @@ def translate_latest_emails(count: int = 5):
             return
 
         print(f"找到 {len(emails)} 封邮件")
-        print(f"使用翻译引擎: {settings.translate_provider}")
+        print(f"使用翻译引擎: vLLM (本地大模型)")
         print("-" * 60)
 
         translated_count = 0

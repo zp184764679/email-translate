@@ -23,7 +23,57 @@
           {{ filter.label }}
           <el-badge v-if="filter.count > 0" :value="filter.count" :max="99" class="filter-badge" />
         </el-button>
+        <!-- 快捷键提示 -->
+        <el-tooltip placement="bottom">
+          <template #content>
+            <div class="shortcut-tooltip">
+              <div><kbd>J</kbd>/<kbd>K</kbd> 上下选择</div>
+              <div><kbd>X</kbd> 选择/取消</div>
+              <div><kbd>M</kbd>/<kbd>U</kbd> 已读/未读</div>
+              <div><kbd>S</kbd> 星标</div>
+              <div><kbd>D</kbd> 删除</div>
+              <div><kbd>Ctrl+A</kbd> 全选</div>
+            </div>
+          </template>
+          <el-button size="small" round type="info" plain>
+            <el-icon><QuestionFilled /></el-icon>
+            快捷键
+          </el-button>
+        </el-tooltip>
       </div>
+
+      <!-- 批量操作工具栏 - 当有邮件选中时显示 -->
+      <transition name="slide-down">
+        <div class="batch-toolbar" v-if="selectedEmails.length > 0">
+          <span class="selection-info">
+            <el-icon><Select /></el-icon>
+            已选择 {{ selectedEmails.length }} 封邮件
+          </span>
+          <el-button-group>
+            <el-button @click="handleBatchMarkRead(selectedEmails, true)" :loading="batchLoading" size="small">
+              <el-icon><View /></el-icon>
+              已读
+            </el-button>
+            <el-button @click="handleBatchMarkRead(selectedEmails, false)" :loading="batchLoading" size="small">
+              <el-icon><Hide /></el-icon>
+              未读
+            </el-button>
+            <el-button @click="handleBatchToggleFlag(selectedEmails, true)" :loading="batchLoading" size="small">
+              <el-icon><StarFilled /></el-icon>
+              星标
+            </el-button>
+            <el-button @click="handleBatchTranslate(selectedEmails)" :loading="batchLoading" size="small">
+              <el-icon><Refresh /></el-icon>
+              翻译
+            </el-button>
+            <el-button @click="handleBatchDelete(selectedEmails)" :loading="batchLoading" size="small" type="danger">
+              <el-icon><Delete /></el-icon>
+              删除
+            </el-button>
+          </el-button-group>
+          <el-button link @click="clearSelection" size="small">取消选择</el-button>
+        </div>
+      </transition>
 
       <!-- 分组视图模式 -->
       <EmailGroupView
@@ -42,6 +92,13 @@
       <!-- 左侧原文列表 -->
       <div class="split-pane original-pane">
         <div class="split-pane-header">
+          <!-- 全选复选框 -->
+          <el-checkbox
+            :model-value="isAllSelected"
+            :indeterminate="isIndeterminate"
+            @change="toggleSelectAll"
+            class="select-all-checkbox"
+          />
           <el-icon><Document /></el-icon>
           <span>原文</span>
           <span class="pane-count">({{ emails.length }})</span>
@@ -248,9 +305,9 @@
                     <el-icon class="is-loading"><Loading /></el-icon>
                     翻译中
                   </el-tag>
-                  <!-- 翻译失败状态 -->
+                  <!-- 翻译失败状态（中文邮件不显示） -->
                   <el-tag
-                    v-else-if="email.translation_status === 'failed'"
+                    v-else-if="email.translation_status === 'failed' && email.language_detected !== 'zh'"
                     size="small"
                     type="danger"
                     class="failed-tag"
@@ -348,7 +405,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
+import { ref, onMounted, onUnmounted, watch, computed, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import {
@@ -360,7 +417,9 @@ import {
   // 翻译状态图标
   Loading,
   // 视图切换图标
-  Grid
+  Grid,
+  // 批量操作工具栏图标
+  QuestionFilled, Select
 } from '@element-plus/icons-vue'
 import api from '@/api'
 import dayjs from 'dayjs'
@@ -400,6 +459,14 @@ const pendingFlagOps = ref(new Set())  // 正在进行星标操作的邮件 ID
 
 // 同步邮件状态
 const syncing = ref(false)
+
+// 批量操作加载状态
+const batchLoading = ref(false)
+
+// 清空选择
+function clearSelection() {
+  selectedEmails.value = []
+}
 
 // 同步邮件（从服务器拉取最新）
 async function syncEmails() {
@@ -483,6 +550,26 @@ const focusedEmail = computed(() => {
   return null
 })
 
+// 全选状态计算属性
+const isAllSelected = computed(() => {
+  return emails.value.length > 0 && emails.value.every(e => selectedEmails.value.includes(e.id))
+})
+
+// 半选状态（部分选中）
+const isIndeterminate = computed(() => {
+  const selectedCount = emails.value.filter(e => selectedEmails.value.includes(e.id)).length
+  return selectedCount > 0 && selectedCount < emails.value.length
+})
+
+// 全选/取消全选
+function toggleSelectAll(val) {
+  if (val) {
+    selectedEmails.value = emails.value.map(e => e.id)
+  } else {
+    selectedEmails.value = []
+  }
+}
+
 // 右键菜单命令处理
 async function handleContextMenuCommand(command, email) {
   if (!email) return
@@ -523,55 +610,67 @@ async function handleContextMenuCommand(command, email) {
 
 // 批量标记已读/未读
 async function handleBatchMarkRead(ids, markAsRead) {
+  if (batchLoading.value || ids.length === 0) return
+
   const action = markAsRead ? '标记为已读' : '标记为未读'
+  batchLoading.value = true
   try {
     if (markAsRead) {
       await api.batchMarkAsRead(ids)
-      ElMessage.success(`已将 ${ids.length} 封邮件${action}`)
     } else {
       await api.batchMarkAsUnread(ids)
-      ElMessage.success(`已将 ${ids.length} 封邮件${action}`)
     }
+    ElMessage.success(`已将 ${ids.length} 封邮件${action}`)
     // 更新本地状态
     ids.forEach(id => {
       const email = emails.value.find(e => e.id === id)
       if (email) email.is_read = markAsRead
     })
+    // 清空选择
+    clearSelection()
   } catch (e) {
     ElMessage.error(`批量${action}失败，请重试`)
     // 刷新数据获取服务端真实状态
     loadEmails(true)
     console.error('Batch mark read failed:', e)
+  } finally {
+    batchLoading.value = false
   }
 }
 
 // 批量切换星标
 async function handleBatchToggleFlag(ids, flagged) {
+  if (batchLoading.value || ids.length === 0) return
+
   const action = flagged ? '添加星标' : '取消星标'
+  batchLoading.value = true
   try {
     if (flagged) {
       await api.batchFlag(ids)
-      ElMessage.success(`已为 ${ids.length} 封邮件${action}`)
     } else {
       await api.batchUnflag(ids)
-      ElMessage.success(`已${action} ${ids.length} 封邮件`)
     }
+    ElMessage.success(`已为 ${ids.length} 封邮件${action}`)
     // 更新本地状态
     ids.forEach(id => {
       const email = emails.value.find(e => e.id === id)
       if (email) email.is_flagged = flagged
     })
+    // 清空选择
+    clearSelection()
   } catch (e) {
     ElMessage.error(`批量${action}失败，请重试`)
     // 刷新数据获取服务端真实状态
     loadEmails(true)
     console.error('Batch toggle flag failed:', e)
+  } finally {
+    batchLoading.value = false
   }
 }
 
 // 批量删除（带二次确认）
 async function handleBatchDelete(ids) {
-  if (ids.length === 0) return
+  if (batchLoading.value || ids.length === 0) return
 
   try {
     // 二次确认
@@ -586,14 +685,17 @@ async function handleBatchDelete(ids) {
       }
     )
 
+    batchLoading.value = true
     await api.batchDelete(ids)
     ElMessage.success(`已删除 ${ids.length} 封邮件`)
-    selectedEmails.value = []
+    clearSelection()
     loadEmails()
   } catch (e) {
     // 用户取消不提示错误
     if (e === 'cancel' || e?.toString?.().includes('cancel')) return
     ElMessage.error('删除失败')
+  } finally {
+    batchLoading.value = false
   }
 }
 
@@ -652,21 +754,34 @@ async function handleQuickDelete(email) {
       }
     )
 
-    await api.deleteEmail(email.id)
-    ElMessage.success('邮件已删除')
-    // 从列表中移除
+    // 先保存邮件位置，以便失败时恢复
     const index = emails.value.findIndex(e => e.id === email.id)
+    const deletedEmail = index > -1 ? emails.value[index] : null
+
+    // 乐观更新：先从 UI 移除
     if (index > -1) {
       emails.value.splice(index, 1)
     }
-    // 如果删除的是当前激活的邮件，选中下一封
-    if (activeEmailId.value === email.id) {
-      activeEmail.value = null
-      activeEmailId.value = null
-      if (emails.value.length > 0) {
-        const nextIndex = Math.min(index, emails.value.length - 1)
-        handleEmailClick(emails.value[nextIndex])
+
+    try {
+      await api.deleteEmail(email.id)
+      ElMessage.success('邮件已删除')
+
+      // 如果删除的是当前激活的邮件，选中下一封
+      if (activeEmailId.value === email.id) {
+        activeEmail.value = null
+        activeEmailId.value = null
+        if (emails.value.length > 0) {
+          const nextIndex = Math.min(index, emails.value.length - 1)
+          handleEmailClick(emails.value[nextIndex])
+        }
       }
+    } catch (apiError) {
+      // API 失败，恢复邮件到原位置
+      if (deletedEmail && index > -1) {
+        emails.value.splice(index, 0, deletedEmail)
+      }
+      throw apiError
     }
   } catch (e) {
     if (e === 'cancel' || e?.toString?.().includes('cancel')) return
@@ -1016,6 +1131,8 @@ async function loadEmails(silent = false) {
     if (!signal.aborted) {
       allEmails.value = result.emails
       total.value = result.total
+      // 使用 nextTick 确保 Vue 响应式更新完成后再过滤，防止竞态条件
+      await nextTick()
       applyQuickFilter()  // 应用当前过滤器
     }
   } catch (e) {
@@ -1946,5 +2063,84 @@ function getTextColor(bgColor) {
 /* 预览窗格通用样式 */
 .preview-pane {
   background-color: #fff;
+}
+
+/* ========== 批量操作工具栏 ========== */
+.batch-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: linear-gradient(to bottom, #e8f5e9, #f1f8e9);
+  border-bottom: 1px solid #c8e6c9;
+}
+
+.batch-toolbar .selection-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+  color: #2e7d32;
+  font-size: 13px;
+}
+
+.batch-toolbar .selection-info .el-icon {
+  font-size: 16px;
+}
+
+.batch-toolbar .el-button-group .el-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.batch-toolbar .el-button-group .el-button .el-icon {
+  font-size: 14px;
+}
+
+/* 滑入/滑出动画 */
+.slide-down-enter-active,
+.slide-down-leave-active {
+  transition: all 0.2s ease;
+}
+
+.slide-down-enter-from,
+.slide-down-leave-to {
+  opacity: 0;
+  transform: translateY(-10px);
+}
+
+/* ========== 快捷键提示 ========== */
+.shortcut-tooltip {
+  font-size: 12px;
+  line-height: 1.8;
+}
+
+.shortcut-tooltip kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  margin: 0 2px;
+  font-family: monospace;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 3px;
+  min-width: 18px;
+  text-align: center;
+}
+
+/* ========== 全选复选框 ========== */
+.select-all-checkbox {
+  margin-right: 4px;
+}
+
+.split-pane-header .select-all-checkbox :deep(.el-checkbox__inner) {
+  width: 16px;
+  height: 16px;
+}
+
+.split-pane-header .select-all-checkbox :deep(.el-checkbox__inner::after) {
+  height: 8px;
+  left: 5px;
 }
 </style>

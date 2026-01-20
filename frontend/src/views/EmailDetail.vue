@@ -58,7 +58,7 @@
             翻译中
           </el-tag>
           <el-tag
-            v-else-if="email.translation_status === 'failed'"
+            v-else-if="email.translation_status === 'failed' && email.language_detected !== 'zh'"
             type="danger"
             size="small"
           >
@@ -146,8 +146,8 @@
         <el-icon class="is-loading"><Loading /></el-icon>
         <span>正在翻译此邮件，请稍候...</span>
       </div>
-      <!-- 翻译失败状态 -->
-      <div class="translation-notice failed" v-else-if="email.translation_status === 'failed'">
+      <!-- 翻译失败状态（中文邮件不显示） -->
+      <div class="translation-notice failed" v-else-if="email.translation_status === 'failed' && email.language_detected !== 'zh'">
         <el-icon><InfoFilled /></el-icon>
         <span>翻译失败，请重试</span>
         <el-button type="primary" size="small" @click="translateEmail" :loading="translating">
@@ -168,7 +168,9 @@
         <div class="section-header">
           <el-icon><Paperclip /></el-icon>
           <span>附件 ({{ email.attachments.length }})</span>
-          <el-button text size="small" @click="downloadAllAttachments">全部下载</el-button>
+          <el-button text size="small" :loading="downloadingAll" @click="downloadAllAttachments">
+            {{ downloadingAll ? '打包中...' : '全部下载' }}
+          </el-button>
         </div>
         <div class="attachments-grid">
           <div
@@ -199,8 +201,72 @@
         </div>
       </div>
 
-      <!-- 邮件正文 - Split View（所有邮件统一双栏显示）-->
-      <div class="body-section split-view">
+      <!-- 邮件正文 - 分层显示（当有 parsed_quotes 时） -->
+      <div class="body-section quotes-view" v-if="email.parsed_quotes && email.parsed_quotes.length > 0">
+        <div class="quotes-header">
+          <div class="quotes-header-left">
+            <el-icon><Document /></el-icon>
+            <span>邮件内容</span>
+            <el-tag type="info" size="small">{{ email.parsed_quotes.length }} 层</el-tag>
+          </div>
+          <div class="quotes-header-right">
+            <el-button text size="small" @click="toggleAllQuotes">
+              <el-icon><Expand v-if="!allExpanded" /><Fold v-else /></el-icon>
+              {{ allExpanded ? '全部折叠' : '全部展开' }}
+            </el-button>
+            <el-button text size="small" @click="useOldView = !useOldView" v-if="email.body_original">
+              <el-icon><Switch /></el-icon>
+              {{ useOldView ? '分层视图' : '传统视图' }}
+            </el-button>
+          </div>
+        </div>
+
+        <!-- 分层引用块 -->
+        <div class="quotes-body" v-if="!useOldView">
+          <EmailQuoteBlock
+            v-for="(quote, index) in email.parsed_quotes"
+            :key="index"
+            :quote="quote"
+            :default-expanded="index < 2"
+            :ref="el => { if (el) quoteRefs[index] = el }"
+          />
+
+          <!-- 翻译/重新翻译按钮 -->
+          <div class="translate-actions" v-if="email.language_detected && email.language_detected !== 'zh' && email.language_detected !== 'unknown'">
+            <el-button v-if="!email.is_translated" type="primary" @click="translateEmail" :loading="translating">
+              <el-icon><MagicStick /></el-icon>
+              翻译此邮件
+            </el-button>
+            <el-button v-else type="primary" text @click="retranslateEmail" :loading="translating">
+              <el-icon><RefreshRight /></el-icon>
+              重新翻译
+            </el-button>
+          </div>
+        </div>
+
+        <!-- 传统视图（切换后显示） -->
+        <div class="split-body" v-else>
+          <div class="split-pane original-pane" ref="originalPane" @scroll="handleOriginalScroll">
+            <div class="pane-content linkified" v-if="email.body_original" v-html="linkifyText(email.body_original)"></div>
+          </div>
+          <div class="split-divider"></div>
+          <div class="split-pane translated-pane" ref="translatedPane" @scroll="handleTranslatedScroll">
+            <div class="pane-content linkified" v-if="email.body_translated" v-html="linkifyText(email.body_translated)"></div>
+            <div class="pane-placeholder" v-else>(未翻译)</div>
+          </div>
+        </div>
+
+        <!-- HTML 原文切换 -->
+        <div class="html-toggle" v-if="email.body_html">
+          <el-button text size="small" @click="showHtmlDialog = true">
+            <el-icon><View /></el-icon>
+            查看 HTML 原文
+          </el-button>
+        </div>
+      </div>
+
+      <!-- 邮件正文 - Split View（无分层数据时使用原有视图）-->
+      <div class="body-section split-view" v-else>
         <div class="split-header">
           <div class="split-header-left">
             <el-icon><Document /></el-icon>
@@ -223,10 +289,10 @@
             @scroll="handleOriginalScroll"
             @contextmenu.prevent="handleBodyContextMenu"
           >
-            <!-- 优先显示纯文本，否则显示 HTML 渲染 -->
-            <div class="pane-content linkified" v-if="email.body_original && email.body_original.trim()" v-html="linkifyText(email.body_original)" @click="handleLinkClick">
+            <!-- 优先显示 HTML（包含图片等富文本），否则显示纯文本 -->
+            <div class="pane-content html-content" v-if="email.body_html && email.body_html.trim()" v-html="sanitizeHtml(email.body_html)" @click="handleLinkClick">
             </div>
-            <div class="pane-content html-content" v-else-if="email.body_html" v-html="sanitizeHtml(email.body_html)" @click="handleLinkClick">
+            <div class="pane-content linkified" v-else-if="email.body_original && email.body_original.trim()" v-html="linkifyText(email.body_original)" @click="handleLinkClick">
             </div>
             <div class="pane-content empty-content" v-else>
               (无文本内容)
@@ -245,8 +311,8 @@
           >
             <!-- 中文邮件或未识别语言：右侧显示原文 -->
             <div class="pane-content" v-if="!email.language_detected || email.language_detected === 'zh' || email.language_detected === 'unknown'" @click="handleLinkClick">
-              <div class="linkified" v-if="email.body_original && email.body_original.trim()" v-html="linkifyText(email.body_original)"></div>
-              <div class="html-content" v-else-if="email.body_html" v-html="sanitizeHtml(email.body_html)"></div>
+              <div class="html-content" v-if="email.body_html && email.body_html.trim()" v-html="sanitizeHtml(email.body_html)"></div>
+              <div class="linkified" v-else-if="email.body_original && email.body_original.trim()" v-html="linkifyText(email.body_original)"></div>
               <template v-else>(无文本内容)</template>
             </div>
             <!-- 非中文邮件：显示翻译 -->
@@ -407,6 +473,28 @@
             <label>主题：</label>
             <el-input v-model="replyForm.subject" placeholder="邮件主题" size="small" />
           </div>
+
+          <!-- 审批人 -->
+          <div class="recipient-row approver-row">
+            <label>审批人：</label>
+            <el-select
+              v-model="selectedApproverId"
+              placeholder="选择审批人"
+              size="small"
+              style="width: 200px;"
+              filterable
+            >
+              <el-option
+                v-for="approver in approvers"
+                :key="approver.id"
+                :label="approver.email"
+                :value="approver.id"
+              />
+            </el-select>
+            <span class="approver-hint" v-if="!selectedApproverId">
+              请选择审批人后发送
+            </span>
+          </div>
         </div>
 
         <div class="reply-body-grid">
@@ -421,10 +509,10 @@
                 <el-option label="法语" value="fr" />
               </el-select>
             </div>
-            <el-input
+            <RichTextEditor
+              ref="chineseEditorRef"
               v-model="replyForm.body_chinese"
-              type="textarea"
-              :rows="10"
+              height="250px"
               placeholder="请输入中文回复内容..."
             />
             <div class="signature-selector">
@@ -539,12 +627,15 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeft, Back, ChatLineSquare, Right, Delete, Star,
   Printer, Paperclip, Document, Download, InfoFilled, DocumentCopy, View, ArrowDown, CollectionTag,
-  CopyDocument, Refresh, RefreshRight, Search, Link, Message, Loading
+  CopyDocument, Refresh, RefreshRight, Search, Link, Message, Loading,
+  Expand, Fold, Switch, MagicStick
 } from '@element-plus/icons-vue'
 import LabelSelector from '@/components/LabelSelector.vue'
 import ExtractionPanel from '@/components/ExtractionPanel.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
 import CreateTaskDialog from '@/components/CreateTaskDialog.vue'
+import RichTextEditor from '@/components/RichTextEditor.vue'
+import EmailQuoteBlock from '@/components/EmailQuoteBlock.vue'
 import api, { getStorageKey } from '@/api'
 import dayjs from 'dayjs'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -565,8 +656,14 @@ const showCreateTaskDialog = ref(false)
 const translating = ref(false)
 const submitting = ref(false)
 const downloadingAttachments = ref({})  // 跟踪每个附件的下载状态
+const downloadingAll = ref(false)  // ZIP 打包下载状态
 const threadEmails = ref([])  // 邮件线程
 const signatures = ref([])  // 签名列表
+
+// 分层引用视图
+const useOldView = ref(false)  // 是否使用传统视图
+const allExpanded = ref(true)  // 是否全部展开
+const quoteRefs = ref({})  // 引用块组件引用
 
 // 右键菜单
 const bodyContextMenu = useContextMenu()
@@ -979,12 +1076,17 @@ const replyForm = reactive({
   signature_id: ''
 })
 
+// 审批人
+const approvers = ref([])           // 审批人列表
+const selectedApproverId = ref(null) // 选中的审批人
+
 // 标签式邮箱输入
 const toList = ref([])      // 收件人列表
 const ccList = ref([])      // 抄送列表
 const toInput = ref('')     // 收件人输入框
 const ccInput = ref('')     // 抄送输入框
 const contactHistory = ref([])  // 历史联系人
+const chineseEditorRef = ref(null)  // 中文编辑器引用
 
 // 加载历史联系人（带缓存和失败降级）
 async function loadContactHistory() {
@@ -1187,10 +1289,29 @@ onMounted(() => {
   loadEmail()
   loadSignatures()
   loadContactHistory()
+  loadApprovers()
   // 监听翻译事件
   window.addEventListener('email-translated', handleEmailTranslated)
   window.addEventListener('email-translation-failed', handleEmailTranslationFailed)
 })
+
+// 加载审批人列表和默认审批人
+async function loadApprovers() {
+  try {
+    // 同时加载审批人列表和用户信息
+    const [approversRes, userInfo] = await Promise.all([
+      api.getApprovers(),
+      api.getCurrentAccount()
+    ])
+    approvers.value = approversRes || []
+    // 设置默认审批人
+    if (userInfo.default_approver_id) {
+      selectedApproverId.value = userInfo.default_approver_id
+    }
+  } catch (e) {
+    console.error('Failed to load approvers:', e)
+  }
+}
 
 async function loadEmail() {
   const id = route.params.id
@@ -1495,9 +1616,33 @@ async function downloadAttachment(att) {
 async function downloadAllAttachments() {
   if (!email.value?.attachments?.length) return
 
-  for (const att of email.value.attachments) {
-    await downloadAttachment(att)
+  downloadingAll.value = true
+  try {
+    // 使用 ZIP 打包下载
+    await api.downloadAllAttachments(email.value.id)
+    ElMessage.success(`已打包下载 ${email.value.attachments.length} 个附件`)
+  } catch (e) {
+    console.error('ZIP download failed:', e)
+    // 如果 ZIP 下载失败，回退到逐个下载
+    ElMessage.info('正在逐个下载附件...')
+    for (const att of email.value.attachments) {
+      await downloadAttachment(att)
+    }
+    ElMessage.success(`已下载 ${email.value.attachments.length} 个附件`)
+  } finally {
+    downloadingAll.value = false
   }
+}
+
+// 切换全部引用块的展开/折叠状态
+function toggleAllQuotes() {
+  allExpanded.value = !allExpanded.value
+  // 遍历所有引用块组件，设置展开状态
+  Object.values(quoteRefs.value).forEach((ref) => {
+    if (ref && ref.isCollapsed !== undefined) {
+      ref.isCollapsed = !allExpanded.value
+    }
+  })
 }
 
 async function translateEmail(force = false) {
@@ -1554,7 +1699,10 @@ async function retranslateEmail() {
 }
 
 async function translateReply() {
-  if (!replyForm.body_chinese.trim()) {
+  // 从富文本编辑器获取纯文本内容用于翻译
+  const textContent = chineseEditorRef.value?.getText()?.trim() || replyForm.body_chinese.trim()
+
+  if (!textContent) {
     ElMessage.warning('请先输入中文内容')
     return
   }
@@ -1562,7 +1710,7 @@ async function translateReply() {
   translating.value = true
   try {
     const result = await api.translateReply(
-      replyForm.body_chinese,
+      textContent,  // 使用纯文本进行翻译
       replyForm.target_language,
       email.value.supplier_id,
       email.value.body_original?.substring(0, 500)
@@ -1588,10 +1736,16 @@ function getContentWithSignature(content, isTranslated = false) {
 }
 
 async function saveDraft() {
-  if (!replyForm.body_chinese.trim()) {
+  // 从编辑器获取纯文本检查是否有内容
+  const textContent = chineseEditorRef.value?.getText()?.trim() || ''
+  const hasContent = textContent || replyForm.body_translated.trim()
+  if (!hasContent) {
     ElMessage.warning('请输入回复内容')
     return
   }
+
+  // 获取 HTML 格式的中文内容
+  const htmlContent = chineseEditorRef.value?.getHtml() || replyForm.body_chinese
 
   try {
     await api.createDraft({
@@ -1599,7 +1753,7 @@ async function saveDraft() {
       to: toList.value.join(', '),
       cc: ccList.value.length > 0 ? ccList.value.join(', ') : null,
       subject: replyForm.subject.trim(),
-      body_chinese: getContentWithSignature(replyForm.body_chinese, false),
+      body_chinese: getContentWithSignature(htmlContent, false),
       body_translated: getContentWithSignature(replyForm.body_translated, true),
       target_language: replyForm.target_language
     })
@@ -1617,15 +1771,22 @@ async function submitReply() {
     return
   }
 
-  if (!replyForm.body_chinese.trim()) {
+  // 从编辑器获取纯文本检查是否有内容
+  const textContent = chineseEditorRef.value?.getText()?.trim() || ''
+  const hasContent = textContent || replyForm.body_translated.trim()
+  if (!hasContent) {
     ElMessage.warning('请输入回复内容')
     return
   }
 
-  if (!replyForm.body_translated.trim()) {
-    ElMessage.warning('请先翻译内容')
+  // 检查审批人
+  if (!selectedApproverId.value) {
+    ElMessage.warning('请选择审批人')
     return
   }
+
+  // 获取 HTML 格式的中文内容
+  const htmlContent = chineseEditorRef.value?.getHtml() || replyForm.body_chinese
 
   submitting.value = true
   try {
@@ -1634,17 +1795,19 @@ async function submitReply() {
       to: toList.value.join(', '),
       cc: ccList.value.length > 0 ? ccList.value.join(', ') : null,
       subject: replyForm.subject.trim(),
-      body_chinese: getContentWithSignature(replyForm.body_chinese, false),
+      body_chinese: getContentWithSignature(htmlContent, false),
       body_translated: getContentWithSignature(replyForm.body_translated, true),
       target_language: replyForm.target_language
     })
 
-    const result = await api.submitDraft(draft.id)
+    const result = await api.submitDraft(draft.id, {
+      approverId: selectedApproverId.value
+    })
 
     if (result.status === 'sent') {
       ElMessage.success('邮件已发送')
     } else if (result.status === 'pending') {
-      ElMessage.info(`邮件已提交审批 (触发规则: ${result.rule})`)
+      ElMessage.info('邮件已提交审批')
     }
 
     showReplyDialog.value = false
@@ -1652,7 +1815,7 @@ async function submitReply() {
     replyForm.body_translated = ''
   } catch (e) {
     console.error('Failed to submit reply:', e)
-    ElMessage.error('发送失败')
+    ElMessage.error('发送失败: ' + (e.response?.data?.detail || e.message))
   } finally {
     submitting.value = false
   }
@@ -1742,10 +1905,11 @@ function formatFileSize(bytes) {
 function sanitizeHtml(html) {
   if (!html) return ''
 
-  // 先处理 cid: 图片，替换为占位符提示
+  // 对于仍然存在的 cid: 图片（后端未替换的情况），显示占位符
+  // 后端已经将内嵌图片的 cid: 替换为 /api/emails/inline/ URL
   let processedHtml = html.replace(
     /<img[^>]*src=["']cid:[^"']+["'][^>]*>/gi,
-    '<span style="display:inline-block;padding:4px 8px;background:#f5f5f5;border:1px solid #ddd;border-radius:4px;color:#999;font-size:12px;">[嵌入图片]</span>'
+    '<span style="display:inline-block;padding:4px 8px;background:#f5f5f5;border:1px solid #ddd;border-radius:4px;color:#999;font-size:12px;">[嵌入图片无法显示]</span>'
   )
 
   return DOMPurify.sanitize(processedHtml, {
@@ -2012,6 +2176,52 @@ function handleLinkClick(event) {
   font-size: 11px;
   color: #909399;
   margin-top: 2px;
+}
+
+/* 分层引用视图 */
+.body-section.quotes-view {
+  margin-top: 16px;
+}
+
+.quotes-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  background: #fafafa;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px 8px 0 0;
+  border-bottom: none;
+}
+
+.quotes-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #303133;
+}
+
+.quotes-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.quotes-body {
+  border: 1px solid #e8e8e8;
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  padding: 16px;
+  background: #fff;
+}
+
+.translate-actions {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px dashed #e4e7ed;
+  text-align: center;
 }
 
 /* Split View 正文区域 */
@@ -2307,6 +2517,16 @@ function handleLinkClick(event) {
 
 .subject-row .el-input {
   flex: 1;
+}
+
+.approver-row {
+  align-items: center;
+  gap: 12px;
+}
+
+.approver-hint {
+  font-size: 12px;
+  color: #909399;
 }
 
 .reply-body-grid {

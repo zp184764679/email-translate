@@ -1,0 +1,18 @@
+    # 邮件系统前端
+    location /email/ {
+        # 对无参数的首页请求重定向，破坏浏览器缓存
+        set $redirect_flag 0;
+        if ($request_uri = /email/) {
+            set $redirect_flag 1;
+        }
+        if ($redirect_flag = 1) {
+            return 302 /email/?_v=20260103;
+        }
+
+        alias /www/email-translate/frontend-web/;
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        add_header Pragma "no-cache";
+        add_header Expires "0";
+        try_files $uri $uri/ /email/index.html;
+    }
+

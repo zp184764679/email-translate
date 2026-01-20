@@ -1,0 +1,13 @@
+    # 邮件系统前端 - 带缓存破坏重定向
+    location = /email/ {
+        return 302 /email/?_v=20260103;
+    }
+
+    location /email/ {
+        alias /www/email-translate/frontend-web/;
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        add_header Pragma "no-cache";
+        add_header Expires "0";
+        try_files $uri $uri/ /email/index.html;
+    }
+

@@ -10,7 +10,7 @@ Celery 任务模块
 from tasks.translate_tasks import (
     translate_email_task,
     batch_translate_task,
-    poll_batch_status,
+    collect_and_translate_pending,
 )
 from tasks.email_tasks import (
     fetch_emails_task,
@@ -32,7 +32,7 @@ __all__ = [
     # 翻译任务
     "translate_email_task",
     "batch_translate_task",
-    "poll_batch_status",
+    "collect_and_translate_pending",
     # 邮件任务
     "fetch_emails_task",
     "send_email_task",

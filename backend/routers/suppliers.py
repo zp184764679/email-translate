@@ -86,55 +86,110 @@ class AllSuppliersStatsResponse(BaseModel):
     suppliers_without_emails: List[dict] = []
 
 
+class SupplierTagCreate(BaseModel):
+    name: str
+    color: str = "#409EFF"
+    description: Optional[str] = None
+
+
+class SupplierTagUpdate(BaseModel):
+    name: Optional[str] = None
+    color: Optional[str] = None
+    description: Optional[str] = None
+
+
+class SupplierTagResponse(BaseModel):
+    id: int
+    name: str
+    color: str
+    description: Optional[str]
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 # ============ Routes ============
 @router.get("", response_model=List[SupplierResponse])
 async def get_suppliers(
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """获取所有供应商（包含分类、标签、域名/联系人统计）"""
-    # 获取供应商及术语表统计
+    """获取所有供应商（包含分类、标签、域名/联系人统计）
+
+    优化：使用子查询预计算统计数据，避免 N+1 查询问题
+    """
+    # 子查询：术语表数量
+    glossary_subq = (
+        select(Glossary.supplier_id, func.count(Glossary.id).label("count"))
+        .group_by(Glossary.supplier_id)
+        .subquery()
+    )
+
+    # 子查询：域名数量
+    domain_subq = (
+        select(SupplierDomain.supplier_id, func.count(SupplierDomain.id).label("count"))
+        .group_by(SupplierDomain.supplier_id)
+        .subquery()
+    )
+
+    # 子查询：联系人数量
+    contact_subq = (
+        select(SupplierContact.supplier_id, func.count(SupplierContact.id).label("count"))
+        .group_by(SupplierContact.supplier_id)
+        .subquery()
+    )
+
+    # 主查询：一次性获取所有供应商及其统计数据
     result = await db.execute(
         select(
             Supplier,
-            func.count(Glossary.id).label("glossary_count")
+            func.coalesce(glossary_subq.c.count, 0).label("glossary_count"),
+            func.coalesce(domain_subq.c.count, 0).label("domain_count"),
+            func.coalesce(contact_subq.c.count, 0).label("contact_count")
         )
-        .outerjoin(Glossary, Supplier.id == Glossary.supplier_id)
-        .group_by(Supplier.id)
+        .outerjoin(glossary_subq, Supplier.id == glossary_subq.c.supplier_id)
+        .outerjoin(domain_subq, Supplier.id == domain_subq.c.supplier_id)
+        .outerjoin(contact_subq, Supplier.id == contact_subq.c.supplier_id)
         .order_by(Supplier.name)
     )
 
+    rows = result.all()
+    supplier_ids = [row[0].id for row in rows]
+
+    # 批量获取所有供应商的标签（单次查询）
+    tags_result = await db.execute(
+        select(
+            supplier_tag_mappings.c.supplier_id,
+            SupplierTag.id,
+            SupplierTag.name,
+            SupplierTag.color
+        )
+        .join(SupplierTag, SupplierTag.id == supplier_tag_mappings.c.tag_id)
+        .where(supplier_tag_mappings.c.supplier_id.in_(supplier_ids))
+    )
+
+    # 构建供应商ID -> 标签列表的映射
+    supplier_tags_map = {}
+    for tag_row in tags_result.all():
+        supplier_id, tag_id, tag_name, tag_color = tag_row
+        if supplier_id not in supplier_tags_map:
+            supplier_tags_map[supplier_id] = []
+        supplier_tags_map[supplier_id].append(
+            TagBrief(id=tag_id, name=tag_name, color=tag_color)
+        )
+
+    # 构建响应
     suppliers = []
-    for row in result.all():
+    for row in rows:
         supplier = row[0]
         glossary_count = row[1]
+        domain_count = row[2]
+        contact_count = row[3]
 
-        # 获取域名数量
-        domain_count_result = await db.execute(
-            select(func.count(SupplierDomain.id))
-            .where(SupplierDomain.supplier_id == supplier.id)
-        )
-        domain_count = domain_count_result.scalar() or 0
         # 至少显示1（主域名）
-        domain_count = max(domain_count, 1) if supplier.email_domain else domain_count
-
-        # 获取联系人数量
-        contact_count_result = await db.execute(
-            select(func.count(SupplierContact.id))
-            .where(SupplierContact.supplier_id == supplier.id)
-        )
-        contact_count = contact_count_result.scalar() or 0
-
-        # 获取标签
-        tags_result = await db.execute(
-            select(SupplierTag)
-            .join(supplier_tag_mappings, SupplierTag.id == supplier_tag_mappings.c.tag_id)
-            .where(supplier_tag_mappings.c.supplier_id == supplier.id)
-        )
-        tags = [
-            TagBrief(id=t.id, name=t.name, color=t.color)
-            for t in tags_result.scalars().all()
-        ]
+        if supplier.email_domain and domain_count == 0:
+            domain_count = 1
 
         suppliers.append(SupplierResponse(
             id=supplier.id,
@@ -150,12 +205,101 @@ async def get_suppliers(
             category_analyzed_at=supplier.category_analyzed_at,
             domain_count=domain_count,
             contact_count=contact_count,
-            tags=tags,
+            tags=supplier_tags_map.get(supplier.id, []),
             created_at=supplier.created_at
         ))
 
     return suppliers
 
+
+# ============ 标签管理 API（静态路由，必须在动态路由之前）============
+
+@router.get("/tags", response_model=List[SupplierTagResponse])
+async def get_supplier_tags(
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """获取所有供应商标签"""
+    result = await db.execute(
+        select(SupplierTag)
+        .where(SupplierTag.account_id == account.id)
+        .order_by(SupplierTag.name)
+    )
+    return result.scalars().all()
+
+
+@router.post("/tags", response_model=SupplierTagResponse)
+async def create_supplier_tag(
+    tag_data: SupplierTagCreate,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """创建供应商标签"""
+    tag = SupplierTag(
+        account_id=account.id,
+        name=tag_data.name,
+        color=tag_data.color,
+        description=tag_data.description
+    )
+    db.add(tag)
+    await db.commit()
+    await db.refresh(tag)
+    return tag
+
+
+@router.put("/tags/{tag_id}", response_model=SupplierTagResponse)
+async def update_supplier_tag(
+    tag_id: int,
+    tag_data: SupplierTagUpdate,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """更新供应商标签"""
+    result = await db.execute(
+        select(SupplierTag).where(
+            SupplierTag.id == tag_id,
+            SupplierTag.account_id == account.id
+        )
+    )
+    tag = result.scalar_one_or_none()
+    if not tag:
+        raise HTTPException(status_code=404, detail="标签不存在")
+
+    if tag_data.name is not None:
+        tag.name = tag_data.name
+    if tag_data.color is not None:
+        tag.color = tag_data.color
+    if tag_data.description is not None:
+        tag.description = tag_data.description
+
+    await db.commit()
+    await db.refresh(tag)
+    return tag
+
+
+@router.delete("/tags/{tag_id}")
+async def delete_supplier_tag(
+    tag_id: int,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """删除供应商标签"""
+    result = await db.execute(
+        select(SupplierTag).where(
+            SupplierTag.id == tag_id,
+            SupplierTag.account_id == account.id
+        )
+    )
+    tag = result.scalar_one_or_none()
+    if not tag:
+        raise HTTPException(status_code=404, detail="标签不存在")
+
+    await db.delete(tag)
+    await db.commit()
+    return {"message": "标签已删除"}
+
+
+# ============ 动态路由（/{supplier_id} 开头）============
 
 @router.get("/{supplier_id}", response_model=SupplierResponse)
 async def get_supplier(
@@ -676,29 +820,6 @@ class SupplierContactResponse(BaseModel):
         from_attributes = True
 
 
-class SupplierTagCreate(BaseModel):
-    name: str
-    color: str = "#409EFF"
-    description: Optional[str] = None
-
-
-class SupplierTagUpdate(BaseModel):
-    name: Optional[str] = None
-    color: Optional[str] = None
-    description: Optional[str] = None
-
-
-class SupplierTagResponse(BaseModel):
-    id: int
-    name: str
-    color: str
-    description: Optional[str]
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
 class SupplierCategoryRequest(BaseModel):
     category: str
 
@@ -970,92 +1091,7 @@ async def delete_supplier_contact(
     return {"message": "联系人已删除"}
 
 
-# ============ 标签管理 API ============
-
-@router.get("/tags", response_model=List[SupplierTagResponse])
-async def get_supplier_tags(
-    account: EmailAccount = Depends(get_current_account),
-    db: AsyncSession = Depends(get_db)
-):
-    """获取所有供应商标签"""
-    result = await db.execute(
-        select(SupplierTag)
-        .where(SupplierTag.account_id == account.id)
-        .order_by(SupplierTag.name)
-    )
-    return result.scalars().all()
-
-
-@router.post("/tags", response_model=SupplierTagResponse)
-async def create_supplier_tag(
-    tag_data: SupplierTagCreate,
-    account: EmailAccount = Depends(get_current_account),
-    db: AsyncSession = Depends(get_db)
-):
-    """创建供应商标签"""
-    tag = SupplierTag(
-        account_id=account.id,
-        name=tag_data.name,
-        color=tag_data.color,
-        description=tag_data.description
-    )
-    db.add(tag)
-    await db.commit()
-    await db.refresh(tag)
-    return tag
-
-
-@router.put("/tags/{tag_id}", response_model=SupplierTagResponse)
-async def update_supplier_tag(
-    tag_id: int,
-    tag_data: SupplierTagUpdate,
-    account: EmailAccount = Depends(get_current_account),
-    db: AsyncSession = Depends(get_db)
-):
-    """更新供应商标签"""
-    result = await db.execute(
-        select(SupplierTag).where(
-            SupplierTag.id == tag_id,
-            SupplierTag.account_id == account.id
-        )
-    )
-    tag = result.scalar_one_or_none()
-    if not tag:
-        raise HTTPException(status_code=404, detail="标签不存在")
-
-    if tag_data.name is not None:
-        tag.name = tag_data.name
-    if tag_data.color is not None:
-        tag.color = tag_data.color
-    if tag_data.description is not None:
-        tag.description = tag_data.description
-
-    await db.commit()
-    await db.refresh(tag)
-    return tag
-
-
-@router.delete("/tags/{tag_id}")
-async def delete_supplier_tag(
-    tag_id: int,
-    account: EmailAccount = Depends(get_current_account),
-    db: AsyncSession = Depends(get_db)
-):
-    """删除供应商标签"""
-    result = await db.execute(
-        select(SupplierTag).where(
-            SupplierTag.id == tag_id,
-            SupplierTag.account_id == account.id
-        )
-    )
-    tag = result.scalar_one_or_none()
-    if not tag:
-        raise HTTPException(status_code=404, detail="标签不存在")
-
-    await db.delete(tag)
-    await db.commit()
-    return {"message": "标签已删除"}
-
+# ============ 供应商标签分配 API ============
 
 @router.get("/{supplier_id}/tags", response_model=List[SupplierTagResponse])
 async def get_supplier_assigned_tags(

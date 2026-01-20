@@ -23,6 +23,12 @@ from services.portal_integration import portal_integration_service
 
 router = APIRouter(prefix="/api/task-extractions", tags=["task-extractions"])
 
+# Redis 连接（用于队列状态查询）
+import redis
+import os
+REDIS_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/1")
+redis_client = redis.from_url(REDIS_URL)
+
 
 # ==================== Pydantic 模型 ====================
 
@@ -47,6 +53,37 @@ class CreateTaskRequest(BaseModel):
 
 # Portal 服务令牌（用于服务间通信）
 PORTAL_SERVICE_TOKEN = os.getenv('PORTAL_SERVICE_TOKEN', 'jzc-portal-integration-token-2025')
+
+
+def get_queue_status():
+    """获取 Celery 队列状态"""
+    try:
+        # 获取 email_translate 队列长度
+        queue_length = redis_client.llen("email_translate")
+
+        # 获取正在处理的任务数（活跃任务）
+        # Celery 会在 unacked 哈希中记录正在处理的任务
+        active_count = 0
+        try:
+            # 尝试获取活跃任务数
+            active_keys = redis_client.keys("unacked*")
+            for key in active_keys:
+                active_count += redis_client.hlen(key)
+        except Exception:
+            pass
+
+        return {
+            "queue_length": queue_length,
+            "active_tasks": active_count,
+            "total_pending": queue_length + active_count
+        }
+    except Exception as e:
+        return {
+            "queue_length": 0,
+            "active_tasks": 0,
+            "total_pending": 0,
+            "error": str(e)
+        }
 
 
 async def verify_portal_token(x_portal_token: Optional[str] = Header(None)):
@@ -320,9 +357,10 @@ async def portal_list_emails(
 ):
     """
     Portal 集成：获取邮件列表
-    使用服务令牌认证，返回所有账户的已翻译邮件
+    使用服务令牌认证，返回所有账户的邮件（包括待翻译和翻译失败的）
     """
-    query = select(Email).where(Email.translation_status == "completed")
+    # 返回 completed, failed, none 状态的邮件，排除 pending/processing（正在翻译中）
+    query = select(Email).where(Email.translation_status.in_(["completed", "failed", "none"]))
 
     if keyword:
         query = query.where(
@@ -418,6 +456,23 @@ async def portal_get_email(
     }
 
 
+@router.get("/portal/queue-status")
+async def portal_get_queue_status(
+    _: bool = Depends(verify_portal_token)
+):
+    """
+    Portal 集成：获取任务提取队列状态
+
+    Returns:
+        {
+            "queue_length": 5,        # 队列中等待的任务数
+            "active_tasks": 2,        # 正在处理的任务数
+            "total_pending": 7        # 总待处理数
+        }
+    """
+    return get_queue_status()
+
+
 @router.get("/portal/emails/{email_id}/extraction")
 async def portal_get_extraction(
     email_id: int,
@@ -425,7 +480,7 @@ async def portal_get_extraction(
     _: bool = Depends(verify_portal_token)
 ):
     """
-    Portal 集成：获取邮件的预提取任务信息
+    Portal 集成：获取邮件的预提取任务信息（含队列状态）
     """
     # 验证邮件存在
     result = await db.execute(select(Email).where(Email.id == email_id))
@@ -440,25 +495,41 @@ async def portal_get_extraction(
     )
     extraction = result.scalar_one_or_none()
 
+    # 获取队列状态
+    queue_status = get_queue_status()
+
     if not extraction:
         return {
             "email_id": email_id,
             "status": "none",
             "message": "尚未提取任务信息",
-            "data": None
+            "data": None,
+            "queue_status": queue_status
         }
+
+    # 对于 processing 状态，估算队列位置
+    queue_position = None
+    if extraction.status == "processing":
+        # 正在处理中，位置为 1
+        queue_position = 1
+    elif extraction.status == "triggered":
+        # 已触发但未开始，位置为队列长度
+        queue_position = queue_status.get("queue_length", 0) + 1
 
     return {
         "email_id": email_id,
         "status": extraction.status,
         "data": extraction.to_dict() if extraction.status == "completed" else None,
-        "error_message": extraction.error_message if extraction.status == "failed" else None
+        "error_message": extraction.error_message if extraction.status == "failed" else None,
+        "queue_status": queue_status,
+        "queue_position": queue_position
     }
 
 
 @router.post("/portal/sync")
 async def portal_sync_emails(
     since_days: int = Query(7, description="同步最近多少天的邮件"),
+    force_full_sync: bool = Query(False, description="强制完整同步，忽略增量优化"),
     db: AsyncSession = Depends(get_db),
     _: bool = Depends(verify_portal_token)
 ):
@@ -495,16 +566,116 @@ async def portal_sync_emails(
             # 调用邮件同步的后台任务
             from routers.emails import fetch_emails_background
             import asyncio
-            asyncio.create_task(fetch_emails_background(account, since_days))
+            asyncio.create_task(fetch_emails_background(account, since_days, force_full_sync))
             synced_count += 1
         except Exception as e:
             print(f"[Portal Sync] Failed to sync account {account.email}: {e}")
 
     return {
         "success": True,
-        "message": f"已触发 {synced_count} 个邮箱账户的同步",
+        "message": f"已触发 {synced_count} 个邮箱账户的{'强制完整' if force_full_sync else '增量'}同步",
         "synced_accounts": synced_count,
-        "since_days": since_days
+        "since_days": since_days,
+        "force_full_sync": force_full_sync
+    }
+
+
+@router.post("/portal/emails/{email_id}/translate")
+async def portal_translate_email(
+    email_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: bool = Depends(verify_portal_token)
+):
+    """
+    Portal 集成：现场翻译邮件
+
+    用于翻译失败的邮件，在导入任务时现场翻译
+    检测语言，如果不是中文则翻译
+    """
+    from services.translate_service import TranslateService
+    from config import get_settings
+    from sqlalchemy import update
+
+    settings = get_settings()
+
+    # 获取邮件
+    result = await db.execute(select(Email).where(Email.id == email_id))
+    email = result.scalar_one_or_none()
+
+    if not email:
+        raise HTTPException(status_code=404, detail="邮件不存在")
+
+    # 如果已经翻译完成且有翻译内容，直接返回
+    if email.translation_status == "completed" and email.subject_translated:
+        return {
+            "success": True,
+            "message": "邮件已翻译",
+            "subject_translated": email.subject_translated,
+            "body_translated": email.body_translated,
+            "language_detected": email.language_detected
+        }
+
+    # 检测语言并翻译
+    text_to_check = email.subject_original or email.body_original or ""
+
+    # 简单的中文检测：如果包含大量中文字符，认为是中文
+    chinese_chars = sum(1 for c in text_to_check if '\u4e00' <= c <= '\u9fff')
+    is_chinese = chinese_chars > len(text_to_check) * 0.3 if text_to_check else False
+
+    if is_chinese:
+        # 中文邮件，直接使用原文
+        subject_translated = email.subject_original
+        body_translated = email.body_original
+        language_detected = "zh"
+    else:
+        # 非中文，调用翻译服务
+        try:
+            service = TranslateService(
+                vllm_base_url=settings.vllm_base_url,
+                vllm_model=settings.vllm_model,
+                vllm_api_key=settings.vllm_api_key,
+            )
+
+            # 使用智能路由翻译（标题和正文一起翻译提高上下文理解）
+            result = service.translate_with_smart_routing(
+                text=email.body_original or "",
+                subject=email.subject_original or "",
+                target_lang="zh",
+                translate_subject=True
+            )
+
+            subject_translated = result.get("subject_translated", email.subject_original or "")
+            body_translated = result.get("translated_text", email.body_original or "")
+            language_detected = "en"  # 假设是英文
+
+            print(f"[Portal Translate] Email {email_id} translated successfully")
+        except Exception as e:
+            # 翻译失败，使用原文作为兜底
+            print(f"[Portal Translate] Translation failed for email {email_id}: {e}")
+            subject_translated = email.subject_original
+            body_translated = email.body_original
+            language_detected = "unknown"
+
+    # 更新数据库
+    await db.execute(
+        update(Email)
+        .where(Email.id == email_id)
+        .values(
+            subject_translated=subject_translated,
+            body_translated=body_translated,
+            language_detected=language_detected,
+            is_translated=True,  # 修复：同时更新 is_translated 标志
+            translation_status="completed"
+        )
+    )
+    await db.commit()
+
+    return {
+        "success": True,
+        "message": "翻译完成" if not is_chinese else "中文邮件，无需翻译",
+        "subject_translated": subject_translated,
+        "body_translated": body_translated,
+        "language_detected": language_detected
     }
 
 
@@ -854,4 +1025,44 @@ async def get_import_status(
         "matched_project_name": extraction.matched_project_name,
         "should_create_project": extraction.should_create_project,
         "suggested_project_name": extraction.suggested_project_name
+    }
+
+
+@router.get("/portal/emails/{email_id}/attachments")
+async def portal_get_email_attachments(
+    email_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: bool = Depends(verify_portal_token)
+):
+    """
+    Portal 集成：获取邮件附件列表
+
+    使用服务令牌认证，返回指定邮件的附件列表
+    """
+    from database.models import Attachment
+
+    # 验证邮件存在
+    result = await db.execute(select(Email).where(Email.id == email_id))
+    email = result.scalar_one_or_none()
+
+    if not email:
+        raise HTTPException(status_code=404, detail="邮件不存在")
+
+    # 获取附件列表
+    result = await db.execute(
+        select(Attachment).where(Attachment.email_id == email_id)
+    )
+    attachments = result.scalars().all()
+
+    return {
+        "attachments": [
+            {
+                "id": att.id,
+                "filename": att.filename,
+                "content_type": att.mime_type,
+                "size": att.file_size,
+                "file_path": att.file_path
+            }
+            for att in attachments
+        ]
     }

@@ -14,6 +14,7 @@ export const useUserStore = defineStore('user', () => {
   const autoFetchTimer = ref(null)  // 自动拉取定时器
   const isFetching = ref(false)  // 是否正在拉取
   const selectedEmailIds = ref([])  // 当前选中的邮件ID列表
+  const autoFetchInitialized = ref(false)  // 自动收件是否已初始化
 
   // 布局设置：list（列表）, right（右侧预览）, bottom（底部预览）
   const layoutMode = ref(localStorage.getItem(getStorageKey('layoutMode')) || 'list')
@@ -146,7 +147,13 @@ export const useUserStore = defineStore('user', () => {
   function startAutoFetch() {
     // 未登录时不启动
     if (!isLoggedIn.value) {
-      console.log('未登录，跳过自动收件')
+      console.log('[AutoFetch] 未登录，跳过自动收件')
+      return
+    }
+
+    // 防止重复初始化
+    if (autoFetchInitialized.value && autoFetchTimer.value) {
+      console.log('[AutoFetch] 已初始化，跳过重复启动')
       return
     }
 
@@ -162,7 +169,8 @@ export const useUserStore = defineStore('user', () => {
       autoFetchEmails()
     }, AUTO_FETCH_INTERVAL)
 
-    console.log(`自动收件已启动，间隔 ${AUTO_FETCH_INTERVAL / 1000} 秒`)
+    autoFetchInitialized.value = true
+    console.log(`[AutoFetch] 自动收件已启动，间隔 ${AUTO_FETCH_INTERVAL / 1000} 秒`)
   }
 
   // 停止自动拉取
@@ -170,8 +178,9 @@ export const useUserStore = defineStore('user', () => {
     if (autoFetchTimer.value) {
       clearInterval(autoFetchTimer.value)
       autoFetchTimer.value = null
-      console.log('自动收件已停止')
     }
+    autoFetchInitialized.value = false
+    console.log('[AutoFetch] 自动收件已停止')
   }
 
   // 设置选中的邮件ID

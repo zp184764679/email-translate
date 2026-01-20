@@ -14,15 +14,19 @@
     "@fullcalendar/interaction": "^6.1.19",
     "@fullcalendar/timegrid": "^6.1.19",
     "@fullcalendar/vue3": "^6.1.19",
+    "@wangeditor/editor": "^5.1.23",
+    "@wangeditor/editor-for-vue": "^5.1.12",
     "axios": "^1.6.5",
     "dayjs": "^1.11.10",
     "dompurify": "^3.3.0",
     "echarts": "^6.0.0",
     "element-plus": "^2.5.0",
+    "mammoth": "^1.11.0",
     "pinia": "^2.1.7",
     "vue": "^3.4.0",
     "vue-echarts": "^8.0.1",
-    "vue-router": "^4.2.5"
+    "vue-router": "^4.2.5",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.0",

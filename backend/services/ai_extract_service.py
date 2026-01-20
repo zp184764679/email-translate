@@ -155,10 +155,16 @@ async def extract_email_info(
     )
 
     try:
+        # 构建请求头（包含 API Key 认证）
+        headers = {"Content-Type": "application/json"}
+        if settings.vllm_api_key:
+            headers["Authorization"] = f"Bearer {settings.vllm_api_key}"
+
         # 调用 vLLM API（增加超时时间）
         async with httpx.AsyncClient(timeout=90.0) as client:
             response = await client.post(
                 f"{settings.vllm_base_url}/v1/chat/completions",
+                headers=headers,
                 json={
                     "model": settings.vllm_model,
                     "messages": [{"role": "user", "content": prompt}],

@@ -2,11 +2,10 @@
 翻译 API 用量统计服务
 
 支持的翻译引擎：
-- vllm: 服务器大模型（主力引擎，无限制，不统计）
-- claude: Claude API（按 token 计费，无免费额度，统计用于成本追踪）
+- vllm: 服务器本地大模型（唯一引擎，免费，无限制）
 
 功能：
-- 记录每次翻译的字符数/token数
+- 记录每次翻译的字符数（可选，用于统计分析）
 - 按月统计用量
 """
 
@@ -21,14 +20,12 @@ class UsageService:
 
     # 各引擎免费额度配置（字符/月）
     PROVIDER_QUOTAS = {
-        'vllm': -1,             # 服务器模型：无限制（-1 表示不限制，主力引擎）
-        'claude': 0,            # Claude：无免费额度，按 token 计费
+        'vllm': -1,             # 服务器模型：无限制（-1 表示不限制，唯一引擎）
     }
 
     # 各引擎显示名称
     PROVIDER_NAMES = {
         'vllm': '服务器模型 (vLLM)',
-        'claude': 'Claude API',
     }
 
     # 警告阈值：使用超过 80% 时警告
@@ -67,7 +64,7 @@ class UsageService:
         记录一次翻译用量
 
         Args:
-            provider: 翻译引擎 (vllm, claude)
+            provider: 翻译引擎 (vllm)
             char_count: 本次翻译的字符数
 
         Returns:
@@ -120,8 +117,8 @@ class UsageService:
                 if row:
                     total_chars, free_quota, is_disabled = row
 
-                    # Claude 没有免费额度，只统计不限制
-                    if provider == 'claude' or free_quota <= 0:
+                    # 无限制额度的引擎（如 vLLM）只统计不限制
+                    if free_quota <= 0:
                         await conn.commit()
                         return {
                             'success': True,
@@ -130,7 +127,7 @@ class UsageService:
                             'usage_percent': 0,
                             'warning': None,
                             'is_disabled': False,
-                            'message': f'{provider_name} 按量计费，无额度限制'
+                            'message': f'{provider_name} 无额度限制'
                         }
 
                     usage_percent = total_chars / free_quota
@@ -190,7 +187,7 @@ class UsageService:
                 'is_disabled': bool      # 是否已禁用
             }
         """
-        # vLLM 和 Claude 始终可用
+        # vLLM 本地模型始终可用且无限制
         if provider == 'vllm':
             return {
                 'available': True,
@@ -200,17 +197,6 @@ class UsageService:
                 'usage_percent': 0,
                 'is_disabled': False,
                 'message': '服务器模型无限制'
-            }
-
-        if provider == 'claude':
-            return {
-                'available': True,
-                'total_chars': 0,
-                'free_quota': 0,
-                'remaining': 0,
-                'usage_percent': 0,
-                'is_disabled': False,
-                'message': 'Claude API 按量计费'
             }
 
         year_month = self._get_current_month()
@@ -305,7 +291,7 @@ class UsageService:
 
                 for row in rows:
                     prov, total_chars, total_requests, free_quota, is_disabled = row
-                    has_limit = prov not in ['vllm', 'claude'] and free_quota > 0
+                    has_limit = prov != 'vllm' and free_quota > 0
                     remaining = max(0, free_quota - total_chars) if has_limit else -1
                     usage_percent = (total_chars / free_quota * 100) if has_limit else 0
 
@@ -326,7 +312,7 @@ class UsageService:
                 used_providers = set(p['provider'] for p in providers)
                 for prov in all_providers - used_providers:
                     quota = self._get_provider_quota(prov)
-                    has_limit = prov not in ['vllm', 'claude'] and quota > 0
+                    has_limit = prov != 'vllm' and quota > 0
                     providers.append({
                         'provider': prov,
                         'provider_name': self._get_provider_name(prov),

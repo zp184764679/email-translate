@@ -133,14 +133,6 @@ const api = {
     })
   },
 
-  async createBatchTranslation(emailIds) {
-    return instance.post('/translate/batch', { email_ids: emailIds })
-  },
-
-  async batchTranslateAll() {
-    return instance.post('/translate/batch-all', {}, { timeout: 300000 })
-  },
-
   async getTranslationUsage() {
     return instance.get('/translate/usage')
   },
@@ -183,7 +175,7 @@ const api = {
     })
   },
 
-  async submitDraft(id, { approverId, approverGroupId, saveAsDefault = false }) {
+  async submitDraft(id, { approverId, approverGroupId, saveAsDefault = false } = {}) {
     return instance.post(`/drafts/${id}/send`, {
       approver_id: approverId || null,
       approver_group_id: approverGroupId || null,
@@ -316,8 +308,48 @@ const api = {
     return instance.post('/emails/batch/unflag', { email_ids: emailIds })
   },
 
-  async sendEmail(data) {
+  async sendEmail(data, attachments = []) {
+    // 如果有附件，使用 FormData 发送到专用端点
+    if (attachments && attachments.length > 0) {
+      const formData = new FormData()
+      formData.append('to', data.to)
+      formData.append('subject', data.subject)
+      formData.append('body', data.body)
+      if (data.cc) formData.append('cc', data.cc)
+
+      // 添加所有附件
+      for (const file of attachments) {
+        formData.append('attachments', file, file.name)
+      }
+
+      return instance.post('/emails/send-with-attachments', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      })
+    }
+    // 无附件时使用普通 JSON
     return instance.post('/emails/send', data)
+  },
+
+  // 附件打包下载（ZIP）
+  async downloadAllAttachments(emailId) {
+    const response = await instance.get(
+      `/emails/${emailId}/attachments/download-all`,
+      { responseType: 'blob' }
+    )
+    // 从 Content-Disposition 获取文件名，或使用默认
+    const contentDisposition = response.headers?.['content-disposition'] || ''
+    let filename = '附件.zip'
+    const match = contentDisposition.match(/filename="?([^"]+)"?/)
+    if (match) filename = decodeURIComponent(match[1])
+
+    const url = window.URL.createObjectURL(new Blob([response]))
+    const link = document.createElement('a')
+    link.href = url
+    link.setAttribute('download', filename)
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    window.URL.revokeObjectURL(url)
   },
 
   // 附件下载
@@ -344,6 +376,18 @@ const api = {
       { responseType: 'blob' }
     )
     return window.URL.createObjectURL(new Blob([response]))
+  },
+
+  // ========== 附件管理 ==========
+
+  // 附件搜索
+  async searchAttachments(params = {}) {
+    return instance.get('/attachments/search', { params })
+  },
+
+  // 附件存储统计
+  async getAttachmentStats() {
+    return instance.get('/attachments/stats')
   },
 
   // 邮件导出
@@ -461,6 +505,95 @@ const api = {
 
   async removeTagFromSupplier(supplierId, tagId) {
     return instance.delete(`/suppliers/${supplierId}/tags/${tagId}`)
+  },
+
+  // ============ Customers - 客户管理 ============
+  async getCustomers(params = {}) {
+    return instance.get('/customers', { params })
+  },
+
+  async getCustomer(id) {
+    return instance.get(`/customers/${id}`)
+  },
+
+  async createCustomer(data) {
+    return instance.post('/customers', data)
+  },
+
+  async updateCustomer(id, data) {
+    return instance.put(`/customers/${id}`, data)
+  },
+
+  async deleteCustomer(id) {
+    return instance.delete(`/customers/${id}`)
+  },
+
+  // Customer Category - 客户分类
+  async getCustomerCategoryStats() {
+    return instance.get('/customers/category-stats')
+  },
+
+  async updateCustomerCategory(customerId, category) {
+    return instance.put(`/customers/${customerId}/category`, { category })
+  },
+
+  // Customer Domains - 客户多域名管理
+  async getCustomerDomains(customerId) {
+    return instance.get(`/customers/${customerId}/domains`)
+  },
+
+  async addCustomerDomain(customerId, data) {
+    return instance.post(`/customers/${customerId}/domains`, data)
+  },
+
+  async deleteCustomerDomain(customerId, domainId) {
+    return instance.delete(`/customers/${customerId}/domains/${domainId}`)
+  },
+
+  // Customer Contacts - 客户联系人管理
+  async getCustomerContacts(customerId) {
+    return instance.get(`/customers/${customerId}/contacts`)
+  },
+
+  async addCustomerContact(customerId, data) {
+    return instance.post(`/customers/${customerId}/contacts`, data)
+  },
+
+  async updateCustomerContact(customerId, contactId, data) {
+    return instance.put(`/customers/${customerId}/contacts/${contactId}`, data)
+  },
+
+  async deleteCustomerContact(customerId, contactId) {
+    return instance.delete(`/customers/${customerId}/contacts/${contactId}`)
+  },
+
+  // Customer Tags - 客户标签管理
+  async getCustomerTags() {
+    return instance.get('/customers/tags')
+  },
+
+  async createCustomerTag(data) {
+    return instance.post('/customers/tags', data)
+  },
+
+  async updateCustomerTag(tagId, data) {
+    return instance.put(`/customers/tags/${tagId}`, data)
+  },
+
+  async deleteCustomerTag(tagId) {
+    return instance.delete(`/customers/tags/${tagId}`)
+  },
+
+  async getCustomerTagMappings(customerId) {
+    return instance.get(`/customers/${customerId}/tags`)
+  },
+
+  async addTagToCustomer(customerId, tagId) {
+    return instance.post(`/customers/${customerId}/tags/${tagId}`)
+  },
+
+  async removeTagFromCustomer(customerId, tagId) {
+    return instance.delete(`/customers/${customerId}/tags/${tagId}`)
   },
 
   // Signatures
@@ -809,7 +942,7 @@ const api = {
 
   // 批量取消归档
   async batchUnarchiveEmails(emailIds) {
-    return instance.post('/archive/batch/unarchive', emailIds)
+    return instance.post('/archive/batch/unarchive', { email_ids: emailIds })
   },
 
   // 获取归档邮件列表
@@ -978,8 +1111,11 @@ const api = {
 
   // 为自定义内容生成回复建议
   async generateCustomReplySuggestions(subject, body, sender = '', replyType = 'general') {
-    return instance.post('/ai/reply/custom/suggest', null, {
-      params: { subject, body, sender, reply_type: replyType }
+    return instance.post('/ai/reply/custom/suggest', {
+      subject,
+      body,
+      sender,
+      reply_type: replyType
     })
   },
 
@@ -987,8 +1123,9 @@ const api = {
 
   // 检查文本的语法和拼写
   async checkGrammar(text, language = 'zh') {
-    return instance.post('/ai/grammar/check', null, {
-      params: { text, language }
+    return instance.post('/ai/grammar/check', {
+      text,
+      language
     })
   }
 }

@@ -17,11 +17,26 @@ const router = useRouter()
 const userStore = useUserStore()
 const emailStore = useEmailStore()
 
+// 事件监听器管理 - 使用 Map 存储所有监听器以确保正确清理
+const windowEventListeners = new Map()
+
+// 安全地添加 window 事件监听器（自动追踪以便清理）
+function addWindowEventListener(event, handler) {
+  window.addEventListener(event, handler)
+  if (!windowEventListeners.has(event)) {
+    windowEventListeners.set(event, [])
+  }
+  windowEventListeners.get(event).push(handler)
+}
+
 // 处理认证过期事件
 function handleAuthExpired(event) {
   const { message } = event.detail || {}
 
-  // 通过 store 正确清理状态（会停止定时器等）
+  // 停止自动收件
+  userStore.stopAutoFetch()
+
+  // 通过 store 正确清理状态
   userStore.logout()
 
   // 断开 WebSocket
@@ -50,16 +65,19 @@ function showDesktopNotification(title, body) {
 }
 
 onMounted(() => {
-  // 监听认证过期事件
-  window.addEventListener('auth:expired', handleAuthExpired)
+  // 监听认证过期事件（使用追踪函数以确保清理）
+  addWindowEventListener('auth:expired', handleAuthExpired)
 
   // 请求桌面通知权限
   if ('Notification' in window && Notification.permission === 'default') {
     Notification.requestPermission()
   }
 
-  // 初始化 WebSocket 连接
-  initWebSocket()
+  // 初始化 WebSocket 连接和自动收件（只在已登录状态下）
+  if (userStore.isLoggedIn) {
+    initWebSocket()
+    userStore.startAutoFetch()
+  }
 })
 
 // WebSocket 清理
@@ -268,11 +286,20 @@ function initWebSocket() {
 }
 
 onUnmounted(() => {
-  // 清理认证过期事件监听器
-  window.removeEventListener('auth:expired', handleAuthExpired)
+  // 清理所有 window 事件监听器（使用 Map 确保完整清理）
+  windowEventListeners.forEach((handlers, event) => {
+    handlers.forEach(handler => {
+      window.removeEventListener(event, handler)
+    })
+  })
+  windowEventListeners.clear()
+
+  // 停止自动收件
+  userStore.stopAutoFetch()
 
   // 清理 WebSocket 监听器
   wsUnsubscribes.forEach(unsub => unsub())
+  wsUnsubscribes.length = 0  // 清空数组
   wsManager.disconnect()
 })
 </script>

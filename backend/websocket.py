@@ -5,7 +5,7 @@ WebSocket 连接管理
 """
 from fastapi import WebSocket, WebSocketDisconnect
 from typing import Dict, List, Optional, Tuple
-import json
+import base64
 import asyncio
 from datetime import datetime
 import jwt
@@ -40,6 +40,46 @@ def verify_websocket_token(token: str) -> Tuple[bool, Optional[int], Optional[st
         return False, None, f"Token verification failed: {str(e)}"
 
 
+def extract_token_from_subprotocol(websocket: WebSocket) -> Optional[str]:
+    """
+    从 WebSocket subprotocol 中提取 token
+
+    客户端使用 Sec-WebSocket-Protocol header 传递 token：
+    格式：auth.<base64-encoded-token>
+
+    这比 URL query 参数更安全，因为：
+    1. 不会出现在 URL 或浏览器历史中
+    2. 不会被记录在 HTTP 访问日志中
+    3. 不会被缓存
+
+    Args:
+        websocket: WebSocket 连接
+
+    Returns:
+        提取的 JWT token，如果未找到则返回 None
+    """
+    # 获取请求的 subprotocols
+    subprotocols = websocket.scope.get("subprotocols", [])
+
+    for protocol in subprotocols:
+        if protocol.startswith("auth."):
+            try:
+                # 提取 base64 编码的 token
+                encoded_token = protocol[5:]  # 移除 "auth." 前缀
+                # 补全 base64 padding
+                padding = 4 - len(encoded_token) % 4
+                if padding != 4:
+                    encoded_token += "=" * padding
+                # 解码
+                token = base64.b64decode(encoded_token).decode('utf-8')
+                return token
+            except Exception as e:
+                print(f"[WebSocket] Failed to decode token from subprotocol: {e}")
+                return None
+
+    return None
+
+
 class ConnectionManager:
     """WebSocket 连接管理器"""
 
@@ -51,15 +91,17 @@ class ConnectionManager:
         # 心跳间隔（秒）
         self.heartbeat_interval = 30
 
-    async def connect(self, websocket: WebSocket, account_id: Optional[int] = None):
+    async def connect(self, websocket: WebSocket, account_id: Optional[int] = None, subprotocol: Optional[str] = None):
         """
         接受 WebSocket 连接
 
         Args:
             websocket: WebSocket 连接
             account_id: 账户ID（用于按账户推送）
+            subprotocol: 接受的 subprotocol（用于 token 认证响应）
         """
-        await websocket.accept()
+        # 如果使用了 subprotocol 认证，需要在响应中确认
+        await websocket.accept(subprotocol=subprotocol)
 
         if account_id:
             if account_id not in self.active_connections:
@@ -182,18 +224,26 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None, 
     """
     WebSocket 端点处理函数（带 JWT 认证）
 
+    支持两种认证方式（优先级从高到低）：
+    1. Subprotocol: Sec-WebSocket-Protocol header 中的 auth.<base64-token>（推荐，更安全）
+    2. Query 参数: ?token=xxx（兼容旧版客户端）
+
     Args:
         websocket: WebSocket 连接
-        token: JWT token（优先使用）
-        account_id: 账户ID（兼容旧版，但会被 token 覆盖）
+        token: JWT token（query 参数，兼容旧版）
+        account_id: 账户ID（已弃用，不再使用）
 
-    Note:
-        - 如果提供了 token，会验证并从中提取 account_id
-        - 如果只提供 account_id 但无 token，将被拒绝（安全考虑）
+    Security Note:
+        - Subprotocol 方式更安全，token 不会出现在 URL 或日志中
+        - Query 参数方式保留以兼容旧版客户端，建议尽快升级
     """
+    # 优先从 subprotocol 提取 token（更安全）
+    subprotocol_token = extract_token_from_subprotocol(websocket)
+    final_token = subprotocol_token or token
+
     # 验证 token
-    if token:
-        is_valid, verified_account_id, error = verify_websocket_token(token)
+    if final_token:
+        is_valid, verified_account_id, error = verify_websocket_token(final_token)
         if not is_valid:
             await websocket.close(code=4001, reason=error or "Authentication failed")
             return
@@ -203,7 +253,17 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None, 
         await websocket.close(code=4001, reason="Token is required")
         return
 
-    await manager.connect(websocket, account_id)
+    # 如果使用了 subprotocol 认证，需要在响应中确认该 protocol
+    accepted_protocol = None
+    if subprotocol_token:
+        # 找到客户端请求的 auth protocol 并确认
+        subprotocols = websocket.scope.get("subprotocols", [])
+        for protocol in subprotocols:
+            if protocol.startswith("auth."):
+                accepted_protocol = protocol
+                break
+
+    await manager.connect(websocket, account_id, subprotocol=accepted_protocol)
 
     try:
         while True:

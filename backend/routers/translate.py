@@ -113,43 +113,16 @@ async def save_to_cache(db: AsyncSession, text: str, translated: str, source_lan
     print(f"[Cache SAVE] Redis + MySQL, text={text[:30]}...")
 
 
-def get_translate_service(for_smart_routing: bool = False) -> TranslateService:
+def get_translate_service() -> TranslateService:
     """Get configured translation service instance
 
-    智能路由模式（smart_routing_enabled=True 或 for_smart_routing=True）：
-    创建包含所有引擎配置的服务，支持自动切换：
-    优先级：vLLM → Claude
-
-    单引擎模式：
-    根据 TRANSLATE_PROVIDER 使用单一引擎
+    使用本地 vLLM 大模型进行翻译（免费，数据本地化）
     """
-    if for_smart_routing or settings.smart_routing_enabled:
-        # 智能路由模式：配置所有可用的引擎
-        return TranslateService(
-            # 主要配置（决定 translate_text 使用哪个引擎）
-            provider=settings.translate_provider,
-            # API key (Claude)
-            api_key=settings.claude_api_key,
-            # vLLM 配置
-            vllm_base_url=settings.vllm_base_url,
-            vllm_model=settings.vllm_model,
-            # Claude 配置
-            claude_model=settings.claude_model,
-        )
-
-    # 单引擎模式
-    if settings.translate_provider == "claude":
-        return TranslateService(
-            api_key=settings.claude_api_key,
-            provider="claude",
-            claude_model=settings.claude_model
-        )
-    else:  # vllm (default)
-        return TranslateService(
-            provider="vllm",
-            vllm_base_url=settings.vllm_base_url,
-            vllm_model=settings.vllm_model
-        )
+    return TranslateService(
+        vllm_base_url=settings.vllm_base_url,
+        vllm_model=settings.vllm_model,
+        vllm_api_key=settings.vllm_api_key,
+    )
 
 
 # ============ Schemas ============
@@ -196,10 +169,9 @@ async def translate_text(
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """Translate text using smart routing (with cache)
+    """Translate text using vLLM (with cache)
 
-    智能路由优先级：vLLM → Claude
-    自动根据复杂度选择引擎
+    使用本地 vLLM 大模型进行翻译
     """
     # 速率限制：每用户每分钟 30 次
     translate_limiter.check(f"user:{account.id}")
@@ -220,23 +192,14 @@ async def translate_text(
     try:
         service = get_translate_service()
 
-        # 使用智能路由
-        if settings.smart_routing_enabled:
-            result = service.translate_with_smart_routing(
-                text=request.text,
-                target_lang=request.target_lang,
-                glossary=glossary
-            )
-            translated = result["translated_text"]
-            source_lang = result["provider_used"]
-        else:
-            translated = service.translate_text(
-                text=request.text,
-                target_lang=request.target_lang,
-                glossary=glossary,
-                context=request.context
-            )
-            source_lang = settings.translate_provider
+        # 使用 vLLM 本地模型翻译
+        result = service.translate_with_smart_routing(
+            text=request.text,
+            target_lang=request.target_lang,
+            glossary=glossary
+        )
+        translated = result["translated_text"]
+        source_lang = result.get("provider_used", "vllm")
 
         # 保存到缓存
         await save_to_cache(db, request.text, translated, None, request.target_lang)
@@ -252,9 +215,9 @@ async def translate_reply(
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """Translate Chinese reply to target language using smart routing (with cache)
+    """Translate Chinese reply to target language using vLLM (with cache)
 
-    智能路由优先级：vLLM → Claude
+    使用本地 vLLM 大模型进行翻译
     """
     if not settings.translate_enabled:
         return TranslateResponse(translated_text=request.text, source_lang="disabled")
@@ -272,24 +235,15 @@ async def translate_reply(
     try:
         service = get_translate_service()
 
-        # 使用智能路由
-        if settings.smart_routing_enabled:
-            result = service.translate_with_smart_routing(
-                text=request.text,
-                target_lang=request.target_lang,
-                glossary=glossary,
-                source_lang="zh"
-            )
-            translated = result["translated_text"]
-            source_lang = result["provider_used"]
-        else:
-            translated = service.translate_text(
-                text=request.text,
-                target_lang=request.target_lang,
-                glossary=glossary,
-                context=request.context
-            )
-            source_lang = settings.translate_provider
+        # 使用 vLLM 本地模型翻译
+        result = service.translate_with_smart_routing(
+            text=request.text,
+            target_lang=request.target_lang,
+            glossary=glossary,
+            source_lang="zh"
+        )
+        translated = result["translated_text"]
+        source_lang = result.get("provider_used", "vllm")
 
         # 保存到缓存
         await save_to_cache(db, request.text, translated, "zh", request.target_lang)
@@ -339,23 +293,51 @@ async def create_batch_translation(
 
     try:
         service = get_translate_service()
-        result = service.create_batch_translation(batch_data)
+        results = []
+        success_count = 0
 
-        for item in result.get("results", []):
-            if item.get("success"):
+        for item in batch_data:
+            try:
+                # 翻译主题
+                subject_translated = item.get("subject", "")
+                if subject_translated:
+                    result = service.translate_with_smart_routing(
+                        text=subject_translated,
+                        target_lang=item.get("target_lang", "zh"),
+                        source_lang=item.get("source_lang")
+                    )
+                    subject_translated = result.get("translated_text", subject_translated)
+
+                # 翻译正文
+                body_translated = item.get("body", "")
+                if body_translated:
+                    result = service.translate_with_smart_routing(
+                        text=body_translated,
+                        target_lang=item.get("target_lang", "zh"),
+                        source_lang=item.get("source_lang")
+                    )
+                    body_translated = result.get("translated_text", body_translated)
+
+                # 更新数据库
                 await crud.update_email_translation(
                     db,
-                    item["email_id"],
-                    item["subject_translated"],
-                    item["body_translated"]
+                    item["id"],
+                    subject_translated,
+                    body_translated
                 )
+
+                results.append({"email_id": item["id"], "success": True})
+                success_count += 1
+
+            except Exception as e:
+                print(f"[Batch] Failed to translate email {item['id']}: {e}")
+                results.append({"email_id": item["id"], "success": False, "error": str(e)})
 
         await db.commit()
 
-        success_count = len([r for r in result.get("results", []) if r.get("success")])
         return {
             "message": f"已翻译 {success_count}/{len(batch_data)} 封邮件",
-            "results": result
+            "results": results
         }
 
     except Exception as e:
@@ -429,21 +411,6 @@ async def batch_translate_all(
     }
 
 
-@router.get("/token-stats")
-async def get_token_stats(account: EmailAccount = Depends(get_current_account)):
-    """获取 Claude API Token 使用统计"""
-    stats = TranslateService.get_token_stats()
-    stats["provider"] = settings.translate_provider
-    return stats
-
-
-@router.post("/token-stats/reset")
-async def reset_token_stats(account: EmailAccount = Depends(get_current_account)):
-    """重置 Token 统计"""
-    TranslateService.reset_token_stats()
-    return {"message": "Token 统计已重置"}
-
-
 # ============ 翻译用量统计 ============
 @router.get("/usage-stats")
 async def get_usage_stats(
@@ -454,7 +421,7 @@ async def get_usage_stats(
     获取翻译 API 用量统计
 
     参数:
-    - provider: 可选，指定翻译引擎 (vllm, claude)
+    - provider: 可选，指定翻译引擎 (vllm)
                 不指定则返回所有引擎的用量
 
     返回:
@@ -486,7 +453,7 @@ async def get_provider_usage_stats(
     获取指定翻译引擎的用量统计
 
     路径参数:
-    - provider: 翻译引擎名称 (vllm, claude)
+    - provider: 翻译引擎名称 (vllm)
     """
     from services.usage_service import check_translation_quota
 
@@ -948,176 +915,6 @@ async def clear_cache(
     result = await db.execute(delete(TranslationCache))
     await db.commit()
     return {"message": f"已清空 {result.rowcount} 条缓存"}
-
-
-# ============ Claude Batch API 路由 ============
-@router.post("/batch/create")
-async def create_claude_batch(
-    limit: int = 50,
-    account: EmailAccount = Depends(get_current_account)
-):
-    """
-    创建 Claude Batch API 批次
-
-    自动收集未翻译邮件并提交到 Claude Batch API（价格减半）
-
-    参数:
-    - limit: 最多处理邮件数量（默认50）
-
-    返回:
-    - batch_id: Claude 批次 ID
-    - db_batch_id: 数据库批次 ID
-    - total_requests: 请求数量
-    - status: 状态
-    """
-    from services.batch_service import get_batch_service
-
-    try:
-        service = get_batch_service()
-        result = await service.run_batch_translation(limit)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"创建批次失败: {str(e)}")
-
-
-@router.get("/batch/status/{batch_id}")
-async def get_batch_status(
-    batch_id: str,
-    account: EmailAccount = Depends(get_current_account)
-):
-    """
-    查询 Claude Batch 状态
-
-    参数:
-    - batch_id: Claude 批次 ID
-
-    返回:
-    - id: 批次 ID
-    - processing_status: 状态 (in_progress, ended, failed, expired, canceled)
-    - request_counts: 请求统计
-    """
-    from services.batch_service import get_batch_service
-
-    try:
-        service = get_batch_service()
-        result = await service.check_batch_status(batch_id)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"查询状态失败: {str(e)}")
-
-
-@router.post("/batch/poll")
-async def poll_and_process_batches(
-    account: EmailAccount = Depends(get_current_account)
-):
-    """
-    轮询并处理已完成的批次
-
-    检查所有进行中的批次，处理已完成的结果。
-    建议由定时任务调用，也可手动触发。
-
-    返回:
-    - checked: 检查的批次数
-    - completed: 完成的批次数
-    - results: 处理结果详情
-    """
-    from services.batch_service import get_batch_service
-
-    try:
-        service = get_batch_service()
-        result = await service.poll_and_process_batches()
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"轮询处理失败: {str(e)}")
-
-
-@router.get("/batch/list")
-async def list_batches(
-    status: Optional[str] = None,
-    limit: int = 20,
-    account: EmailAccount = Depends(get_current_account),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    获取批次列表
-
-    参数:
-    - status: 可选，筛选状态 (pending, submitted, in_progress, ended, failed)
-    - limit: 返回数量（默认20）
-
-    返回:
-    - batches: 批次列表
-    """
-    from database.models import TranslationBatch
-
-    query = select(TranslationBatch).order_by(TranslationBatch.created_at.desc()).limit(limit)
-
-    if status:
-        query = query.where(TranslationBatch.status == status)
-
-    result = await db.execute(query)
-    batches = result.scalars().all()
-
-    return {
-        "batches": [
-            {
-                "id": b.id,
-                "batch_id": b.batch_id,
-                "status": b.status,
-                "total_requests": b.total_requests,
-                "completed_requests": b.completed_requests,
-                "failed_requests": b.failed_requests,
-                "created_at": b.created_at.isoformat() if b.created_at else None,
-                "submitted_at": b.submitted_at.isoformat() if b.submitted_at else None,
-                "completed_at": b.completed_at.isoformat() if b.completed_at else None,
-            }
-            for b in batches
-        ]
-    }
-
-
-@router.get("/batch/{db_batch_id}/items")
-async def get_batch_items(
-    db_batch_id: int,
-    account: EmailAccount = Depends(get_current_account),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    获取批次项详情
-
-    参数:
-    - db_batch_id: 数据库批次 ID
-
-    返回:
-    - items: 批次项列表
-    """
-    from database.models import TranslationBatchItem
-
-    result = await db.execute(
-        select(TranslationBatchItem)
-        .where(TranslationBatchItem.batch_id == db_batch_id)
-        .order_by(TranslationBatchItem.id)
-    )
-    items = result.scalars().all()
-
-    return {
-        "items": [
-            {
-                "id": item.id,
-                "custom_id": item.custom_id,
-                "email_id": item.email_id,
-                "status": item.status,
-                "source_lang": item.source_lang,
-                "target_lang": item.target_lang,
-                "input_tokens": item.input_tokens,
-                "output_tokens": item.output_tokens,
-                "error_message": item.error_message,
-                "created_at": item.created_at.isoformat() if item.created_at else None,
-                "completed_at": item.completed_at.isoformat() if item.completed_at else None,
-            }
-            for item in items
-        ]
-    }
 
 
 # ============ 翻译质量反馈 API ============

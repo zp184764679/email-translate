@@ -347,9 +347,11 @@ class PortalIntegrationService:
             {'success': True, 'task': {...}}
         """
         try:
-            url = f"{self.portal_api_url}/projects/{project_id}/tasks"
+            # Portal 任务 API 端点是 /api/tasks，project_id 在请求体中传递
+            url = f"{self.portal_api_url}/tasks"
 
             data = {
+                'project_id': project_id,  # project_id 在请求体中传递
                 'title': title,
                 'description': description,
                 'task_type': task_type,

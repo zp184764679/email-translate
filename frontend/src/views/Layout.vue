@@ -114,6 +114,15 @@
 
         <div
           class="folder-item"
+          :class="{ active: currentFolder === 'customers' }"
+          @click="navigateTo('/customers', 'customers')"
+        >
+          <el-icon><User /></el-icon>
+          <span class="folder-name">客户</span>
+        </div>
+
+        <div
+          class="folder-item"
           :class="{ active: currentFolder === 'approvals' }"
           @click="navigateTo('/approvals', 'approvals')"
         >
@@ -373,7 +382,7 @@ import {
   Refresh, RefreshRight, Message, EditPen, Document, Delete,
   OfficeBuilding, Setting, Promotion, Star, ChatDotSquare,
   SwitchButton, Checked, Reading, DocumentCopy, Grid, List,
-  Operation, Histogram, ArrowDown, Plus, Folder, Edit, Calendar, DataLine, Filter, Collection, Bell, TrendCharts, Box
+  Operation, Histogram, ArrowDown, Plus, Folder, Edit, Calendar, DataLine, Filter, Collection, Bell, TrendCharts, Box, User
 } from '@element-plus/icons-vue'
 import api from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -460,8 +469,7 @@ onMounted(() => {
     Notification.requestPermission()
   }
 
-  // 启动自动收件
-  userStore.startAutoFetch()
+  // 自动收件已移至 App.vue 统一管理，避免重复初始化
 
   // 点击其他区域关闭右键菜单
   document.addEventListener('click', closeFolderContextMenu)
@@ -469,7 +477,7 @@ onMounted(() => {
 
 // 组件卸载时清理
 onUnmounted(() => {
-  userStore.stopAutoFetch()
+  // 自动收件由 App.vue 管理，不在此处停止
   document.removeEventListener('click', closeFolderContextMenu)
 })
 
@@ -497,6 +505,8 @@ function updateCurrentFolder() {
     currentFolder.value = 'deleted'
   } else if (path.startsWith('/suppliers')) {
     currentFolder.value = 'suppliers'
+  } else if (path.startsWith('/customers')) {
+    currentFolder.value = 'customers'
   } else if (path.startsWith('/approvals')) {
     currentFolder.value = 'approvals'
   } else if (path.startsWith('/calendar')) {

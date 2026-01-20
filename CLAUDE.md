@@ -82,13 +82,13 @@
 | 认证 | JWT (邮箱IMAP验证) |
 | 前端 | Vue 3 + Vite + Element Plus |
 | 桌面端 | Electron 28 |
-| 翻译 | vLLM (服务器) / Claude API |
+| 翻译 | vLLM (服务器本地大模型，免费) |
 
 ## 核心功能
 
 1. **邮箱登录** - 使用公司邮箱密码验证IMAP连接
 2. **邮件收取** - IMAP协议拉取邮件，vLLM智能检测语言
-3. **智能翻译** - 外语邮件翻译为中文（vLLM/Claude）
+3. **智能翻译** - 外语邮件翻译为中文（vLLM本地模型）
 4. **回复撰写** - 中文撰写，翻译为目标语言发送
 5. **审批流程** - 草稿提交审批，审批人审核后发送
 6. **术语表** - 按供应商维护专业术语翻译
@@ -149,6 +149,107 @@
 | `/api/approval-groups/{id}` | DELETE | 删除组 |
 | `/api/approval-groups/{id}/members` | POST | 添加组成员 |
 | `/api/approval-groups/{id}/members/{member_id}` | DELETE | 移除组成员 |
+
+## Portal 项目管理集成
+
+### 功能概述
+
+从邮件详情页直接创建任务到 Portal 项目管理系统。支持 AI 智能提取任务信息、项目自动匹配、负责人自动匹配。
+
+### 集成架构
+
+```
+邮件详情页 (EmailDetail.vue)
+    ↓ 点击"创建任务"
+CreateTaskDialog.vue (三步骤向导)
+    │
+    ├─ 步骤1: 提取信息
+    │   └─ AI 提取任务信息 (vLLM/Ollama)
+    │
+    ├─ 步骤2: 选择项目
+    │   └─ 智能匹配 Portal 项目 (品番号)
+    │
+    └─ 步骤3: 确认创建
+        └─ 调用 Portal API 创建任务
+              ↓
+portal_integration_service.create_task()
+    ↓ POST /api/tasks (project_id in body)
+Portal 后端 (Flask @ 3002)
+    ↓
+任务创建成功
+```
+
+### 核心文件
+
+| 文件 | 说明 |
+|------|------|
+| `frontend/src/views/EmailDetail.vue` | 邮件详情页，"创建任务"按钮入口 |
+| `frontend/src/components/CreateTaskDialog.vue` | 三步骤任务创建对话框 |
+| `frontend/src/api/index.js` | API 封装（含 Portal 集成接口） |
+| `backend/routers/task_extractions.py` | 任务提取 API |
+| `backend/services/portal_integration.py` | Portal 集成服务（API 调用） |
+
+### 任务提取 API
+
+| 方法 | 端点 | 说明 |
+|------|------|------|
+| POST | `/api/task-extractions/emails/{id}/trigger` | 触发 AI 提取任务信息 |
+| GET | `/api/task-extractions/emails/{id}` | 获取提取结果 |
+| POST | `/api/task-extractions/emails/{id}/create-task` | 创建任务到 Portal |
+| GET | `/api/task-extractions/portal/projects` | 获取 Portal 项目列表 |
+| POST | `/api/task-extractions/portal/projects/match` | 智能匹配项目 |
+
+### 环境配置
+
+```bash
+# backend/.env
+# Portal API 地址
+PORTAL_API_URL=https://jzchardware.cn/api
+
+# Portal 服务认证令牌（可选，用于服务间认证）
+PORTAL_SERVICE_TOKEN=your-service-token
+```
+
+### Portal API 端点
+
+邮件系统调用 Portal 的以下 API：
+
+| 方法 | 端点 | 说明 |
+|------|------|------|
+| GET | `/api/projects` | 获取项目列表 |
+| POST | `/api/tasks` | 创建任务（`project_id` 在请求体中传递） |
+
+**重要**: 任务创建使用 `POST /api/tasks`，`project_id` 在请求体中传递，**不是** `/api/projects/{id}/tasks`。
+
+### 提取字段映射
+
+| 邮件内容 | 提取字段 | Portal 任务字段 |
+|---------|---------|----------------|
+| 主题+正文 | title | title |
+| 正文 | description | description |
+| 紧急程度 | priority | priority |
+| 日期 | due_date | due_date |
+| 品番号 | part_number | → 匹配 project_id |
+| 联系人 | assignee_name | → 匹配 assigned_to_id |
+
+### 工作流程
+
+1. **打开对话框**: 用户在邮件详情页点击"创建任务"按钮
+2. **AI 提取**: 调用 `triggerTaskExtraction()` 触发 AI 提取，轮询 `getTaskExtraction()` 获取结果
+3. **项目匹配**: 调用 `matchProjects()` 根据品番号智能匹配 Portal 项目
+4. **确认创建**: 用户编辑任务详情后，调用 `createTaskFromEmail()` 创建任务
+5. **创建成功**: 返回任务 ID 和项目信息，可跳转到 Portal 查看
+
+### 错误处理
+
+| 错误 | 原因 | 解决方案 |
+|------|------|----------|
+| AI 提取超时 | Ollama 服务负载高 | 增加超时时间或重试 |
+| 项目匹配失败 | 品番号不存在 | 手动选择项目 |
+| 任务创建 404 | API 路径错误 | 检查 `PORTAL_API_URL` 配置 |
+| 认证失败 | Token 无效 | 检查用户登录状态 |
+
+---
 
 ## 开发命令
 
@@ -252,61 +353,39 @@ MYSQL_PASSWORD=your-password
 MYSQL_DATABASE=email_translate
 
 # ===== 翻译引擎配置 =====
-# vllm: 服务器大模型（主力，免费）
-# claude: Claude API（复杂邮件备用）
-TRANSLATE_PROVIDER=vllm
+# 使用本地 vLLM 大模型（免费，数据本地化）
+TRANSLATE_ENABLED=true
 
-# vLLM (服务器本地 OpenAI 兼容 API) - 主力翻译引擎
+# vLLM (服务器本地 OpenAI 兼容 API) - 唯一翻译引擎
 VLLM_BASE_URL=http://localhost:5080
 VLLM_MODEL=/home/aaa/models/Qwen3-VL-8B-Instruct
-
-# Claude API (Anthropic) - 复杂邮件备用
-CLAUDE_API_KEY=your-claude-api-key
-CLAUDE_MODEL=claude-sonnet-4-20250514
 
 # JWT 密钥
 SECRET_KEY=your-secret-key
 ```
 
-### 翻译引擎配置
+### 翻译引擎
 
-| Provider | 说明 | 费用 | 用量统计 |
-|----------|------|------|----------|
-| `vllm` | 服务器大模型（主力） | 免费 | 不统计 |
-| `claude` | Claude API（复杂邮件备用） | 按量付费 | ✓ 自动记录 |
+系统使用本地 vLLM 大模型进行翻译，完全免费且数据本地化。
 
-### 智能路由模式（推荐）
+| 特性 | 说明 |
+|------|------|
+| 引擎 | vLLM (Qwen3-VL-8B-Instruct) |
+| 费用 | **免费** |
+| 数据隐私 | 完全本地化，不发送外网 |
+| 超时设置 | 600秒，max_tokens=4096 |
 
-设置 `SMART_ROUTING_ENABLED=true`（默认启用），系统基于邮件复杂度自动选择最优引擎：
-
-```
-邮件进入
-    ↓
-vLLM 评估复杂度（规则优先，必要时用LLM打分）
-    ↓
-┌─────────────────┬─────────────────────┬─────────────────────┐
-│ 简单(≤50分)     │ 中等(51-70)          │ 复杂(>70)           │
-│                 │                      │                     │
-│ vLLM直接翻译    │ vLLM拆分邮件结构     │ vLLM拆分邮件结构    │
-│ (免费快速)      │ ├─ 正文 → vLLM       │ ├─ 正文 → Claude    │
-│                 │ └─ 签名 → vLLM       │ └─ 签名 → vLLM      │
-└─────────────────┴─────────────────────┴─────────────────────┘
-    ↓ 失败时自动回退
-vLLM → Claude
-```
-
-**智能拆分翻译**：
+**翻译流程**：
 - vLLM 分析邮件结构，识别问候语、正文、签名
-- 复杂邮件正文使用 Claude（理解能力强）
-- 问候语、签名等固定格式内容使用 vLLM（免费、格式保持好）
-- vLLM 超时 600 秒，max_tokens=4096 支持长文本
+- 支持长文本翻译（自动分段）
+- 超时 600 秒，max_tokens=4096 支持长文本
 
-**复杂度判断标准**：
+**复杂度判断标准**（用于日志分析）：
 - 简单：<500字符，无表格/列表，日常问候确认
 - 中等：一般业务邮件，多个事项
 - 复杂：技术文档、合同条款、表格数据、多层嵌套
 
-**用量保护**：
+**用量统计**：
 - 80% 用量时发出警告
 - 95% 用量时自动禁用（防止超额收费）
 - 每月1日自动重置
@@ -690,60 +769,7 @@ fetch_emails_background() 后台任务
 
 **触发时机**：
 - 用户点击"拉取邮件"按钮
-- 定时任务自动拉取（见下方批量翻译策略）
-
-### 4. 批量翻译策略（计划中）
-
-为进一步优化 API 成本，计划使用 Claude API Batch 进行批量翻译：
-
-```
-定时任务（每分钟）
-       ↓
-收集所有未翻译邮件
-       ↓
-立即提交 Batch API（提交要及时）
-       ↓
-后台轮询检查结果（返回随意，几分钟到几小时）
-       ↓
-结果写入 shared_email_translations
-       ↓
-用户刷新时看到翻译结果
-```
-
-**Batch API 优势**：
-| 特性 | 普通 API | Batch API |
-|------|----------|-----------|
-| 价格 | 100% | 50%（半价） |
-| 响应 | 实时 | 异步 |
-| 适用 | 用户交互 | 后台批量 |
-
-**数据模型**：
-
-```
-translation_batches 表（新增）
-├── id                # 主键
-├── batch_id          # Claude 返回的 Batch ID
-├── status            # pending / submitted / completed / failed
-├── email_count       # 包含邮件数量
-├── submitted_at      # 提交时间
-└── completed_at      # 完成时间
-
-emails 表（新增字段）
-├── translation_status  # pending / submitted / completed
-└── batch_id           # 关联的 Batch ID
-```
-
-**混合策略**：
-- 用户主动查看邮件详情 → 实时翻译（立即显示）
-- 后台未读邮件 → 加入批量队列 → Batch API 处理
-
-**实现步骤**：
-1. 添加 `translation_batches` 表
-2. 添加定时任务（APScheduler，每分钟提交）
-3. 添加轮询任务（每 5 分钟检查 Batch 状态）
-4. 集成 Claude Batch API
-
-**当前测试**：先用本地 vLLM 模型测试定时任务流程，确认无误后再切换到 Claude Batch API
+- 定时任务自动拉取
 
 ## Celery 异步任务系统
 
@@ -766,7 +792,7 @@ emails 表（新增字段）
 | 文件 | 说明 |
 |------|------|
 | `backend/celery_app.py` | Celery 配置和实例 |
-| `backend/tasks/translate_tasks.py` | 翻译任务（单个、批量、Batch轮询） |
+| `backend/tasks/translate_tasks.py` | 翻译任务（单个、批量） |
 | `backend/tasks/email_tasks.py` | 邮件任务（拉取、发送、导出） |
 | `backend/tasks/ai_tasks.py` | AI 提取任务 |
 | `backend/tasks/maintenance_tasks.py` | 定时维护任务 |
@@ -793,7 +819,7 @@ emails 表（新增字段）
 | `cleanup_old_translations` | 每天2点 | 清理30天未用缓存 |
 | `cleanup_temp_files` | 每天3点 | 清理临时导出文件 |
 | `rebuild_contacts_index` | 每天4点 | 重建联系人缓存 |
-| `poll_batch_status` | 每30秒 | 轮询 Batch API 状态 |
+| `collect_and_translate_pending` | 每5分钟 | 自动翻译未翻译邮件 |
 
 ### WebSocket 事件
 
@@ -864,7 +890,7 @@ CELERY_RESULT_BACKEND=redis://localhost:6379/2
 | 手动拉取邮件 | 点击"同步"按钮 |
 | 自动定时拉取 | 每5分钟自动检查新邮件（前端定时器实现） |
 | 新邮件桌面通知 | Electron Notification API |
-| 智能翻译 | 支持 vLLM/Claude |
+| 智能翻译 | vLLM 本地大模型 |
 | 翻译后台化 | 翻译时不阻塞 UI，用户可继续操作 |
 | 翻译缓存 | 相同文本只翻译一次 |
 | 邮件翻译共享 | 同一封邮件跨用户只翻译一次 |
@@ -1027,6 +1053,45 @@ npm run electron:build
 | 主版本 | 不兼容的大改动 | 1.0.0 → 2.0.0 |
 | 次版本 | 新增功能（向后兼容） | 1.0.0 → 1.1.0 |
 | 修订号 | Bug 修复 | 1.0.0 → 1.0.1 |
+
+## 部署检查清单
+
+### 健康检查
+
+部署后运行健康检查脚本验证系统状态：
+
+```bash
+# SSH 到服务器运行健康检查
+ssh -i ~/.ssh/jzc_server aaa@61.145.212.28 'bash /www/email-translate/deploy/health-check.sh'
+```
+
+### Nginx 配置检查
+
+如果 `/email/` 路径无法访问，检查 Nginx 配置：
+
+```bash
+# 检查配置是否存在
+ssh -i ~/.ssh/jzc_server aaa@61.145.212.28 'grep "location /email/" /etc/nginx/conf.d/jzc.conf'
+
+# 如果缺失，参考 deploy/nginx-email.conf 添加配置
+```
+
+### 常见问题
+
+| 问题 | 原因 | 解决方案 |
+|------|------|----------|
+| `/email/` 显示门户首页 | Nginx 缺少配置 | 添加 `deploy/nginx-email.conf` 中的配置 |
+| 清除缓存后仍显示旧页面 | 浏览器 disk cache | 使用 `?_=时间戳` 参数访问，或完全关闭浏览器后重试 |
+| API 返回 404 | API 路由配置错误 | 检查 `rewrite ^/email/api/(.*)$ /api/$1 break;` |
+| WebSocket 连接失败 | WS 配置缺失 | 检查 `location /email/ws` 配置 |
+
+### 相关文件
+
+| 文件 | 说明 |
+|------|------|
+| `deploy/nginx-email.conf` | Nginx 配置模板 |
+| `deploy/health-check.sh` | 健康检查脚本 |
+| `sync.sh` | 同步脚本（含配置检查） |
 
 ## 更新日志
 

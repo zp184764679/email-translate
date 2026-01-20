@@ -319,10 +319,10 @@ const engineChartOption = computed(() => ({
         }
       },
       data: engineData.value.map(d => ({
-        name: d.engine === 'vllm' ? 'vLLM' : 'Claude',
+        name: d.engine === 'vllm' ? 'vLLM 本地模型' : d.engine,
         value: d.count,
         itemStyle: {
-          color: d.engine === 'vllm' ? '#67C23A' : '#409EFF'
+          color: '#67C23A'  // 统一绿色（vLLM）
         }
       }))
     }
@@ -547,9 +547,10 @@ function formatHours(hours) {
 async function loadOverview() {
   try {
     const res = await api.getStatisticsOverview()
-    overviewData.value = res.data
+    overviewData.value = res?.data || {}
   } catch (e) {
     console.error('Failed to load overview:', e)
+    overviewData.value = {}
   }
 }
 
@@ -557,70 +558,77 @@ async function loadEmailTrend() {
   try {
     const days = trendPeriod.value === 'daily' ? 14 : trendPeriod.value === 'weekly' ? 12 : 12
     const res = await api.getEmailTrend(trendPeriod.value, days)
-    trendData.value = res.data.trend || []
+    trendData.value = res?.data?.trend || []
   } catch (e) {
     console.error('Failed to load trend:', e)
+    trendData.value = []
   }
 }
 
 async function loadEngineStats() {
   try {
     const res = await api.getTranslationEngineStats(3)
-    engineData.value = res.data.engines || []
+    engineData.value = res?.data?.engines || []
   } catch (e) {
     console.error('Failed to load engine stats:', e)
+    engineData.value = []
   }
 }
 
 async function loadSupplierRanking() {
   try {
     const res = await api.getSupplierRanking(10, rankingDays.value)
-    rankingData.value = res.data.ranking || []
+    rankingData.value = res?.data?.ranking || []
   } catch (e) {
     console.error('Failed to load ranking:', e)
+    rankingData.value = []
   }
 }
 
 async function loadCategoryDistribution() {
   try {
     const res = await api.getCategoryDistribution(30)
-    categoryData.value = res.data.categories || []
+    categoryData.value = res?.data?.categories || []
   } catch (e) {
     console.error('Failed to load categories:', e)
+    categoryData.value = []
   }
 }
 
 async function loadResponseTime() {
   try {
     const res = await api.getResponseTimeStats(30)
-    responseTimeData.value = res.data
+    responseTimeData.value = res?.data || {}
   } catch (e) {
     console.error('Failed to load response time:', e)
+    responseTimeData.value = {}
   }
 }
 
 async function loadCacheStats() {
   try {
     const res = await api.getCacheStats()
-    cacheData.value = res.data
+    cacheData.value = res?.data || {}
   } catch (e) {
     console.error('Failed to load cache stats:', e)
+    cacheData.value = {}
   }
 }
 
 async function loadDailyActivity() {
   try {
     const res = await api.getDailyActivity(30)
-    heatmapData.value = res.data.activity || []
+    heatmapData.value = res?.data?.activity || []
   } catch (e) {
     console.error('Failed to load activity:', e)
+    heatmapData.value = []
   }
 }
 
-// 初始化加载所有数据
-onMounted(() => {
+// 初始化加载所有数据（使用 allSettled 避免单个失败阻塞其他）
+onMounted(async () => {
   loading.value = true
-  Promise.all([
+  const results = await Promise.allSettled([
     loadOverview(),
     loadEmailTrend(),
     loadEngineStats(),
@@ -629,9 +637,16 @@ onMounted(() => {
     loadResponseTime(),
     loadCacheStats(),
     loadDailyActivity()
-  ]).finally(() => {
-    loading.value = false
+  ])
+
+  // 记录失败的请求
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      console.error(`Statistics load #${index} failed:`, result.reason)
+    }
   })
+
+  loading.value = false
 })
 </script>
 

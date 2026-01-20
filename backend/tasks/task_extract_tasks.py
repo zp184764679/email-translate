@@ -96,9 +96,15 @@ def call_vllm_extract(subject: str, body: str, settings) -> dict:
         body=body or "(无正文)"
     )
 
+    # 构建请求头（包含 API Key 认证）
+    headers = {"Content-Type": "application/json"}
+    if settings.vllm_api_key:
+        headers["Authorization"] = f"Bearer {settings.vllm_api_key}"
+
     try:
         response = requests.post(
             f"{settings.vllm_base_url}/v1/chat/completions",
+            headers=headers,
             json={
                 "model": settings.vllm_model,
                 "messages": [{"role": "user", "content": prompt}],
@@ -242,6 +248,34 @@ def extract_task_info_for_email(self, email_id: int, account_id: int = None):
         # 6. 解析并存储结果
         data = result.get("data", {})
 
+        # 检查关键字段是否至少有一个有效值
+        key_fields = ["title", "project_name", "description"]
+        has_valid_data = any(
+            data.get(field) and str(data.get(field)).strip()
+            for field in key_fields
+        )
+
+        if not has_valid_data:
+            # AI 返回了空结果，标记为失败
+            extraction.status = "failed"
+            extraction.error_message = "AI 提取结果为空，关键字段 (title/project_name/description) 均无有效内容"
+            extraction.confidence = data.get("confidence", {"title": 0.0, "priority": 0.0, "project_name": 0.0})
+            db.commit()
+
+            print(f"[TaskExtract] Empty extraction result for email {email_id}")
+
+            if account_id:
+                notify_completion(account_id, "task_extraction_failed", {
+                    "email_id": email_id,
+                    "error": extraction.error_message
+                })
+
+            return {
+                "success": False,
+                "email_id": email_id,
+                "error": extraction.error_message
+            }
+
         # 项目字段
         extraction.project_name = data.get("project_name")
         extraction.customer_name = data.get("customer_name")
@@ -380,3 +414,150 @@ def batch_extract_tasks(self, email_ids: list, account_id: int):
         "completed": completed,
         "failed": failed
     }
+
+
+@celery_app.task(bind=True, soft_time_limit=60, time_limit=70)
+def collect_and_extract_pending(self, limit: int = 50):
+    """
+    收集已翻译但未提取任务信息的邮件，并自动提取
+
+    定时任务，自动收集 is_translated=True 且 task_extractions 中无记录的邮件，
+    调用 extract_task_info_for_email 进行任务信息提取。
+
+    Args:
+        limit: 每次最多处理的邮件数量（默认50，避免队列积压）
+
+    Returns:
+        dict: 处理结果
+    """
+    from database.models import Email, TaskExtraction
+    from celery import group
+    from sqlalchemy import and_, not_, exists
+
+    db = get_db_session()
+
+    try:
+        # 查找已翻译但未提取任务信息的邮件
+        # 通过子查询检查 task_extractions 表中是否有记录
+        subq = db.query(TaskExtraction.email_id).filter(
+            TaskExtraction.email_id == Email.id
+        ).exists()
+
+        pending_emails = db.query(Email).filter(
+            Email.is_translated == True,  # 已翻译
+            ~subq  # task_extractions 中无记录
+        ).order_by(Email.received_at.desc()).limit(limit).all()
+
+        if not pending_emails:
+            return {"message": "No pending emails for extraction", "count": 0}
+
+        email_ids = [(e.id, e.account_id) for e in pending_emails]
+        print(f"[CollectExtract] Found {len(email_ids)} pending emails for task extraction")
+
+        # 创建提取任务组
+        tasks = group(
+            extract_task_info_for_email.s(email_id, account_id)
+            for email_id, account_id in email_ids
+        )
+
+        # 异步执行（不等待结果）
+        tasks.apply_async()
+
+        return {
+            "success": True,
+            "message": f"Triggered extraction for {len(email_ids)} emails",
+            "count": len(email_ids)
+        }
+
+    except Exception as e:
+        print(f"[CollectExtract] Error: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "count": 0
+        }
+
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, soft_time_limit=120, time_limit=150)
+def check_data_consistency(self):
+    """
+    数据一致性检查与自动修复任务
+
+    定时任务（建议每小时执行一次），自动检测并修复以下问题：
+    1. is_translated 与 translation_status 不一致
+    2. 空的提取记录（所有关键字段为空但状态为 completed）
+
+    Returns:
+        dict: 修复结果统计
+    """
+    from database.models import Email, TaskExtraction
+    from sqlalchemy import and_, or_
+
+    db = get_db_session()
+    fixes = {
+        "is_translated_fixed": 0,
+        "empty_extractions_deleted": 0,
+        "errors": []
+    }
+
+    try:
+        # === 修复 1: is_translated 与 translation_status 不一致 ===
+        # 翻译完成但 is_translated=False 的记录
+        inconsistent_emails = db.query(Email).filter(
+            Email.is_translated == False,
+            Email.translation_status == "completed",
+            Email.subject_translated.isnot(None),
+            Email.subject_translated != ""
+        ).all()
+
+        if inconsistent_emails:
+            for email in inconsistent_emails:
+                email.is_translated = True
+            db.commit()
+            fixes["is_translated_fixed"] = len(inconsistent_emails)
+            print(f"[DataConsistency] Fixed {len(inconsistent_emails)} emails with inconsistent is_translated flag")
+
+        # === 修复 2: 清理空的提取记录 ===
+        # 状态为 completed 但所有关键字段都为空的记录
+        empty_extractions = db.query(TaskExtraction).filter(
+            TaskExtraction.status == "completed",
+            or_(TaskExtraction.title.is_(None), TaskExtraction.title == ""),
+            or_(TaskExtraction.project_name.is_(None), TaskExtraction.project_name == ""),
+            or_(TaskExtraction.description.is_(None), TaskExtraction.description == "")
+        ).all()
+
+        if empty_extractions:
+            for extraction in empty_extractions:
+                db.delete(extraction)
+            db.commit()
+            fixes["empty_extractions_deleted"] = len(empty_extractions)
+            print(f"[DataConsistency] Deleted {len(empty_extractions)} empty extraction records")
+
+        # 记录检查结果
+        total_fixes = fixes["is_translated_fixed"] + fixes["empty_extractions_deleted"]
+        if total_fixes > 0:
+            print(f"[DataConsistency] Total fixes applied: {total_fixes}")
+        else:
+            print("[DataConsistency] No inconsistencies found")
+
+        return {
+            "success": True,
+            "fixes": fixes
+        }
+
+    except Exception as e:
+        db.rollback()
+        error_msg = f"Data consistency check failed: {str(e)}"
+        print(f"[DataConsistency] Error: {error_msg}")
+        fixes["errors"].append(error_msg)
+        return {
+            "success": False,
+            "fixes": fixes,
+            "error": error_msg
+        }
+
+    finally:
+        db.close()

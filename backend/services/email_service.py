@@ -10,8 +10,12 @@ from email.utils import parsedate_to_datetime, getaddresses
 from typing import List, Dict, Optional, Tuple
 import os
 import re
-from datetime import datetime
+import logging
+from datetime import datetime, timezone, timedelta
 from services.language_service import get_language_service
+
+# 配置日志记录器
+logger = logging.getLogger(__name__)
 
 
 def normalize_message_id(message_id: str) -> str:
@@ -48,6 +52,17 @@ class EmailService:
         self.use_ssl = use_ssl
         self.imap_conn = None
         self.attachment_dir = "data/attachments"
+        self.inline_images_dir = "data/inline_images"  # 内嵌图片目录
+
+    def __enter__(self):
+        """Context manager entry - connect to IMAP"""
+        self.connect_imap()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - always disconnect to prevent leaks"""
+        self.disconnect_imap()
+        return False  # Don't suppress exceptions
 
     def connect_imap(self, timeout: int = 30) -> bool:
         """Connect to IMAP server
@@ -108,20 +123,40 @@ class EmailService:
             # 发送 NOOP 命令检查连接是否存活
             self.imap_conn.noop()
             return True
-        except Exception:
+        except Exception as e:
             # 连接已断开，尝试重连
-            print("[IMAP] 连接已断开，尝试重连...")
+            logger.info(f"[IMAP] 连接已断开 ({type(e).__name__})，尝试重连...")
             self.imap_conn = None
             return self.connect_imap()
 
     def disconnect_imap(self):
-        """Disconnect from IMAP server"""
+        """Disconnect from IMAP server safely
+
+        Handles various connection states:
+        - Normal logout
+        - Connection already closed
+        - Socket errors during logout
+        """
         if self.imap_conn:
             try:
+                # Try graceful logout first
                 self.imap_conn.logout()
-            except Exception:
-                pass
-            self.imap_conn = None
+            except imaplib.IMAP4.abort:
+                # Connection was aborted, try to close socket directly
+                try:
+                    self.imap_conn.shutdown()
+                except Exception as e:
+                    # Socket shutdown 失败，记录但不影响清理
+                    logger.debug(f"[IMAP] Socket shutdown failed: {type(e).__name__}")
+            except (OSError, ConnectionError, TimeoutError) as e:
+                # Socket-level errors, connection already dead
+                logger.debug(f"[IMAP] Connection already closed: {type(e).__name__}")
+            except Exception as e:
+                # Log unexpected errors but don't raise
+                logger.warning(f"[IMAP] Disconnect warning: {e}")
+            finally:
+                # Always clear the reference
+                self.imap_conn = None
 
     def fetch_emails(self, folder: str = "INBOX", since_date: datetime = None,
                      limit: int = 500, existing_message_ids: set = None) -> List[Dict]:
@@ -218,18 +253,29 @@ class EmailService:
                     continue
 
         except Exception as e:
-            print(f"Error fetching emails: {e}")
+            logger.error(f"Error fetching emails: {e}")
+            # 连接可能处于不一致状态，尝试重置
+            try:
+                if self.imap_conn:
+                    self.imap_conn.close()  # 关闭当前选中的文件夹
+            except Exception as close_error:
+                # 关闭文件夹失败，记录但继续清理
+                logger.debug(f"[IMAP] Failed to close folder during recovery: {type(close_error).__name__}")
+            # 标记连接需要重建（下次调用会自动重连）
+            if "BYE" in str(e) or "socket" in str(e).lower():
+                self.imap_conn = None
 
         return emails
 
     # IMAP文件夹映射（支持多种邮件服务商）
     # 格式：{标准名: [可能的IMAP名称列表]}
+    # 注：21cn企业邮箱使用 UTF-7 编码的中文文件夹名（如 &XfJT0ZAB- = 已发送）
     IMAP_FOLDER_ALIASES = {
         "inbox": ["INBOX", "收件箱"],
-        "sent": ["Sent Messages", "Sent", "已发送", "Sent Items", "INBOX.Sent"],
-        "drafts": ["Drafts", "草稿箱", "草稿", "INBOX.Drafts"],
-        "trash": ["Deleted Messages", "Trash", "已删除", "Deleted Items", "INBOX.Trash", "垃圾箱"],
-        "spam": ["Junk", "Spam", "垃圾邮件", "INBOX.Junk", "Junk E-mail"],
+        "sent": ["&XfJT0ZAB-", "Sent Messages", "Sent", "已发送", "Sent Items", "INBOX.Sent"],
+        "drafts": ["&g0l6P3ux-", "Drafts", "草稿箱", "草稿", "INBOX.Drafts"],
+        "trash": ["&XfJSIJZk-", "Deleted Messages", "Trash", "已删除", "Deleted Items", "INBOX.Trash", "垃圾箱"],
+        "spam": ["&V4NXPnux-", "Junk", "Spam", "垃圾邮件", "INBOX.Junk", "Junk E-mail"],
     }
 
     # 缓存实际可用的文件夹映射
@@ -258,15 +304,25 @@ class EmailService:
 
         # 构建实际映射
         folder_map = {}
+        # 用于不区分大小写匹配（仅适用于普通ASCII名称）
         available_lower = {f.lower(): f for f in available_folders}
+        # 用于精确匹配（适用于 UTF-7 编码的文件夹名，如 &XfJT0ZAB-）
+        available_exact = set(available_folders)
 
         for standard_name, aliases in self.IMAP_FOLDER_ALIASES.items():
             for alias in aliases:
-                # 精确匹配（不区分大小写）
-                if alias.lower() in available_lower:
-                    folder_map[standard_name] = available_lower[alias.lower()]
-                    print(f"[IMAP] Mapped '{standard_name}' -> '{folder_map[standard_name]}'")
-                    break
+                # UTF-7 编码的文件夹名（以 & 开头）需要精确匹配
+                if alias.startswith('&'):
+                    if alias in available_exact:
+                        folder_map[standard_name] = alias
+                        print(f"[IMAP] Mapped '{standard_name}' -> '{alias}' (UTF-7 exact)")
+                        break
+                else:
+                    # 普通名称不区分大小写匹配
+                    if alias.lower() in available_lower:
+                        folder_map[standard_name] = available_lower[alias.lower()]
+                        print(f"[IMAP] Mapped '{standard_name}' -> '{folder_map[standard_name]}'")
+                        break
             else:
                 # 如果没有找到，使用第一个别名作为默认值
                 folder_map[standard_name] = aliases[0]
@@ -414,6 +470,11 @@ class EmailService:
         # Parse body
         body_text, body_html = self._get_body(msg)
 
+        # 提取内嵌图片并替换 HTML 中的 cid: 引用
+        inline_images = self._extract_inline_images(msg, message_id)
+        if body_html and inline_images:
+            body_html = self._replace_cid_in_html(body_html, inline_images, message_id)
+
         # 关键修复：如果纯文本为空但 HTML 有内容，从 HTML 提取文本
         # 这确保 body_original 不会为 NULL（某些邮件只有 HTML 格式）
         if not body_text and body_html:
@@ -429,8 +490,8 @@ class EmailService:
             detection_text = subject
         language = self._detect_language(detection_text)
 
-        # Get attachments
-        attachments = self._get_attachments(msg, message_id)
+        # Get attachments，排除已识别的内嵌图片
+        attachments = self._get_attachments(msg, message_id, exclude_cids=set(inline_images.keys()))
 
         return {
             "message_id": message_id,
@@ -489,6 +550,30 @@ class EmailService:
     # 日期解析失败计数（用于统计）
     _date_parse_failures = []
 
+    # 中国时区 (UTC+8)
+    _CHINA_TZ = timezone(timedelta(hours=8))
+
+    def _convert_to_local_time(self, dt: datetime) -> datetime:
+        """将带时区的 datetime 转换为中国本地时间（去除时区信息）
+
+        MySQL DateTime 不支持时区，所以需要统一转换为本地时间存储。
+        这样前端显示的时间就是正确的中国时间。
+
+        Args:
+            dt: datetime 对象（可能带时区，也可能不带）
+
+        Returns:
+            不带时区的本地时间 datetime
+        """
+        if dt.tzinfo is not None:
+            # 有时区信息，转换为中国时区
+            local_dt = dt.astimezone(self._CHINA_TZ)
+            # 去除时区信息（MySQL 不支持）
+            return local_dt.replace(tzinfo=None)
+        else:
+            # 没有时区信息，假设已经是本地时间
+            return dt
+
     def _parse_email_date(self, date_str: str) -> datetime:
         """解析邮件日期，支持多种格式
 
@@ -496,18 +581,19 @@ class EmailService:
             date_str: 日期字符串
 
         Returns:
-            datetime 对象，解析失败时返回当前时间并记录详细日志
+            datetime 对象（中国本地时间，不带时区），解析失败时返回当前时间
         """
         if not date_str:
             print("[Date] 日期字符串为空，使用当前时间")
-            return datetime.utcnow()
+            return datetime.now()
 
         original_date_str = date_str  # 保留原始字符串用于日志
 
         # 1. 首先尝试标准 RFC 2822 解析
         try:
             result = parsedate_to_datetime(date_str)
-            return result
+            # 转换为本地时间
+            return self._convert_to_local_time(result)
         except Exception as e:
             # 记录但继续尝试其他方式
             pass
@@ -522,7 +608,7 @@ class EmailService:
         try:
             result = dateutil_parser.parse(cleaned)
             print(f"[Date] dateutil 解析成功: '{original_date_str}' -> {result}")
-            return result
+            return self._convert_to_local_time(result)
         except Exception:
             pass
 
@@ -544,6 +630,7 @@ class EmailService:
             try:
                 result = datetime.strptime(cleaned, fmt)
                 print(f"[Date] {fmt_name} 解析成功: '{original_date_str}' -> {result}")
+                # strptime 返回 naive datetime，假设是本地时间
                 return result
             except ValueError:
                 continue
@@ -552,7 +639,7 @@ class EmailService:
         failure_info = {
             "original": original_date_str,
             "cleaned": cleaned,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now().isoformat()
         }
         self._date_parse_failures.append(failure_info)
 
@@ -565,7 +652,7 @@ class EmailService:
         print(f"  清理后: '{cleaned}'")
         print(f"  已累计 {len(self._date_parse_failures)} 次解析失败")
 
-        return datetime.utcnow()
+        return datetime.now()
 
     def get_date_parse_failures(self) -> List[Dict]:
         """获取日期解析失败记录（用于调试）"""
@@ -616,22 +703,35 @@ class EmailService:
 
         return text_body, html_body
 
-    def _get_attachments(self, msg, message_id: str) -> List[Dict]:
+    def _get_attachments(self, msg, message_id: str, exclude_cids: set = None) -> List[Dict]:
         """Extract attachments from email
 
         检测以下类型的附件：
         1. Content-Disposition: attachment
         2. Content-Disposition: inline 但有文件名（非文本/HTML）
         3. 没有 Content-Disposition 但有文件名的非文本部分
+
+        Args:
+            msg: 邮件消息对象
+            message_id: 邮件 Message-ID
+            exclude_cids: 要排除的 Content-ID 集合（已被识别为内嵌图片的）
         """
         attachments = []
         seen_filenames = set()  # 避免重复
+        exclude_cids = exclude_cids or set()
 
         if msg.is_multipart():
             for part in msg.walk():
                 # 跳过 multipart 容器本身
                 if part.get_content_maintype() == 'multipart':
                     continue
+
+                # 检查是否已被识别为内嵌图片（通过 Content-ID）
+                content_id = part.get("Content-ID", "")
+                if content_id:
+                    cleaned_cid = content_id.strip().strip('<>')
+                    if cleaned_cid in exclude_cids:
+                        continue  # 跳过已识别的内嵌图片
 
                 content_type = part.get_content_type()
                 content_disposition = str(part.get("Content-Disposition", ""))
@@ -803,6 +903,154 @@ class EmailService:
 
         return file_path
 
+    def _extract_inline_images(self, msg, message_id: str) -> Dict[str, str]:
+        """
+        提取邮件中的内嵌图片（通过 Content-ID 引用的图片）
+
+        Args:
+            msg: 邮件消息对象
+            message_id: 邮件 Message-ID
+
+        Returns:
+            Dict[content_id, file_path] - Content-ID 到文件路径的映射
+        """
+        import shutil
+
+        inline_images = {}
+
+        if not msg.is_multipart():
+            return inline_images
+
+        for part in msg.walk():
+            # 跳过 multipart 容器
+            if part.get_content_maintype() == 'multipart':
+                continue
+
+            # 检查是否有 Content-ID
+            content_id = part.get("Content-ID", "")
+            if not content_id:
+                continue
+
+            # 清理 Content-ID（移除尖括号）
+            content_id = content_id.strip().strip('<>')
+            if not content_id:
+                continue
+
+            # 检查是否是图片类型
+            content_type = part.get_content_type()
+            if not content_type.startswith("image/"):
+                continue
+
+            # 获取文件内容
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+
+            # 检查大小限制（内嵌图片限制 10MB）
+            if len(payload) > 10 * 1024 * 1024:
+                print(f"[InlineImage] 跳过过大的图片: {content_id} ({len(payload) / 1024 / 1024:.1f}MB)")
+                continue
+
+            # 生成安全的文件名
+            filename = part.get_filename()
+            if filename:
+                filename = self._decode_header(filename)
+                filename = self._sanitize_filename(filename)
+            else:
+                # 根据 Content-Type 生成文件名
+                ext_map = {
+                    "image/jpeg": ".jpg",
+                    "image/png": ".png",
+                    "image/gif": ".gif",
+                    "image/webp": ".webp",
+                    "image/bmp": ".bmp",
+                    "image/svg+xml": ".svg",
+                }
+                ext = ext_map.get(content_type, ".bin")
+                # 使用 Content-ID 的 hash 作为文件名
+                import hashlib
+                safe_cid = hashlib.md5(content_id.encode()).hexdigest()[:12]
+                filename = f"inline_{safe_cid}{ext}"
+
+            # 创建存储目录
+            safe_msg_id = re.sub(r'[<>:"/\\|?*]', "_", message_id)
+            dir_path = os.path.join(self.inline_images_dir, safe_msg_id)
+
+            try:
+                os.makedirs(dir_path, exist_ok=True)
+            except (OSError, PermissionError) as e:
+                print(f"[InlineImage] 无法创建目录: {e}")
+                continue
+
+            # 检查磁盘空间
+            try:
+                stat = shutil.disk_usage(self.inline_images_dir)
+                if stat.free < len(payload) * 2:
+                    print(f"[InlineImage] 磁盘空间不足")
+                    continue
+            except (OSError, AttributeError):
+                pass
+
+            # 保存文件
+            file_path = os.path.join(dir_path, filename)
+
+            # 验证路径安全
+            abs_dir = os.path.abspath(dir_path)
+            abs_file = os.path.abspath(file_path)
+            if not abs_file.startswith(abs_dir):
+                print(f"[InlineImage] 非法文件路径: {filename}")
+                continue
+
+            try:
+                with open(file_path, "wb") as f:
+                    f.write(payload)
+                inline_images[content_id] = file_path
+                print(f"[InlineImage] 保存: {content_id} -> {filename} ({len(payload)} bytes)")
+            except (IOError, OSError) as e:
+                print(f"[InlineImage] 保存失败: {e}")
+
+        return inline_images
+
+    def _replace_cid_in_html(self, html: str, inline_images: Dict[str, str], message_id: str) -> str:
+        """
+        替换 HTML 中的 cid: 引用为服务器 URL
+
+        Args:
+            html: HTML 内容
+            inline_images: Content-ID 到文件路径的映射
+            message_id: 邮件 Message-ID
+
+        Returns:
+            替换后的 HTML
+        """
+        if not html or not inline_images:
+            return html
+
+        # 使用 message_id 作为 URL 的一部分
+        safe_msg_id = re.sub(r'[<>:"/\\|?*]', "_", message_id)
+
+        def replace_cid(match):
+            cid = match.group(1)
+            # 尝试匹配 Content-ID（有些邮件客户端可能不完全匹配）
+            if cid in inline_images:
+                # 获取文件名
+                file_path = inline_images[cid]
+                filename = os.path.basename(file_path)
+                # 返回服务器 URL
+                return f'src="/api/emails/inline/{safe_msg_id}/{filename}"'
+            # 未找到匹配，保留原样
+            return match.group(0)
+
+        # 替换 src="cid:xxx" 或 src='cid:xxx'
+        html = re.sub(
+            r'src=["\']cid:([^"\']+)["\']',
+            replace_cid,
+            html,
+            flags=re.IGNORECASE
+        )
+
+        return html
+
     def _get_thread_id(self, message_id: str, in_reply_to: str, references: str) -> str:
         """Determine thread ID for email
 
@@ -914,7 +1162,14 @@ class EmailService:
 
             # Add attachments
             if attachments:
-                for file_path in attachments:
+                for attachment in attachments:
+                    # 支持两种格式：字符串路径 或 (路径, 原始文件名) 元组
+                    if isinstance(attachment, tuple):
+                        file_path, original_name = attachment
+                    else:
+                        file_path = attachment
+                        original_name = os.path.basename(file_path)
+
                     if os.path.exists(file_path):
                         with open(file_path, "rb") as f:
                             part = MIMEBase("application", "octet-stream")
@@ -922,7 +1177,7 @@ class EmailService:
                             encoders.encode_base64(part)
                             part.add_header(
                                 "Content-Disposition",
-                                f"attachment; filename={os.path.basename(file_path)}"
+                                f"attachment; filename={original_name}"
                             )
                             msg.attach(part)
 

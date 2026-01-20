@@ -4,8 +4,9 @@
 包含：
 - translate_email_task: 翻译单封邮件（支持超长邮件分段翻译）
 - batch_translate_task: 批量翻译邮件
-- poll_batch_status: 轮询 Claude Batch API 状态
 - collect_and_translate_pending: 收集并翻译待处理邮件
+
+所有翻译任务使用本地 vLLM 大模型，零 API 成本。
 """
 import asyncio
 import re
@@ -134,7 +135,7 @@ def notify_completion(account_id: int, event_type: str, data: dict):
         print(f"[Notify] Failed to send notification: {e}")
 
 
-@celery_app.task(bind=True, max_retries=3, soft_time_limit=300, time_limit=360)
+@celery_app.task(bind=True, max_retries=3, soft_time_limit=600, time_limit=900)
 def translate_email_task(self, email_id: int, account_id: int, force: bool = False):
     """
     异步翻译单封邮件
@@ -161,20 +162,44 @@ def translate_email_task(self, email_id: int, account_id: int, force: bool = Fal
         if not email:
             return {"success": False, "error": "Email not found", "email_id": email_id}
 
+        # 中文邮件无需翻译，直接标记为已完成
+        if email.language_detected == 'zh':
+            email.is_translated = True
+            email.translation_status = 'completed'
+            db.commit()
+            print(f"[TranslateTask] Email {email_id} is Chinese, skipping translation")
+            # 发送完成通知
+            notify_completion(account_id, "translation_complete", {
+                "email_id": email_id,
+                "provider": "native_chinese",
+                "success": True,
+                "is_translated": True,
+                "translation_status": "completed"
+            })
+            return {"success": True, "email_id": email_id, "reason": "chinese_email"}
+
         # 检查是否已翻译
         if email.is_translated and not force:
             return {"success": True, "email_id": email_id, "cached": True}
 
         # 翻译锁：使用数据库原子更新防止并发翻译
-        # 只有状态为 none/pending/failed 的邮件才能开始翻译
-        from sqlalchemy import update
+        # 只有状态为 none/pending/failed/NULL 的邮件才能开始翻译
+        from sqlalchemy import update, or_
+        from datetime import datetime
         result = db.execute(
             update(Email)
             .where(and_(
                 Email.id == email_id,
-                Email.translation_status.in_(["none", "pending", "failed", None])
+                or_(
+                    Email.translation_status.in_(["none", "pending", "failed"]),
+                    Email.translation_status.is_(None)
+                )
             ))
-            .values(translation_status="translating")
+            .values(
+                translation_status="translating",
+                translate_started_at=datetime.utcnow(),
+                translate_retry_count=Email.translate_retry_count + 1
+            )
         )
         db.commit()
 
@@ -191,47 +216,82 @@ def translate_email_task(self, email_id: int, account_id: int, force: bool = Fal
 
         # 创建翻译服务（使用 vLLM）
         service = TranslateService(
-            provider=settings.translate_provider,
-            api_key=settings.claude_api_key,
             vllm_base_url=settings.vllm_base_url,
             vllm_model=settings.vllm_model,
-            claude_model=settings.claude_model,
+            vllm_api_key=settings.vllm_api_key,
         )
 
-        # 执行翻译
-        provider_used = settings.translate_provider
-        body_len = len(email.body_original or "")
+        # 执行翻译（统一使用 vLLM）
+        provider_used = "vllm"
+        body_original = email.body_original or ""
+        body_len = len(body_original)
         is_long_email = body_len > LONG_EMAIL_THRESHOLD
 
+        # 分离最新内容和引用内容
+        latest_content, quoted_content = service.extract_latest_email(body_original)
+        print(f"[TranslateTask] Email {email_id}: latest={len(latest_content)} chars, quoted={len(quoted_content)} chars")
+
         if is_long_email:
-            # 超长邮件：使用分段翻译
+            # 超长邮件：使用分段翻译（仅翻译最新内容）
             print(f"[TranslateTask] Long email detected ({body_len} bytes), using chunked translation")
             body_translated = translate_long_email(
                 service=service,
-                text=email.body_original,
+                text=latest_content,
                 target_lang="zh",
                 source_lang=email.language_detected,
                 glossary=None
             )
-            provider_used = f"{settings.translate_provider}+chunked"
-        elif settings.smart_routing_enabled and email.body_original:
-            # 智能路由翻译
+            provider_used = "vllm+chunked"
+        elif latest_content:
+            # 智能路由翻译最新内容
             result = service.translate_with_smart_routing(
-                text=email.body_original,
+                text=latest_content,
                 target_lang="zh",
                 source_lang=email.language_detected,
                 glossary=None,  # TODO: 加载术语表
                 subject=email.subject_original
             )
             body_translated = result.get("translated_text", "")
-            provider_used = result.get("provider_used", provider_used)
+            provider_used = result.get("provider_used", "vllm")
         else:
-            # 普通翻译
-            body_translated = service.translate_text(
-                text=email.body_original,
-                target_lang="zh",
-                source_lang=email.language_detected
-            )
+            # 空正文
+            body_translated = ""
+
+        # 处理引用内容
+        if quoted_content and body_translated:
+            quoted_translated = None
+
+            # 优先查找历史翻译（通过 in_reply_to）
+            if email.in_reply_to:
+                # 查找被引用邮件的翻译
+                original_email = db.query(Email).filter(
+                    Email.message_id == email.in_reply_to,
+                    Email.is_translated == True
+                ).first()
+                if original_email and original_email.body_translated:
+                    quoted_translated = original_email.body_translated
+                    print(f"[TranslateTask] Found historical translation for quoted content")
+                else:
+                    # 查找共享翻译
+                    shared_translation = db.query(SharedEmailTranslation).filter(
+                        SharedEmailTranslation.message_id == email.in_reply_to
+                    ).first()
+                    if shared_translation and shared_translation.body_translated:
+                        quoted_translated = shared_translation.body_translated
+                        print(f"[TranslateTask] Found shared translation for quoted content")
+
+            # 如果没有找到历史翻译，单独翻译引用内容
+            if not quoted_translated:
+                print(f"[TranslateTask] No historical translation found, translating quoted content")
+                quoted_translated = service.translate_quoted_content(
+                    quoted_content,
+                    target_lang="zh",
+                    source_lang=email.language_detected
+                )
+
+            # 合并翻译结果
+            if quoted_translated:
+                body_translated = f"{body_translated}\n\n--- 以下为引用内容（已翻译）---\n{quoted_translated}"
 
         # 翻译主题
         subject_translated = None
@@ -417,38 +477,6 @@ def batch_translate_task(self, email_ids: list, account_id: int, batch_size: int
 
 
 @celery_app.task(bind=True)
-def poll_batch_status(self):
-    """
-    轮询 Claude Batch API 状态
-
-    定时任务，检查所有进行中的批次并处理完成的结果
-    使用 batch_service 的 poll_and_process_batches 方法处理
-    """
-    from services.batch_service import get_batch_service
-
-    try:
-        # 使用 asyncio.run() 调用异步方法
-        service = get_batch_service()
-        result = asyncio.run(service.poll_and_process_batches())
-
-        checked = result.get("checked", 0)
-        completed = result.get("completed", 0)
-
-        if completed > 0:
-            print(f"[BatchPoll] Checked {checked} batches, completed {completed}")
-
-        return {
-            "checked": checked,
-            "completed": completed,
-            "results": result.get("results", [])
-        }
-
-    except Exception as e:
-        print(f"[BatchPoll] Error: {e}")
-        return {"error": str(e)}
-
-
-@celery_app.task(bind=True)
 def collect_and_translate_pending(self, limit: int = 500):
     """
     收集未翻译邮件并使用 vLLM 翻译
@@ -470,9 +498,16 @@ def collect_and_translate_pending(self, limit: int = 500):
     try:
         # 查找未翻译的邮件（包括 none、NULL、pending 状态）
         # 'pending' 状态是由 cleanup_stuck_translations 重置的邮件
+        # 排除中文邮件（language_detected = 'zh'），因为中文无需翻译
+        from sqlalchemy import or_
         pending_emails = db.query(Email).filter(
             Email.is_translated == False,
-            Email.translation_status.in_(['none', 'pending', None])
+            or_(
+                Email.translation_status.in_(['none', 'pending']),
+                Email.translation_status.is_(None)
+            ),
+            Email.language_detected != 'zh',  # 排除中文邮件
+            Email.language_detected.isnot(None)  # 排除未检测语言的邮件
         ).order_by(Email.received_at.desc()).limit(limit).all()
 
         if not pending_emails:
@@ -481,10 +516,8 @@ def collect_and_translate_pending(self, limit: int = 500):
         email_ids = [(e.id, e.account_id) for e in pending_emails]
         print(f"[CollectTranslate] Found {len(email_ids)} pending emails")
 
-        # 标记为 translating（正在处理）
-        for email in pending_emails:
-            email.translation_status = 'translating'
-        db.commit()
+        # 不在这里标记状态，让 translate_email_task 自己处理锁定
+        # 这样可以避免状态冲突
 
         # 创建翻译任务组
         tasks = group(

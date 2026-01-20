@@ -551,6 +551,11 @@ async def approve_draft(
     if not draft:
         raise HTTPException(status_code=404, detail="草稿不存在")
 
+    # 【安全】先验证权限，防止未授权用户通过幂等性检查获取信息
+    has_permission = await check_approver_permission(draft, account, db)
+    if not has_permission:
+        raise HTTPException(status_code=403, detail="您没有审批此邮件的权限")
+
     # 幂等性检查：如果已经发送过，直接返回成功
     if draft.status == "sent":
         return {"status": "sent", "message": "邮件已发送（重复请求）"}
@@ -565,11 +570,6 @@ async def approve_draft(
         draft.status = "sent"
         await db.commit()
         return {"status": "sent", "message": "邮件已发送（状态已修复）"}
-
-    # 验证当前用户有审批权限
-    has_permission = await check_approver_permission(draft, account, db)
-    if not has_permission:
-        raise HTTPException(status_code=403, detail="您没有审批此邮件的权限")
 
     if draft.status != "pending":
         raise HTTPException(status_code=400, detail="此草稿不在待审批状态")

@@ -224,6 +224,70 @@
       <TemplateManager @use="handleTemplateUse" />
     </el-card>
 
+    <!-- 附件存储统计 -->
+    <el-card style="margin-top: 20px;">
+      <template #header>
+        <span>附件存储统计</span>
+      </template>
+      <div v-loading="loadingStats">
+        <template v-if="storageStats">
+          <el-row :gutter="20">
+            <el-col :span="6">
+              <el-statistic title="附件总数" :value="storageStats.total_count" suffix="个" />
+            </el-col>
+            <el-col :span="6">
+              <el-statistic title="总存储空间">
+                <template #default>
+                  <span class="stat-value">{{ storageStats.total_size_formatted }}</span>
+                </template>
+              </el-statistic>
+            </el-col>
+            <el-col :span="6">
+              <el-statistic title="重复文件" :value="storageStats.duplicate_count" suffix="个" />
+            </el-col>
+            <el-col :span="6">
+              <el-statistic title="节省空间">
+                <template #default>
+                  <span class="stat-value">{{ formatSize(storageStats.duplicate_size_saved) }}</span>
+                </template>
+              </el-statistic>
+            </el-col>
+          </el-row>
+
+          <el-divider content-position="left">按类型分布</el-divider>
+          <div class="type-distribution">
+            <div
+              v-for="item in storageStats.type_distribution"
+              :key="item.type"
+              class="type-item"
+            >
+              <div class="type-bar">
+                <div
+                  class="type-fill"
+                  :style="{ width: item.percentage + '%', backgroundColor: getTypeColor(item.type) }"
+                ></div>
+              </div>
+              <div class="type-info">
+                <span class="type-label">{{ item.type }}</span>
+                <span class="type-count">{{ item.count }} 个 / {{ formatSize(item.size) }}</span>
+              </div>
+            </div>
+          </div>
+
+          <el-divider content-position="left">最大文件 TOP 5</el-divider>
+          <el-table :data="storageStats.largest_files.slice(0, 5)" size="small">
+            <el-table-column prop="filename" label="文件名" min-width="200" show-overflow-tooltip />
+            <el-table-column label="大小" width="100">
+              <template #default="{ row }">{{ formatSize(row.file_size) }}</template>
+            </el-table-column>
+            <el-table-column prop="email_subject" label="所属邮件" min-width="150" show-overflow-tooltip />
+            <el-table-column prop="sender" label="发件人" width="150" show-overflow-tooltip />
+          </el-table>
+        </template>
+        <el-empty v-else-if="!loadingStats" description="暂无附件统计数据" />
+      </div>
+    </el-card>
+
     <!-- 关于 -->
     <el-card style="margin-top: 20px;">
       <template #header>
@@ -276,6 +340,8 @@ const signatures = ref([])
 const approvers = ref([])
 const approvalGroups = ref([])
 const defaultApproverId = ref(null)
+const storageStats = ref(null)
+const loadingStats = ref(false)
 const signatureDialogVisible = ref(false)
 const groupDialogVisible = ref(false)
 const memberDialogVisible = ref(false)
@@ -328,6 +394,7 @@ onMounted(() => {
   loadSignatures()
   loadApprovers()
   loadApprovalGroups()
+  loadStorageStats()
 })
 
 async function loadApprovers() {
@@ -461,6 +528,38 @@ async function removeGroupMember(groupId, memberId) {
     console.error('Failed to remove member:', e)
     ElMessage.error('移除失败')
   }
+}
+
+// Storage stats functions
+async function loadStorageStats() {
+  loadingStats.value = true
+  try {
+    storageStats.value = await api.getAttachmentStats()
+  } catch (e) {
+    console.error('Failed to load storage stats:', e)
+  } finally {
+    loadingStats.value = false
+  }
+}
+
+function formatSize(bytes) {
+  if (!bytes) return '0 B'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
+}
+
+function getTypeColor(type) {
+  const colors = {
+    '图片': '#67C23A',
+    '文档': '#409EFF',
+    '表格': '#E6A23C',
+    '压缩包': '#909399',
+    '代码': '#F56C6C',
+    '其他': '#C0C4CC'
+  }
+  return colors[type] || '#C0C4CC'
 }
 
 // Signature functions
@@ -623,5 +722,53 @@ async function deleteSignature(signature) {
 
 .member-tags .el-tag {
   margin: 0;
+}
+
+/* Storage stats */
+.stat-value {
+  font-size: 24px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.type-distribution {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.type-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.type-bar {
+  flex: 1;
+  height: 20px;
+  background-color: #f5f7fa;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.type-fill {
+  height: 100%;
+  border-radius: 10px;
+  transition: width 0.3s ease;
+}
+
+.type-info {
+  width: 180px;
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+}
+
+.type-label {
+  color: #606266;
+}
+
+.type-count {
+  color: #909399;
 }
 </style>

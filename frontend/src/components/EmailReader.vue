@@ -60,8 +60,10 @@
           text
           size="small"
           @click="downloadAllAttachments"
+          :loading="downloadingAll"
         >
-          全部下载
+          <el-icon v-if="!downloadingAll"><FolderOpened /></el-icon>
+          打包下载
         </el-button>
       </div>
       <div class="attachments-list">
@@ -256,7 +258,7 @@
 
 <script setup>
 import { ref, watch, computed, onUnmounted } from 'vue'
-import { Back, Right, Delete, Star, Paperclip, Document, DocumentCopy, View, Download, Picture, Folder, MagicStick } from '@element-plus/icons-vue'
+import { Back, Right, Delete, Star, Paperclip, Document, DocumentCopy, View, Download, Picture, Folder, FolderOpened, MagicStick } from '@element-plus/icons-vue'
 import DOMPurify from 'dompurify'
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
@@ -280,6 +282,7 @@ const translating = ref(false)
 const showHtmlDialog = ref(false)
 const showAttachmentPreview = ref(false)
 const previewIndex = ref(0)
+const downloadingAll = ref(false)
 
 // AI 回复建议
 const showSuggestionsDialog = ref(false)
@@ -530,15 +533,20 @@ async function generateAiSuggestions() {
 
   try {
     const res = await api.generateReplySuggestions(props.email.id)
+    // 组件卸载后不更新状态
+    if (isUnmounted) return
     aiSuggestions.value = res.data?.suggestions || []
     if (aiSuggestions.value.length > 0) {
       selectedSuggestion.value = 0  // 默认选中第一个
     }
   } catch (e) {
+    if (isUnmounted) return
     console.error('Failed to generate suggestions:', e)
     ElMessage.error('生成建议失败')
   } finally {
-    generatingSuggestions.value = false
+    if (!isUnmounted) {
+      generatingSuggestions.value = false
+    }
   }
 }
 
@@ -635,7 +643,19 @@ function formatFileSize(bytes) {
 }
 
 // ========== 附件预览相关函数 ==========
-const PREVIEWABLE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'pdf', 'txt', 'log', 'md', 'json', 'xml', 'csv', 'html', 'css', 'js']
+// 可预览的文件扩展名（包括图片、PDF、文本、Excel、Word）
+const PREVIEWABLE_EXTENSIONS = [
+  // 图片
+  'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg',
+  // PDF
+  'pdf',
+  // 文本/代码
+  'txt', 'log', 'md', 'json', 'xml', 'csv', 'html', 'css', 'js',
+  // Excel
+  'xls', 'xlsx', 'xlsm', 'xlsb',
+  // Word
+  'doc', 'docx'
+]
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg']
 
 function getFileExtension(filename) {
@@ -689,20 +709,34 @@ async function downloadAttachment(att) {
 }
 
 async function downloadAllAttachments() {
-  if (!props.email.attachments) return
-  for (const att of props.email.attachments) {
-    await downloadAttachment(att)
+  if (!props.email.attachments || props.email.attachments.length === 0) return
+
+  downloadingAll.value = true
+  try {
+    // 使用 ZIP 打包下载
+    await api.downloadAllAttachments(props.email.id)
+    ElMessage.success(`已打包下载 ${props.email.attachments.length} 个附件`)
+  } catch (e) {
+    console.error('ZIP download failed:', e)
+    // 如果 ZIP 下载失败，回退到逐个下载
+    ElMessage.info('正在逐个下载附件...')
+    for (const att of props.email.attachments) {
+      await downloadAttachment(att)
+    }
+    ElMessage.success(`已下载 ${props.email.attachments.length} 个附件`)
+  } finally {
+    downloadingAll.value = false
   }
-  ElMessage.success(`已下载 ${props.email.attachments.length} 个附件`)
 }
 
 function sanitizeHtml(html) {
   if (!html) return ''
 
-  // 先处理 cid: 图片，替换为占位符提示
+  // 对于仍然存在的 cid: 图片（后端未替换的情况），显示占位符
+  // 后端已经将内嵌图片的 cid: 替换为 /api/emails/inline/ URL
   let processedHtml = html.replace(
     /<img[^>]*src=["']cid:[^"']+["'][^>]*>/gi,
-    '<span style="display:inline-block;padding:4px 8px;background:#f5f5f5;border:1px solid #ddd;border-radius:4px;color:#999;font-size:12px;">[嵌入图片]</span>'
+    '<span style="display:inline-block;padding:4px 8px;background:#f5f5f5;border:1px solid #ddd;border-radius:4px;color:#999;font-size:12px;">[嵌入图片无法显示]</span>'
   )
 
   return DOMPurify.sanitize(processedHtml, {
@@ -726,10 +760,15 @@ function linkifyText(text) {
     .replace(/"/g, '&quot;')
   // URL 正则匹配（支持 http/https）
   const urlRegex = /(https?:\/\/[^\s<>"'&]+)/gi
-  // 将 URL 替换为可点击链接
-  const linked = escaped.replace(urlRegex, '<a href="$1" class="email-link" target="_blank">$1</a>')
+  // 将 URL 替换为可点击链接（添加 rel="noopener noreferrer" 防止 tabnabbing）
+  const linked = escaped.replace(urlRegex, '<a href="$1" class="email-link" target="_blank" rel="noopener noreferrer">$1</a>')
   // 保留换行
-  return linked.replace(/\n/g, '<br>')
+  const withBreaks = linked.replace(/\n/g, '<br>')
+  // 最终使用 DOMPurify 清理，确保安全（双重保险）
+  return DOMPurify.sanitize(withBreaks, {
+    ALLOWED_TAGS: ['a', 'br'],
+    ALLOWED_ATTR: ['href', 'class', 'target', 'rel']
+  })
 }
 
 // 处理链接点击

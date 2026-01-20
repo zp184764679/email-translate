@@ -1,5 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File, Form
 from fastapi.responses import FileResponse, Response
+import tempfile
+import shutil
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, update, and_
 from sqlalchemy.orm import selectinload
@@ -136,10 +138,20 @@ class EmailListResponse(BaseModel):
     total: int
 
 
+class QuotePartResponse(BaseModel):
+    """邮件引用部分响应"""
+    type: str  # "latest" 或 "quote"
+    original: Optional[str]
+    translated: Optional[str]
+    header: Optional[str]  # 引用头信息，如 "On xxx wrote:"
+    depth: int  # 嵌套深度，0 = 最新内容
+
+
 class EmailDetailResponse(EmailResponse):
-    """邮件详情响应（包含附件和标签）"""
+    """邮件详情响应（包含附件、标签和分层引用）"""
     attachments: List[AttachmentResponse] = []
     labels: List[LabelBriefResponse] = []
+    parsed_quotes: Optional[List[QuotePartResponse]] = None  # 分层引用内容
 
 
 class FetchEmailsRequest(BaseModel):
@@ -185,9 +197,9 @@ async def get_emails(
 
     # 搜索功能：搜索主题、正文、发件人
     if search:
-        # 限制搜索字符串长度，防止性能问题
-        if len(search) > 500:
-            search = search[:500]
+        # 限制搜索字符串长度，防止性能问题（200字符足够常规搜索）
+        if len(search) > 200:
+            search = search[:200]
         search_pattern = f"%{search}%"
         base_conditions.append(or_(
             Email.subject_original.ilike(search_pattern),
@@ -382,7 +394,7 @@ async def get_email(
     account: EmailAccount = Depends(get_current_account),
     db: AsyncSession = Depends(get_db)
 ):
-    """获取单封邮件详情（包含附件、标签和文件夹）"""
+    """获取单封邮件详情（包含附件、标签、文件夹和分层引用）"""
     result = await db.execute(
         select(Email)
         .options(
@@ -397,7 +409,76 @@ async def get_email(
     if not email:
         raise HTTPException(status_code=404, detail="邮件不存在")
 
-    return email
+    # 翻译回填：如果邮件语言非中文但翻译为空，从共享翻译表回填
+    if (not email.body_translated and
+        email.language_detected and
+        email.language_detected != 'zh' and
+        email.message_id):
+        try:
+            from database.models import SharedEmailTranslation
+            shared_result = await db.execute(
+                select(SharedEmailTranslation).where(
+                    SharedEmailTranslation.message_id == email.message_id
+                )
+            )
+            shared = shared_result.scalar_one_or_none()
+            if shared and shared.body_translated:
+                # 回填翻译到邮件记录
+                email.body_translated = shared.body_translated
+                if shared.subject_translated and not email.subject_translated:
+                    email.subject_translated = shared.subject_translated
+                email.is_translated = True
+                email.translation_status = "completed"
+                await db.commit()
+                logger.info(f"[翻译回填] 邮件 {email_id} 从共享表回填翻译成功")
+        except Exception as e:
+            logger.warning(f"[翻译回填] 邮件 {email_id} 回填失败: {e}")
+
+    # 解析引用层级（用于前端分层显示）
+    parsed_quotes = None
+    if email.body_original:
+        try:
+            from services.quote_parser_service import parse_email_quotes
+            parsed_quotes = parse_email_quotes(
+                email.body_original,
+                email.body_translated
+            )
+        except Exception as e:
+            logger.warning(f"[引用解析] 邮件 {email_id} 解析失败: {e}")
+
+    # 构建响应（添加 parsed_quotes 字段）
+    response = EmailDetailResponse(
+        id=email.id,
+        message_id=email.message_id,
+        from_email=email.from_email,
+        from_name=email.from_name,
+        to_email=email.to_email,
+        cc_email=email.cc_email,
+        bcc_email=email.bcc_email,
+        reply_to=email.reply_to,
+        subject_original=email.subject_original,
+        subject_translated=email.subject_translated,
+        body_original=email.body_original,
+        body_translated=email.body_translated,
+        body_html=email.body_html,
+        language_detected=email.language_detected,
+        direction=email.direction,
+        is_translated=email.is_translated,
+        is_read=email.is_read,
+        is_flagged=email.is_flagged,
+        translation_status=email.translation_status,
+        received_at=email.received_at,
+        supplier_id=email.supplier_id,
+        thread_id=email.thread_id,
+        in_reply_to=email.in_reply_to,
+        labels=[LabelBriefResponse(id=l.id, name=l.name, color=l.color) for l in email.labels],
+        attachments=[AttachmentResponse(
+            id=a.id, filename=a.filename, file_size=a.file_size, mime_type=a.mime_type
+        ) for a in email.attachments],
+        parsed_quotes=parsed_quotes
+    )
+
+    return response
 
 
 @router.get("/{email_id}/attachments")
@@ -435,6 +516,36 @@ async def get_email_thread(
         .order_by(Email.received_at.asc())
     )
     emails = result.scalars().all()
+
+    # 翻译回填：检查线程中每封邮件是否需要从共享表回填翻译
+    from database.models import SharedEmailTranslation
+    need_commit = False
+    for email in emails:
+        if (not email.body_translated and
+            email.language_detected and
+            email.language_detected != 'zh' and
+            email.message_id):
+            try:
+                shared_result = await db.execute(
+                    select(SharedEmailTranslation).where(
+                        SharedEmailTranslation.message_id == email.message_id
+                    )
+                )
+                shared = shared_result.scalar_one_or_none()
+                if shared and shared.body_translated:
+                    email.body_translated = shared.body_translated
+                    if shared.subject_translated and not email.subject_translated:
+                        email.subject_translated = shared.subject_translated
+                    email.is_translated = True
+                    email.translation_status = "completed"
+                    need_commit = True
+                    logger.info(f"[翻译回填] 线程邮件 {email.id} 从共享表回填翻译成功")
+            except Exception as e:
+                logger.warning(f"[翻译回填] 线程邮件 {email.id} 回填失败: {e}")
+
+    if need_commit:
+        await db.commit()
+
     return {"emails": emails, "count": len(emails)}
 
 
@@ -454,8 +565,14 @@ async def fetch_emails(
     return {"message": f"开始拉取 {account.email} 的邮件"}
 
 
-async def fetch_emails_background(account: EmailAccount, since_days: int):
-    """后台任务：拉取邮件并自动翻译（增量拉取优化）"""
+async def fetch_emails_background(account: EmailAccount, since_days: int, force_full_sync: bool = False):
+    """后台任务：拉取邮件并自动翻译（增量拉取优化）
+
+    Args:
+        account: 邮箱账户
+        since_days: 同步最近多少天的邮件
+        force_full_sync: 强制完整同步，忽略增量优化
+    """
     import asyncio
     import traceback
     import hashlib
@@ -478,7 +595,11 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
         )
         last_sync_time = latest_result.scalar()
 
-    if last_sync_time:
+    if force_full_sync:
+        # 强制完整同步：使用 since_days 参数，忽略增量优化
+        since_date = datetime.utcnow() - timedelta(days=since_days)
+        print(f"[Background] Force full sync, fetching emails from last {since_days} days")
+    elif last_sync_time:
         # 有历史邮件：从最新邮件时间开始拉取（往前推1天避免边界问题）
         since_date = last_sync_time - timedelta(days=1)
         print(f"[Background] Incremental fetch since {since_date} (last email: {last_sync_time})")
@@ -509,30 +630,31 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
         )
 
         # 在线程池中运行同步的IMAP操作，避免阻塞事件循环
-        # 传入 existing_message_ids 让 IMAP 层预过滤重复邮件
+        # 使用 fetch_emails_multi_folder 同时拉取收件箱和已发送文件夹
         loop = asyncio.get_event_loop()
-        emails = await loop.run_in_executor(
+        folder_results = await loop.run_in_executor(
             None,
-            lambda: service.fetch_emails(
+            lambda: service.fetch_emails_multi_folder(
+                folders=["inbox", "sent"],
                 since_date=since_date,
                 existing_message_ids=existing_message_ids
             )
         )
 
-        print(f"[Background] Fetched {len(emails)} new emails from IMAP")
+        # 合并所有文件夹的邮件到一个列表
+        emails = []
+        for folder_name, folder_emails in folder_results.items():
+            print(f"[Background] Fetched {len(folder_emails)} emails from {folder_name}")
+            emails.extend(folder_emails)
 
-        # 创建翻译服务（支持智能路由）
-        # 智能路由会根据邮件复杂度自动选择引擎：简单→vLLM，复杂→Claude
+        print(f"[Background] Total fetched {len(emails)} new emails from IMAP")
+
+        # 创建翻译服务（使用本地 vLLM）
         translate_service = TranslateService(
-            api_key=settings.claude_api_key,
-            provider=settings.translate_provider,
             vllm_base_url=settings.vllm_base_url,
             vllm_model=settings.vllm_model,
-            claude_model=getattr(settings, 'claude_model', None),
+            vllm_api_key=settings.vllm_api_key,
         )
-
-        # 是否启用智能路由（可通过配置控制）
-        use_smart_routing = getattr(settings, 'smart_routing_enabled', True)
 
         saved_count = 0
         translated_count = 0
@@ -638,6 +760,48 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                 except Exception as rule_error:
                     print(f"[RuleEngine] Error processing rules: {rule_error}")
 
+                # ========= 已发送邮件特殊处理 =========
+                # 从已发送文件夹拉取的邮件，尝试还原用户的中文原文
+                if email_data.get("direction") == "outbound":
+                    try:
+                        from database.models import SentEmailMapping
+                        # 查找发送记录
+                        sent_mapping_result = await db.execute(
+                            select(SentEmailMapping).where(
+                                SentEmailMapping.message_id == email_data["message_id"]
+                            )
+                        )
+                        sent_mapping = sent_mapping_result.scalar_one_or_none()
+
+                        if sent_mapping:
+                            # 找到发送记录，还原用户原文
+                            if sent_mapping.was_translated:
+                                # 用户写的中文，翻译后发送
+                                # 把用户的中文原文作为"翻译"显示
+                                new_email.subject_translated = sent_mapping.subject_original
+                                new_email.body_translated = sent_mapping.body_original
+                                new_email.is_translated = True
+                                new_email.translation_status = "completed"
+                                print(f"[OutboundEmail] Restored user's Chinese original for {email_data['message_id'][:30]}")
+                            else:
+                                # 用户直接用英文写的，无需翻译
+                                new_email.is_translated = False
+                                new_email.translation_status = "not_needed"
+                                print(f"[OutboundEmail] User wrote in English directly for {email_data['message_id'][:30]}")
+                            # 跳过后续翻译流程
+                            skip_translate = True
+                        else:
+                            # 通过其他软件发送，无发送记录
+                            # 标记为用户发送，跳过翻译
+                            new_email.is_translated = False
+                            new_email.translation_status = "user_sent"
+                            skip_translate = True
+                            print(f"[OutboundEmail] Sent via other software, skipping translation for {email_data['message_id'][:30]}")
+                    except Exception as outbound_err:
+                        print(f"[OutboundEmail] Error processing outbound email: {outbound_err}")
+                        # 出错时也跳过翻译，防止把用户发送的邮件再翻译
+                        skip_translate = True
+
                 # 自动翻译非中文邮件（如果没有被规则跳过）
                 lang = email_data.get("language_detected", "")
                 if lang and lang != "zh" and settings.translate_enabled and not skip_translate:
@@ -735,36 +899,28 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                                 # 3. 确定要翻译的内容
                                 text_to_translate = new_content if has_quote else body_original
 
-                                if use_smart_routing:
-                                    # 智能路由翻译（标题+正文一起翻译，提高上下文理解深度）
-                                    result = translate_service.translate_with_smart_routing(
-                                        text=text_to_translate,
-                                        subject=email_data.get("subject_original", ""),
-                                        target_lang="zh",
-                                        source_lang=lang,
-                                        translate_subject=True  # 标题与正文一起翻译
-                                    )
-                                    body_translated = result["translated_text"]
-                                    provider_used = result["provider_used"]
-                                    complexity_info = result["complexity"]
+                                # 使用 vLLM 智能路由翻译（标题+正文一起翻译，提高上下文理解深度）
+                                result = translate_service.translate_with_smart_routing(
+                                    text=text_to_translate,
+                                    subject=email_data.get("subject_original", ""),
+                                    target_lang="zh",
+                                    source_lang=lang,
+                                    translate_subject=True  # 标题与正文一起翻译
+                                )
+                                body_translated = result["translated_text"]
+                                provider_used = result["provider_used"]
+                                complexity_info = result["complexity"]
 
-                                    # 使用智能路由返回的标题翻译（如果有）
-                                    if result.get("subject_translated"):
-                                        subject_translated = result["subject_translated"]
-                                        print(f"[SmartRouting] Email {email_data['message_id'][:20]}... "
-                                              f"→ {provider_used} (complexity: {complexity_info['level']}, "
-                                              f"score: {complexity_info['score']}, subject+body combined)")
-                                    else:
-                                        print(f"[SmartRouting] Email {email_data['message_id'][:20]}... "
-                                              f"→ {provider_used} (complexity: {complexity_info['level']}, "
-                                              f"score: {complexity_info['score']})")
+                                # 使用智能路由返回的标题翻译（如果有）
+                                if result.get("subject_translated"):
+                                    subject_translated = result["subject_translated"]
+                                    print(f"[SmartRouting] Email {email_data['message_id'][:20]}... "
+                                          f"→ {provider_used} (complexity: {complexity_info['level']}, "
+                                          f"score: {complexity_info['score']}, subject+body combined)")
                                 else:
-                                    # 普通翻译（只翻译新内容）
-                                    body_translated = await translate_with_cache_async(
-                                        db, translate_service,
-                                        text_to_translate, lang, "zh"
-                                    )
-
+                                    print(f"[SmartRouting] Email {email_data['message_id'][:20]}... "
+                                          f"→ {provider_used} (complexity: {complexity_info['level']}, "
+                                          f"score: {complexity_info['score']})")
                                 # 4. 如果标题翻译为空但有原始标题，单独翻译标题
                                 if not subject_translated and email_data.get("subject_original"):
                                     subject_translated = await translate_with_cache_async(
@@ -823,7 +979,17 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                             extract_email_info_task.delay(new_email.id, account.id)
                             print(f"[AutoExtract] Task queued for email_id={new_email.id}")
                         except Exception as ex:
+                            # 记录失败但不阻塞，推送警告通知
                             print(f"[AutoExtract] Failed to queue task: {ex}")
+                            try:
+                                from services.notification_service import send_notification
+                                await send_notification(
+                                    account.id,
+                                    "task_warning",
+                                    {"message": "AI 提取任务队列失败，请检查 Celery 服务", "email_id": new_email.id}
+                                )
+                            except Exception:
+                                pass  # 通知失败不阻塞
 
                     except Exception as te:
                         print(f"[AutoTranslate] Failed for {email_data['message_id'][:30]}: {te}")
@@ -841,13 +1007,17 @@ async def fetch_emails_background(account: EmailAccount, since_days: int):
                         print(f"[EmailSync] Final commit failed after 3 retries: {commit_err}")
                         raise
 
-        # 在线程池中断开连接
-        await loop.run_in_executor(None, service.disconnect_imap)
         print(f"[Background] Fetched {len(emails)} from IMAP, saved {saved_count} new, skipped {skipped_count} existing, auto-translated {translated_count} for {mask_email(account.email)}")
 
     except Exception as e:
         print(f"[Background] Error fetching emails for {mask_email(account.email)}: {e}")
         traceback.print_exc()
+    finally:
+        # 确保 IMAP 连接被关闭（防止连接泄漏）
+        try:
+            await loop.run_in_executor(None, service.disconnect_imap)
+        except Exception:
+            pass  # 忽略断开连接时的错误
 
 
 def extract_new_content_from_reply(body: str) -> tuple[str, str, int]:
@@ -1172,9 +1342,14 @@ async def download_attachment(
         raise HTTPException(status_code=404, detail="附件文件不存在")
 
     # 安全检查：确保文件路径在允许的附件目录内（防止目录遍历攻击）
-    attachment_base_dir = os.path.abspath("data/attachments")
-    real_path = os.path.abspath(attachment.file_path)
-    if not real_path.startswith(attachment_base_dir):
+    from pathlib import Path
+    attachment_base_dir = Path("data/attachments").resolve()
+    real_path = Path(attachment.file_path).resolve()
+
+    # 使用 is_relative_to() 进行安全的路径检查（防止 /data/attachments-evil 绕过）
+    try:
+        real_path.relative_to(attachment_base_dir)
+    except ValueError:
         print(f"[Security] Blocked directory traversal attempt: {attachment.file_path}")
         raise HTTPException(status_code=403, detail="访问被拒绝")
 
@@ -1183,6 +1358,128 @@ async def download_attachment(
         path=real_path,  # 使用经过验证的绝对路径
         filename=attachment.filename,
         media_type=attachment.mime_type or "application/octet-stream"
+    )
+
+
+@router.get("/inline/{message_id}/{filename}")
+async def get_inline_image(
+    message_id: str,
+    filename: str,
+):
+    """
+    获取邮件内嵌图片
+
+    此端点不需要认证，因为：
+    1. message_id 是 UUID 格式的随机字符串，难以猜测
+    2. 图片通过 HTML 中的 <img src> 加载，无法携带认证头
+    3. 用户必须先登录才能看到包含图片链接的邮件内容
+    """
+    from pathlib import Path
+    import mimetypes
+
+    # 清理 message_id（防止路径遍历）
+    safe_msg_id = re.sub(r'[<>:"/\\|?*]', "_", message_id)
+
+    # 清理文件名（防止路径遍历）- 使用 pathlib 更安全
+    # Path.name 比 os.path.basename 更可靠，能处理更多边缘情况
+    safe_filename = Path(filename).name
+    # 额外验证：禁止空文件名、隐藏文件、特殊字符
+    if not safe_filename or safe_filename.startswith('.') or '..' in safe_filename:
+        raise HTTPException(status_code=400, detail="无效的文件名")
+    # 验证文件名长度（防止 buffer overflow 类攻击）
+    if len(safe_filename) > 255:
+        raise HTTPException(status_code=400, detail="文件名过长")
+
+    # 构建文件路径
+    inline_images_dir = Path("data/inline_images").resolve()
+    file_path = inline_images_dir / safe_msg_id / safe_filename
+
+    # 验证文件路径在允许目录内
+    try:
+        file_path = file_path.resolve()
+        file_path.relative_to(inline_images_dir)
+    except ValueError:
+        print(f"[Security] Blocked inline image traversal: {message_id}/{filename}")
+        raise HTTPException(status_code=403, detail="访问被拒绝")
+
+    # 检查文件是否存在
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="图片不存在")
+
+    # 检查是否是图片文件
+    mime_type, _ = mimetypes.guess_type(str(file_path))
+    if not mime_type or not mime_type.startswith("image/"):
+        raise HTTPException(status_code=403, detail="不是图片文件")
+
+    # 返回图片（设置缓存头，减少重复请求）
+    return FileResponse(
+        path=file_path,
+        media_type=mime_type,
+        headers={
+            "Cache-Control": "public, max-age=86400",  # 缓存 24 小时
+            "X-Content-Type-Options": "nosniff",
+        }
+    )
+
+
+@router.get("/{email_id}/attachments/download-all")
+async def download_all_attachments_as_zip(
+    email_id: int,
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """打包下载所有附件为 ZIP"""
+    import zipfile
+    import io
+    from fastapi.responses import StreamingResponse
+
+    # 验证邮件属于当前用户
+    email_result = await db.execute(
+        select(Email).where(Email.id == email_id, Email.account_id == account.id)
+    )
+    email = email_result.scalar_one_or_none()
+    if not email:
+        raise HTTPException(status_code=404, detail="邮件不存在")
+
+    # 获取所有附件
+    att_result = await db.execute(
+        select(Attachment).where(Attachment.email_id == email_id)
+    )
+    attachments = att_result.scalars().all()
+
+    if not attachments:
+        raise HTTPException(status_code=404, detail="该邮件没有附件")
+
+    # 在内存中创建 ZIP
+    from pathlib import Path
+    attachment_base_dir = Path("data/attachments").resolve()
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        for att in attachments:
+            if att.file_path and os.path.exists(att.file_path):
+                # 安全检查
+                real_path = Path(att.file_path).resolve()
+                try:
+                    real_path.relative_to(attachment_base_dir)
+                except ValueError:
+                    continue  # 跳过非法路径
+
+                # 添加到 ZIP（使用原始文件名）
+                zip_file.write(real_path, att.filename)
+
+    zip_buffer.seek(0)
+
+    # 生成 ZIP 文件名
+    subject_clean = email.subject[:30].replace('/', '_').replace('\\', '_') if email.subject else 'attachments'
+    zip_filename = f"{subject_clean}_附件.zip"
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{zip_filename}"'
+        }
     )
 
 
@@ -1782,13 +2079,11 @@ async def translate_email(
                 print(f"[MySQL HIT] hit_count={cached.hit_count}")
                 return cached.translated_text
 
-            # 调用翻译 API
+            # 调用翻译 API（使用本地 vLLM）
             service = TranslateService(
-                api_key=settings.claude_api_key,
-                provider=settings.translate_provider,
                 vllm_base_url=settings.vllm_base_url,
                 vllm_model=settings.vllm_model,
-                claude_model=getattr(settings, 'claude_model', None),
+                vllm_api_key=settings.vllm_api_key,
             )
 
             translated = service.translate_text(text=text, target_lang=target_lang)
@@ -1827,19 +2122,15 @@ async def translate_email(
         display_body_translated = "" # 显示翻译，用于 Email.body_translated
         provider_used = "unknown"
         if body_to_translate:
-            # 创建翻译服务
+            # 创建翻译服务（使用本地 vLLM）
             service = TranslateService(
-                api_key=settings.claude_api_key,
-                provider=settings.translate_provider,
                 vllm_base_url=settings.vllm_base_url,
                 vllm_model=settings.vllm_model,
-                claude_model=getattr(settings, 'claude_model', None),
+                vllm_api_key=settings.vllm_api_key,
             )
 
-            # 检查是否启用智能路由（与新邮件自动翻译保持一致）
-            use_smart_routing = getattr(settings, 'smart_routing_enabled', True)
-
-            if use_smart_routing:
+            # 智能路由翻译（使用 vLLM）
+            if True:
                 # 智能路由翻译（根据复杂度自动选择引擎）
                 # 先检查引用内容是否是用户自己发送的邮件
                 new_content, quoted_content, user_original, was_translated = await restore_user_original_in_quotes(
@@ -1908,21 +2199,7 @@ async def translate_email(
                         email.subject_original, source_lang, "zh"
                     )
 
-            else:
-                # 普通智能翻译（检测引用，只翻译新内容）
-                translate_result = await smart_translate_email_body(
-                    db, service, body_to_translate, source_lang, "zh",
-                    in_reply_to=email.in_reply_to
-                )
-                pure_body_translated = translate_result['pure']
-                display_body_translated = translate_result['display']
-                provider_used = settings.translate_provider
-
-                # 非智能路由模式下，单独翻译标题
-                if email.subject_original:
-                    subject_translated = await translate_with_cache(
-                        email.subject_original, source_lang, "zh"
-                    )
+            # else 分支已移除（统一使用 vLLM 智能路由）
 
         # 4. 更新邮件记录
         email.subject_translated = subject_translated
@@ -2027,3 +2304,87 @@ async def send_email(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"发送失败: {str(e)}")
+
+
+@router.post("/send-with-attachments")
+async def send_email_with_attachments(
+    to: str = Form(...),
+    subject: str = Form(...),
+    body: str = Form(...),
+    cc: Optional[str] = Form(None),
+    attachments: List[UploadFile] = File(default=[]),
+    account: EmailAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """发送带附件的邮件"""
+    # 速率限制
+    send_limiter.check(f"user:{account.id}")
+
+    temp_files = []
+    try:
+        # 保存上传的附件到临时文件
+        attachment_paths = []
+        for upload in attachments:
+            if upload.filename:
+                # 创建临时文件
+                suffix = os.path.splitext(upload.filename)[1]
+                temp_file = tempfile.NamedTemporaryFile(
+                    delete=False,
+                    suffix=suffix,
+                    prefix=f"{upload.filename}_"
+                )
+                temp_files.append(temp_file.name)
+
+                # 写入上传内容
+                shutil.copyfileobj(upload.file, temp_file)
+                temp_file.close()
+
+                # 记录路径和原始文件名
+                attachment_paths.append((temp_file.name, upload.filename))
+
+        service = EmailService(
+            imap_server=account.imap_server,
+            smtp_server=account.smtp_server,
+            email_address=account.email,
+            password=decrypt_password(account.password),
+            smtp_port=account.smtp_port
+        )
+
+        success, message_id = service.send_email(
+            to=to,
+            subject=subject,
+            body=body,
+            cc=cc,
+            attachments=attachment_paths if attachment_paths else None
+        )
+
+        if success:
+            if message_id:
+                mapping = SentEmailMapping(
+                    message_id=message_id,
+                    draft_id=None,
+                    account_id=account.id,
+                    subject_original=subject,
+                    subject_sent=subject,
+                    body_original=body,
+                    body_sent=body,
+                    was_translated=False,
+                    to_email=to
+                )
+                db.add(mapping)
+                await db.commit()
+
+            return {"status": "sent", "message": f"邮件发送成功，包含 {len(attachment_paths)} 个附件"}
+        else:
+            raise HTTPException(status_code=500, detail="邮件发送失败")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"发送失败: {str(e)}")
+    finally:
+        # 清理临时文件
+        for temp_path in temp_files:
+            try:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+            except Exception:
+                pass

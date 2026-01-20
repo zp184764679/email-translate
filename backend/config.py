@@ -33,21 +33,13 @@ class Settings(BaseSettings):
     mysql_password: str = ""
     mysql_database: str = "email_translate"
 
-    # Translation API
-    translate_provider: str = "vllm"  # "vllm" or "claude"
+    # Translation API - 使用本地 vLLM 大模型
     translate_enabled: bool = True
 
-    # vLLM Gateway - 主力翻译引擎
+    # vLLM Gateway - 唯一翻译引擎（本地大模型，免费）
     vllm_base_url: str = "http://localhost:5081"
     vllm_model: str = "/home/aaa/models/Qwen3-VL-8B-Instruct"
     vllm_api_key: str = ""  # Gateway API Key
-
-    # Claude API (Anthropic) - 复杂邮件用
-    claude_api_key: str = ""
-    claude_model: str = "claude-sonnet-4-20250514"
-
-    # 智能路由配置
-    smart_routing_enabled: bool = True  # 是否启用智能路由（根据复杂度选择翻译引擎）
 
     # JWT Auth
     secret_key: str = "email-translate-secret-key-change-in-production"
@@ -59,20 +51,38 @@ class Settings(BaseSettings):
     def validate_secret_key(cls, v: str) -> str:
         """验证 SECRET_KEY 安全性"""
         default_key = "email-translate-secret-key-change-in-production"
+        env = os.environ.get('ENV', 'dev').lower()
+        is_production = env == 'production'
+
         if v == default_key:
-            warnings.warn(
-                "使用默认 SECRET_KEY 不安全！请在 .env 中设置 SECRET_KEY 环境变量。",
-                UserWarning
-            )
+            if is_production:
+                # 生产环境必须修改默认密钥
+                raise ValueError(
+                    "生产环境禁止使用默认 SECRET_KEY！"
+                    "请在 .env 中设置 SECRET_KEY=<强随机密钥>。"
+                    "可以使用 python -c \"import secrets; print(secrets.token_urlsafe(32))\" 生成。"
+                )
+            else:
+                warnings.warn(
+                    "使用默认 SECRET_KEY 不安全！请在 .env 中设置 SECRET_KEY 环境变量。",
+                    UserWarning
+                )
+
         if len(v) < 32:
-            warnings.warn(
-                f"SECRET_KEY 长度（{len(v)}）小于推荐的 32 字符，建议使用更长的密钥。",
-                UserWarning
-            )
+            if is_production:
+                raise ValueError(
+                    f"SECRET_KEY 长度（{len(v)}）不足 32 字符，生产环境要求至少 32 字符。"
+                )
+            else:
+                warnings.warn(
+                    f"SECRET_KEY 长度（{len(v)}）小于推荐的 32 字符，建议使用更长的密钥。",
+                    UserWarning
+                )
+
         return v
 
     # Email polling
-    email_poll_interval: int = 300  # 5 minutes
+    email_poll_interval: int = 60  # 1 minute
 
     # Celery 配置
     celery_broker_url: str = "redis://localhost:6379/1"

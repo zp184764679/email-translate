@@ -5,10 +5,8 @@
  * 使用 JWT token 进行认证
  */
 
-// 获取 storage key（与 api/index.js 保持一致）
-function getStorageKey(key) {
-  return `email_translate_${key}`
-}
+// 从 api 导入统一的 storage key 函数（确保前缀一致）
+import { getStorageKey } from '@/api'
 
 class WebSocketManager {
   constructor() {
@@ -18,13 +16,16 @@ class WebSocketManager {
     this.reconnectAttempts = 0
     this.maxReconnectAttempts = 5
     this.reconnectDelay = 3000
-    this.heartbeatInterval = 25000
+    // 心跳间隔设为 30 秒，与后端保持一致（后端 heartbeat_interval = 30）
+    this.heartbeatInterval = 30000
     this.heartbeatTimer = null
     this.listeners = new Map()
     this.isConnecting = false
     this.isManualClose = false
     // 连接版本号，用于防止过期重连
     this.connectionVersion = 0
+    // 初始化标志，确保只初始化一次
+    this.isInitialized = false
   }
 
   /**
@@ -32,9 +33,18 @@ class WebSocketManager {
    * @param {number} accountId - 账户ID（仅用于记录，认证使用 token）
    */
   connect(accountId) {
-    if (this.isConnecting || (this.ws && this.ws.readyState === WebSocket.OPEN)) {
-      console.log('[WS] Already connected or connecting')
+    // 更健壮的连接状态检查
+    if (this.isConnecting) {
+      console.log('[WS] Already connecting, skip')
       return
+    }
+
+    if (this.ws) {
+      const state = this.ws.readyState
+      if (state === WebSocket.CONNECTING || state === WebSocket.OPEN) {
+        console.log('[WS] Already connected or connecting, skip')
+        return
+      }
     }
 
     // 获取 token
@@ -44,24 +54,34 @@ class WebSocketManager {
       return
     }
 
+    // 检查 token 是否可能已过期（简单检查 JWT 格式和 exp）
+    if (!this.isTokenValid(this.token)) {
+      console.warn('[WS] Token appears expired, triggering re-login')
+      window.dispatchEvent(new CustomEvent('token-expired'))
+      return
+    }
+
     this.accountId = accountId
     this.isConnecting = true
     this.isManualClose = false
     this.connectionVersion++
     const currentVersion = this.connectionVersion
 
-    // 构建 WebSocket URL - 使用 token 认证
+    // 构建 WebSocket URL - 使用 subprotocol 传递 token（更安全，不暴露在 URL/日志中）
     const isDev = import.meta.env.DEV
     const apiBaseUrl = isDev ? 'http://127.0.0.1:2000' : 'https://jzchardware.cn/email'
     const wsProtocol = apiBaseUrl.startsWith('https') ? 'wss:' : 'ws:'
     const apiUrl = new URL(apiBaseUrl)
-    // 使用 token 作为 query 参数进行认证
-    const wsUrl = `${wsProtocol}//${apiUrl.host}${apiUrl.pathname}/ws?token=${encodeURIComponent(this.token)}`
+    // 不再将 token 放在 URL 中，改用 subprotocol 传递
+    const wsUrl = `${wsProtocol}//${apiUrl.host}${apiUrl.pathname}/ws`
 
     console.log(`[WS] Connecting (version ${currentVersion})...`)
 
     try {
-      this.ws = new WebSocket(wsUrl)
+      // 使用 Sec-WebSocket-Protocol header 传递 token（格式：auth.<base64-encoded-token>）
+      // 这样 token 不会暴露在 URL、浏览器历史和服务器日志中
+      const tokenProtocol = `auth.${btoa(this.token).replace(/=/g, '')}`
+      this.ws = new WebSocket(wsUrl, [tokenProtocol])
 
       this.ws.onopen = () => {
         const wasReconnecting = this.reconnectAttempts > 0
@@ -258,6 +278,38 @@ class WebSocketManager {
    */
   isConnected() {
     return this.ws && this.ws.readyState === WebSocket.OPEN
+  }
+
+  /**
+   * 检查 JWT token 是否有效（未过期）
+   * @param {string} token - JWT token
+   * @returns {boolean}
+   */
+  isTokenValid(token) {
+    if (!token) return false
+    try {
+      // JWT 格式: header.payload.signature
+      const parts = token.split('.')
+      if (parts.length !== 3) return false
+
+      // 解析 payload
+      const payload = JSON.parse(atob(parts[1]))
+
+      // 检查过期时间（exp 是 Unix 时间戳，秒）
+      if (payload.exp) {
+        const expTime = payload.exp * 1000  // 转为毫秒
+        const now = Date.now()
+        // 提前 5 分钟判定为过期，留出缓冲时间
+        if (now > expTime - 5 * 60 * 1000) {
+          console.log('[WS] Token will expire soon or already expired')
+          return false
+        }
+      }
+      return true
+    } catch (e) {
+      console.error('[WS] Failed to parse token:', e)
+      return false
+    }
   }
 }
 

@@ -108,19 +108,23 @@ def verify_email_credentials(email: str, password: str, imap_server: str, imap_p
 
     except imaplib.IMAP4.error as e:
         error_msg = str(e)
-        print(f"[IMAP] Login failed: {error_msg}")
+        # 【安全】只记录错误类型，不记录可能包含敏感信息的完整错误消息
+        error_type = type(e).__name__
+        print(f"[IMAP] Login failed for {mask_email(email)}: {error_type}")
 
-        # 解析常见错误
-        if "password" in error_msg.lower() or "incorrect" in error_msg.lower():
+        # 解析常见错误（只匹配关键词，不暴露原始消息）
+        error_lower = error_msg.lower()
+        if "password" in error_lower or "incorrect" in error_lower or "authentication" in error_lower:
             return False, "邮箱密码错误，请检查密码是否正确"
-        elif "abnormal" in error_msg.lower() or "not open" in error_msg.lower():
+        elif "abnormal" in error_lower or "not open" in error_lower:
             return False, "IMAP服务未开启，请在企业邮箱设置中开启IMAP/SMTP服务"
-        elif "frequency" in error_msg.lower() or "limited" in error_msg.lower():
+        elif "frequency" in error_lower or "limited" in error_lower:
             return False, "登录频率受限，请稍后再试"
-        elif "busy" in error_msg.lower():
+        elif "busy" in error_lower:
             return False, "邮箱服务器繁忙，请稍后再试"
         else:
-            return False, f"登录失败: {error_msg}"
+            # 【安全】返回通用错误消息，不暴露服务器错误详情
+            return False, "登录失败，请稍后重试或联系管理员"
 
     except socket.timeout:
         print(f"[IMAP] Connection timeout")
@@ -135,8 +139,10 @@ def verify_email_credentials(email: str, password: str, imap_server: str, imap_p
         return False, "邮箱服务器拒绝连接，请检查服务器配置"
 
     except Exception as e:
+        # 【安全】只记录错误类型和详情到日志，不返回给用户
         print(f"[IMAP] Unexpected error: {type(e).__name__}: {e}")
-        return False, f"连接错误: {str(e)}"
+        # 返回通用错误消息，不暴露内部错误详情
+        return False, "连接邮箱服务器时发生错误，请稍后重试"
     finally:
         socket.setdefaulttimeout(None)
 

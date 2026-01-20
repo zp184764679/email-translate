@@ -70,21 +70,37 @@ def fetch_emails_task(self, account_id: int, since_days: int = 30):
             "since_days": since_days
         })
 
-        # 创建邮件服务
+        # 创建邮件服务（使用 context manager 确保连接清理）
+        from utils.crypto import decrypt_password
         service = EmailService(
-            email=account.email,
-            password=account.password,
             imap_server=account.imap_server,
-            imap_port=account.imap_port,
             smtp_server=account.smtp_server,
+            email_address=account.email,
+            password=decrypt_password(account.password),
+            imap_port=account.imap_port,
             smtp_port=account.smtp_port
         )
 
-        # 计算起始日期
-        since_date = datetime.utcnow() - timedelta(days=since_days)
+        try:
+            # 计算起始日期
+            since_date = datetime.utcnow() - timedelta(days=since_days)
 
-        # 拉取邮件
-        emails = service.fetch_emails(since_date=since_date)
+            # 获取已存在的 message_ids（用于 IMAP 层预过滤，避免重复下载附件）
+            existing_message_ids = set(
+                row[0] for row in db.query(Email.message_id).filter(
+                    Email.account_id == account_id
+                ).all() if row[0]
+            )
+            print(f"[FetchTask] Found {len(existing_message_ids)} existing emails for pre-filter")
+
+            # 拉取邮件（传入 existing_message_ids 实现增量同步）
+            emails = service.fetch_emails(
+                since_date=since_date,
+                existing_message_ids=existing_message_ids
+            )
+        finally:
+            # 确保 IMAP 连接被关闭
+            service.disconnect_imap()
 
         new_count = 0
         total_count = len(emails)
@@ -189,12 +205,13 @@ def send_email_task(self, draft_id: int, account_id: int):
             return {"success": False, "error": "Account not found"}
 
         # 创建邮件服务
+        from utils.crypto import decrypt_password
         service = EmailService(
-            email=account.email,
-            password=account.password,
             imap_server=account.imap_server,
-            imap_port=account.imap_port,
             smtp_server=account.smtp_server,
+            email_address=account.email,
+            password=decrypt_password(account.password),
+            imap_port=account.imap_port,
             smtp_port=account.smtp_port
         )
 
@@ -202,7 +219,7 @@ def send_email_task(self, draft_id: int, account_id: int):
         to_addr = draft.to_address if draft.to_address else ""
         cc_addr = draft.cc_address if hasattr(draft, 'cc_address') and draft.cc_address else ""
 
-        # 发送邮件
+        # 发送邮件 (SMTP only, no IMAP connection to clean up)
         success = service.send_email(
             to=to_addr,
             cc=cc_addr if cc_addr else None,
@@ -492,5 +509,62 @@ def check_scheduled_emails(self):
         db.rollback()
         print(f"[ScheduledEmails] Task error: {e}")
         raise self.retry(exc=e, countdown=30)
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, soft_time_limit=300, time_limit=360)
+def auto_fetch_all_emails(self, since_days: int = 1):
+    """
+    自动拉取所有邮箱账户的新邮件（定时任务）
+
+    Args:
+        since_days: 拉取最近多少天的邮件（默认1天，确保时效性）
+
+    Returns:
+        dict: 拉取结果汇总
+    """
+    from database.models import EmailAccount
+
+    db = get_db_session()
+    results = []
+
+    try:
+        # 获取所有启用的邮箱账户
+        accounts = db.query(EmailAccount).filter(
+            EmailAccount.is_active == True
+        ).all()
+
+        print(f"[AutoFetch] Starting auto fetch for {len(accounts)} accounts")
+
+        for account in accounts:
+            try:
+                # 异步触发每个账户的拉取任务
+                task = fetch_emails_task.delay(account.id, since_days)
+                results.append({
+                    "account_id": account.id,
+                    "email": account.email,
+                    "task_id": task.id,
+                    "status": "triggered"
+                })
+                print(f"[AutoFetch] Triggered fetch for {account.email}")
+            except Exception as e:
+                print(f"[AutoFetch] Failed to trigger fetch for {account.email}: {e}")
+                results.append({
+                    "account_id": account.id,
+                    "email": account.email,
+                    "error": str(e),
+                    "status": "failed"
+                })
+
+        return {
+            "success": True,
+            "accounts_processed": len(accounts),
+            "results": results
+        }
+
+    except Exception as e:
+        print(f"[AutoFetch] Task error: {e}")
+        return {"success": False, "error": str(e)}
     finally:
         db.close()

@@ -10,6 +10,7 @@ from .users import router as users_router
 from .translate import router as translate_router
 from .approval import router as drafts_router  # 草稿/审批路由 (文件名 approval.py)
 from .suppliers import router as suppliers_router
+from .customers import router as customers_router
 from .signatures import router as signatures_router
 from .labels import router as labels_router
 from .folders import router as folders_router
@@ -25,6 +26,7 @@ from .templates import router as templates_router
 from .archive import router as archive_router
 from .classification import router as classification_router
 from .statistics import router as statistics_router
+from .attachments import router as attachments_router
 
 __all__ = [
     "emails_router",
@@ -32,6 +34,7 @@ __all__ = [
     "translate_router",
     "drafts_router",
     "suppliers_router",
+    "customers_router",
     "signatures_router",
     "labels_router",
     "folders_router",
@@ -47,4 +50,5 @@ __all__ = [
     "archive_router",
     "classification_router",
     "statistics_router",
+    "attachments_router",
 ]

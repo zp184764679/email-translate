@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey, JSON, Float, Table
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey, JSON, Float, Table, Index
 from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.orm import relationship
 from .database import Base
@@ -102,6 +102,8 @@ class Email(Base):
     is_flagged = Column(Boolean, default=False)
     # 翻译状态：none(未翻译), translating(翻译中), completed(已完成), failed(失败)
     translation_status = Column(String(20), default="none", index=True)
+    translate_retry_count = Column(Integer, default=0)  # 翻译重试次数
+    translate_started_at = Column(DateTime)  # 翻译开始时间
 
     received_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -121,6 +123,22 @@ class Email(Base):
     labels = relationship("EmailLabel", secondary=email_label_mappings, back_populates="emails")
     archive_folder = relationship("ArchiveFolder", back_populates="emails")
     folders = relationship("EmailFolder", secondary=email_folder_mappings, back_populates="emails")
+
+    # 复合索引优化常用查询
+    __table_args__ = (
+        # 按账户和时间查询邮件（最常用的邮件列表查询）
+        Index('idx_email_account_received', 'account_id', 'received_at'),
+        # 按供应商和时间查询
+        Index('idx_email_supplier_received', 'supplier_id', 'received_at'),
+        # 查找未翻译邮件（翻译任务调度）
+        Index('idx_email_translation', 'is_translated', 'translation_status'),
+        # 查找未读邮件
+        Index('idx_email_account_read', 'account_id', 'is_read'),
+        # 查找星标邮件
+        Index('idx_email_account_flagged', 'account_id', 'is_flagged'),
+        # 归档查询
+        Index('idx_email_archived', 'archived_at', 'archive_folder_id'),
+    )
 
 
 class Attachment(Base):
@@ -941,5 +959,111 @@ class EmailTemplateTranslation(Base):
 
     __table_args__ = (
         # 每个模板只能有一个相同语言的翻译
+        {'mysql_engine': 'InnoDB'},
+    )
+
+
+# ============ 客户管理模块 ============
+
+# 客户-标签 多对多关联表
+customer_tag_mappings = Table(
+    'customer_tag_mappings',
+    Base.metadata,
+    Column('customer_id', Integer, ForeignKey('customers.id', ondelete='CASCADE'), primary_key=True),
+    Column('tag_id', Integer, ForeignKey('customer_tags.id', ondelete='CASCADE'), primary_key=True),
+    Column('created_at', DateTime, default=datetime.utcnow)
+)
+
+
+class Customer(Base):
+    """客户主表 - 管理客户信息"""
+    __tablename__ = "customers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    email_domain = Column(String(255))  # 保留主域名（向后兼容）
+    contact_email = Column(String(255))  # 保留主联系邮箱（向后兼容）
+    country = Column(String(100))  # 国家/地区
+    notes = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # AI 分类相关字段
+    category = Column(String(50), index=True)  # AI分析的类别
+    category_confidence = Column(Float)  # 置信度(0-1)
+    category_reason = Column(Text)  # 分类依据说明
+    category_analyzed_at = Column(DateTime)  # 分析时间
+    category_manual = Column(Boolean, default=False)  # 是否人工修改
+
+    # 关系
+    domains = relationship("CustomerDomain", back_populates="customer", cascade="all, delete-orphan")
+    contacts = relationship("CustomerContact", back_populates="customer", cascade="all, delete-orphan")
+    tags = relationship("CustomerTag", secondary=customer_tag_mappings, back_populates="customers")
+
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
+
+
+class CustomerDomain(Base):
+    """客户多域名表 - 一个客户可关联多个邮箱域名"""
+    __tablename__ = "customer_domains"
+
+    id = Column(Integer, primary_key=True, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id", ondelete="CASCADE"), nullable=False)
+    email_domain = Column(String(255), nullable=False, unique=True)  # 邮箱域名
+    is_primary = Column(Boolean, default=False)  # 是否主域名
+    description = Column(String(100))  # 域名描述
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # 关系
+    customer = relationship("Customer", back_populates="domains")
+
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
+
+
+class CustomerContact(Base):
+    """客户联系人表 - 管理客户的多个联系人"""
+    __tablename__ = "customer_contacts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String(100), nullable=False)  # 联系人姓名
+    email = Column(String(255), nullable=False)  # 邮箱地址
+    phone = Column(String(50))  # 电话号码
+    role = Column(String(50))  # 角色：sales/tech/finance/logistics/manager/other
+    department = Column(String(100))  # 部门
+    is_primary = Column(Boolean, default=False)  # 是否主要联系人
+    notes = Column(Text)  # 备注
+    last_contact_at = Column(DateTime)  # 最后联系时间
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # 关系
+    customer = relationship("Customer", back_populates="contacts")
+
+    __table_args__ = (
+        {'mysql_engine': 'InnoDB'},
+    )
+
+
+class CustomerTag(Base):
+    """客户标签表 - 用于标记和筛选客户"""
+    __tablename__ = "customer_tags"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("email_accounts.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String(50), nullable=False)  # 标签名称
+    color = Column(String(20), default="#409EFF")  # 标签颜色
+    description = Column(String(255))  # 标签描述
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # 关系
+    account = relationship("EmailAccount")
+    customers = relationship("Customer", secondary=customer_tag_mappings, back_populates="tags")
+
+    __table_args__ = (
         {'mysql_engine': 'InnoDB'},
     )

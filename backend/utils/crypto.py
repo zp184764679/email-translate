@@ -17,9 +17,19 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-# 用于密钥派生的固定盐（不需要保密，但需要固定）
-# 生产环境也可以从环境变量读取
-_SALT = b'email-translate-salt-v1'
+# 用于密钥派生的盐值
+# 可从环境变量 ENCRYPTION_SALT 读取，如果未设置则使用默认值
+# 注意：盐值不需要保密，但一旦设置不能更改，否则无法解密现有数据
+_DEFAULT_SALT = b'email-translate-salt-v1'
+_SALT = os.environ.get('ENCRYPTION_SALT', '').encode('utf-8') or _DEFAULT_SALT
+
+# 安全检查：如果使用默认盐值且在生产环境，打印警告
+if _SALT == _DEFAULT_SALT and os.environ.get('ENV', 'dev') == 'production':
+    import warnings
+    warnings.warn(
+        "生产环境使用默认 ENCRYPTION_SALT 不安全！建议在 .env 中设置自定义盐值。",
+        UserWarning
+    )
 
 
 def _get_fernet() -> Fernet:
@@ -28,7 +38,17 @@ def _get_fernet() -> Fernet:
 
     从 SECRET_KEY 环境变量派生加密密钥
     """
-    secret_key = os.environ.get("SECRET_KEY", "email-translate-secret-key-change-in-production")
+    secret_key = os.environ.get("SECRET_KEY")
+    if not secret_key:
+        raise RuntimeError(
+            "SECRET_KEY 环境变量未设置！"
+            "请在 .env 文件中设置 SECRET_KEY=<强随机密钥>。"
+            "可以使用 python -c \"import secrets; print(secrets.token_urlsafe(32))\" 生成。"
+        )
+    if len(secret_key) < 32:
+        raise RuntimeError(
+            f"SECRET_KEY 太短（当前 {len(secret_key)} 字符），至少需要 32 字符。"
+        )
 
     # 使用 PBKDF2 从 SECRET_KEY 派生 Fernet 兼容的密钥
     kdf = PBKDF2HMAC(

@@ -96,11 +96,6 @@ celery_app.conf.update(
             "task": "tasks.maintenance_tasks.rebuild_contacts_index",
             "schedule": crontab(hour=4, minute=0),
         },
-        # Batch API 轮询 - 每30秒
-        "poll-batch-status": {
-            "task": "tasks.translate_tasks.poll_batch_status",
-            "schedule": 30.0,
-        },
         # 日历事件提醒检查 - 每分钟
         "check-event-reminders": {
             "task": "tasks.reminder_tasks.check_event_reminders",
@@ -116,16 +111,35 @@ celery_app.conf.update(
             "task": "tasks.maintenance_tasks.reset_monthly_quota",
             "schedule": crontab(day_of_month=1, hour=0, minute=0),
         },
-        # 收集未翻译邮件并翻译（vLLM）- 每5分钟
+        # 收集未翻译邮件并翻译（vLLM）- 每1分钟
         "collect-and-translate-pending": {
             "task": "tasks.translate_tasks.collect_and_translate_pending",
-            "schedule": 300.0,  # 5分钟
+            "schedule": 60.0,  # 1分钟
             "kwargs": {"limit": 500},
         },
         # 检查并发送定时邮件 - 每分钟
         "check-scheduled-emails": {
             "task": "tasks.email_tasks.check_scheduled_emails",
             "schedule": 60.0,  # 每分钟
+        },
+        # 自动拉取新邮件 - 每1分钟
+        "auto-fetch-new-emails": {
+            "task": "tasks.email_tasks.auto_fetch_all_emails",
+            "schedule": 60.0,  # 1分钟
+            "kwargs": {"since_days": 1},  # 只拉取最近1天，保证时效性
+        },
+        # 收集并提取待处理邮件的任务信息 - 每2分钟
+        # 针对已翻译但未提取任务信息的邮件自动提取
+        "collect-and-extract-pending": {
+            "task": "tasks.task_extract_tasks.collect_and_extract_pending",
+            "schedule": 120.0,  # 2分钟
+            "kwargs": {"limit": 50},  # 每次最多50封，避免队列积压
+        },
+        # 数据一致性检查与自动修复 - 每小时
+        # 修复 is_translated 与 translation_status 不一致、清理空提取记录
+        "check-data-consistency": {
+            "task": "tasks.task_extract_tasks.check_data_consistency",
+            "schedule": 3600.0,  # 1小时
         },
     },
 )

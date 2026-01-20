@@ -255,15 +255,30 @@ async def get_extraction(
     # 提取公司内部参会人员
     internal_attendees = extract_internal_attendees(email.to_email, email.cc_email)
 
+    # 辅助函数：确保字段是列表（处理 JSON 字符串情况）
+    def ensure_list(value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            try:
+                import json
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, list) else []
+            except (json.JSONDecodeError, TypeError):
+                return []
+        if isinstance(value, list):
+            return value
+        return []
+
     return ExtractionResponse(
         id=extraction.id,
         email_id=extraction.email_id,
         summary=extraction.summary,
-        dates=extraction.dates or [],
-        amounts=extraction.amounts or [],
-        contacts=extraction.contacts or [],
-        action_items=extraction.action_items or [],
-        key_points=extraction.key_points or [],
+        dates=ensure_list(extraction.dates),
+        amounts=ensure_list(extraction.amounts),
+        contacts=ensure_list(extraction.contacts),
+        action_items=ensure_list(extraction.action_items),
+        key_points=ensure_list(extraction.key_points),
         internal_attendees=internal_attendees,
         extracted_at=extraction.extracted_at
     )

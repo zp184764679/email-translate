@@ -1,34 +1,15 @@
 import httpx
-from typing import List, Dict, Optional, Tuple
-import json
+from typing import List, Dict, Tuple
 import re
 import os
-from datetime import datetime, timezone
 
 
 class TranslateService:
-    """Translation service supporting vLLM and Claude API
+    """Translation service using local vLLM model
 
-    统一 API 模式：
-    - vllm: 本地 vLLM 翻译（OpenAI 兼容 API，主力引擎）
-    - claude: Claude API（复杂邮件用）
-
-    切换方式：修改 .env 中的 TRANSLATE_PROVIDER
+    使用本地 vLLM 大模型进行翻译，完全本地化，零 API 成本。
+    通过 vLLM Gateway (OpenAI 兼容 API) 调用。
     """
-
-    # Token 统计（类级别，跨实例累计）
-    _token_stats = {
-        "total_input_tokens": 0,
-        "total_output_tokens": 0,
-        "total_requests": 0,
-        "session_start": None,
-        "requests_log": [],  # 最近的请求记录
-        # Prompt Cache 统计
-        "cache_creation_tokens": 0,   # 缓存创建 token（首次请求，+25%费用）
-        "cache_read_tokens": 0,       # 缓存读取 token（后续请求，-90%费用）
-        "cache_hits": 0,              # 缓存命中次数
-        "cache_misses": 0             # 缓存未命中次数
-    }
 
     # 核心术语表（优化版 - 仅收录高频+易错术语）
     CORE_GLOSSARY = {
@@ -300,46 +281,27 @@ class TranslateService:
         "단가": "单价",
     }
 
-    def __init__(self, api_key: str = None, provider: str = "vllm", proxy_url: str = None,
-                 vllm_base_url: str = None, vllm_model: str = None, vllm_api_key: str = None,
-                 claude_model: str = None, **kwargs):
+    def __init__(self, vllm_base_url: str = None, vllm_model: str = None,
+                 vllm_api_key: str = None, **kwargs):
         """
-        Initialize translate service
+        Initialize translate service (vLLM only)
 
         Args:
-            api_key: API key (Claude)
-            provider: "vllm" or "claude"
-            proxy_url: Proxy URL (e.g., "http://127.0.0.1:7890")
             vllm_base_url: vLLM API base URL (e.g., "http://localhost:5081")
             vllm_model: vLLM model name (e.g., "/home/aaa/models/Qwen3-VL-8B-Instruct")
             vllm_api_key: vLLM Gateway API key (e.g., "email_xxxxx")
-            claude_model: Claude model name (e.g., "claude-sonnet-4-20250514")
         """
-        self.api_key = api_key
-        self.provider = provider
         self.vllm_base_url = vllm_base_url or "http://localhost:5081"
         self.vllm_model = vllm_model or "/home/aaa/models/Qwen3-VL-8B-Instruct"
         self.vllm_api_key = vllm_api_key or os.environ.get("VLLM_API_KEY")
-        self.claude_model = claude_model or "claude-sonnet-4-20250514"
-
-        # Get proxy from parameter or env var
-        proxy = proxy_url or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
 
         # vLLM headers (for Gateway authentication)
         self.vllm_headers = {}
         if self.vllm_api_key:
             self.vllm_headers["Authorization"] = f"Bearer {self.vllm_api_key}"
 
-        if proxy and provider != "vllm":
-            print(f"[TranslateService] Using proxy: {proxy}")
-            self.http_client = httpx.Client(proxy=proxy, timeout=120.0)
-        elif provider == "vllm":
-            # vLLM 本地模型需要更长的超时时间
-            self.http_client = httpx.Client(timeout=600.0, headers=self.vllm_headers)
-        else:
-            self.http_client = httpx.Client(timeout=120.0)
-
-        # 单独的 vLLM HTTP 客户端（智能路由用，超时更长，带认证）
+        # vLLM 本地模型需要较长的超时时间（600秒）
+        self.http_client = httpx.Client(timeout=600.0, headers=self.vllm_headers)
         self.vllm_client = httpx.Client(timeout=600.0, headers=self.vllm_headers)
 
     def _detect_language_type(self, text: str) -> str:
@@ -592,7 +554,7 @@ class TranslateService:
         # /think 前缀（vLLM 不支持）
         think_prefix = "/think\n" if use_think else ""
 
-        # 完整版提示词（基于 Claude 提示词 + 采购行业深度优化）
+        # 完整版提示词（采购行业深度优化）
         prompt = f"""{think_prefix}你是精密机械行业的资深商务翻译专家，专门翻译采购部门与海外供应商的往来邮件。你精通英语、日语、韩语与中文的互译，熟悉精密机械、汽车零部件、品质管理等领域的专业术语。
 
 ## 任务
@@ -768,309 +730,12 @@ Container: 40ft Blue Ring
             print(f"vLLM translation error: {e}")
             raise
 
-    # ============ Claude API Translation ============
-    def _build_claude_system_prompt(self, target_lang: str, source_lang: str = None,
-                                     glossary: List[Dict] = None) -> str:
-        """
-        构建 Claude 系统提示（用于 Prompt Cache）
-
-        注意：Claude Prompt Cache 要求最少 1024 tokens 才能缓存
-        当前系统提示设计为 ~1100 tokens，确保缓存生效
-        """
-        lang_names = {
-            "zh": "中文",
-            "en": "英文",
-            "ja": "日文",
-            "ko": "韩文"
-        }
-
-        target_name = lang_names.get(target_lang, target_lang)
-        source_name = lang_names.get(source_lang, "原文") if source_lang else "原文"
-
-        # 术语表
-        glossary_table = self._format_glossary_table(glossary)
-
-        # 系统提示（会被缓存，需要 >= 1024 tokens）
-        system_prompt = f"""你是精密机械行业的资深商务翻译专家，专门翻译采购部门与海外供应商的往来邮件。你精通英语、日语、韩语与中文的互译，熟悉精密机械、汽车零部件、品质管理等领域的专业术语。
-
-## 任务
-将{source_name}邮件翻译为{target_name}。**只输出译文，不要输出任何解释、思考过程或额外说明。**
-
-## 格式要求（最重要！）
-1. **逐行翻译**：原文每一行对应译文的一行，保持原文的换行结构
-2. **保持空行**：原文有空行的地方，译文也要有空行；原文没有空行，译文也不要加空行
-3. **不要合并段落**：即使原文是短句，也不要把多行合并成一行
-4. **不要添加内容**：不要添加原文没有的空行、分隔线、编号、标点等
-5. **保持列表格式**：如果原文有编号列表（1. 2. 3.）或符号列表（- * •），保持相同格式
-
-## 保持原样不翻译的内容
-- 人名（如 John Smith, 田中太郎, Wang Wei）
-- 公司名（如 Toyota, Bosch, Jingzhicheng）
-- 产品型号和零件编号（如 ABC-12345, Part No. 678）
-- 邮箱地址（如 xxx@company.com）
-- 电话号码和传真号码
-- 物理地址和邮编
-- 日期格式保持原样（如 2024/12/08, Dec 8, 2024）
-- 金额和货币符号（如 $100, ¥5000, €200）
-- 网址和链接
-
-## 翻译风格要求
-- 使用正式的商务语言，保持专业性
-- 避免过度意译，保持原文的信息完整性
-- 技术术语使用行业通用译法
-- 日语敬语翻译时保持礼貌程度
-
-## 常见邮件结构处理
-- 问候语：保持原文的礼貌程度（Dear Mr. → 尊敬的...先生）
-- 签名块：保持原格式，人名公司名不翻译
-- 附件说明：如"Please find attached"翻译为"请查收附件"
-- 邮件引用：带 > 的引用内容也需翻译
-
-## 日语特殊处理
-- 「お世話になっております」→「承蒙关照」（商务标准译法）
-- 「よろしくお願いします」→「请多关照」
-- 「ご確認ください」→「请确认」
-- 「ご検討ください」→「请评估/请考虑」
-- 敬语保持相应的礼貌程度
-
-## 核心术语表
-{glossary_table}
-
-## 翻译示例
-
-### 示例1：简单确认邮件
-原文：
-Thank you for your email.
-The shipment has been confirmed.
-
-译文：
-谢谢您的邮件。
-发货已确认。
-
-### 示例2：带列表的邮件
-原文：
-Please check the following items:
-1. Invoice No. 12345
-2. Packing list
-3. COA (Certificate of Analysis)
-
-译文：
-请确认以下项目：
-1. Invoice No. 12345
-2. 装箱单
-3. COA（分析证书）
-
-### 示例3：日语邮件
-原文：
-お世話になっております。
-納期の件、ご確認ください。
-
-译文：
-承蒙关照。
-关于交期事宜，请确认。"""
-
-        return system_prompt
-
-    def translate_with_claude(self, text: str, target_lang: str = "zh",
-                               source_lang: str = None, glossary: List[Dict] = None,
-                               use_cache: bool = True) -> str:
-        """
-        Translate text using Claude API (Anthropic)
-
-        Args:
-            text: Text to translate
-            target_lang: Target language (zh, en, ja)
-            source_lang: Source language (auto-detect if None)
-            glossary: List of term mappings for context
-            use_cache: Whether to use prompt caching (default True)
-
-        Prompt Caching:
-            - 系统提示（翻译规则、术语表）会被缓存
-            - 缓存有效期 5 分钟，期间重复请求可节省 ~90% input token
-            - 首次请求会写入缓存（有额外 25% 费用），后续请求读取缓存（节省 90%）
-        """
-        # 构建系统提示和用户消息
-        system_prompt = self._build_claude_system_prompt(target_lang, source_lang, glossary)
-        user_message = f"请翻译以下邮件：\n\n{text}"
-
-        # 请求头
-        headers = {
-            "x-api-key": self.api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json"
-        }
-
-        # 构建请求体
-        if use_cache:
-            # 使用 Prompt Cache：系统提示带 cache_control
-            headers["anthropic-beta"] = "prompt-caching-2024-07-31"
-            request_body = {
-                "model": self.claude_model,
-                "max_tokens": 4096,
-                "system": [
-                    {
-                        "type": "text",
-                        "text": system_prompt,
-                        "cache_control": {"type": "ephemeral"}  # 5分钟缓存
-                    }
-                ],
-                "messages": [
-                    {"role": "user", "content": user_message}
-                ]
-            }
-        else:
-            # 不使用缓存：传统方式
-            request_body = {
-                "model": self.claude_model,
-                "max_tokens": 4096,
-                "system": system_prompt,
-                "messages": [
-                    {"role": "user", "content": user_message}
-                ]
-            }
-
-        try:
-            response = self.http_client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers=headers,
-                json=request_body
-            )
-            response.raise_for_status()
-
-            result = response.json()
-            translated = result["content"][0]["text"].strip()
-
-            # 记录 token 使用情况（包含缓存信息）
-            usage = result.get("usage", {})
-            input_tokens = usage.get("input_tokens", 0)
-            output_tokens = usage.get("output_tokens", 0)
-            cache_creation_tokens = usage.get("cache_creation_input_tokens", 0)
-            cache_read_tokens = usage.get("cache_read_input_tokens", 0)
-
-            self._record_token_usage(input_tokens, output_tokens, len(text),
-                                     cache_creation_tokens, cache_read_tokens)
-
-            # 日志显示缓存状态
-            cache_status = ""
-            if cache_read_tokens > 0:
-                cache_status = f", cache_read={cache_read_tokens}"
-            elif cache_creation_tokens > 0:
-                cache_status = f", cache_created={cache_creation_tokens}"
-
-            print(f"[Claude] Translated to {target_lang} (in={input_tokens}, out={output_tokens}{cache_status})")
-            return translated
-
-        except httpx.HTTPStatusError as e:
-            print(f"Claude API error: {e.response.status_code} - {e.response.text}")
-            raise
-        except Exception as e:
-            print(f"Claude translation error: {e}")
-            raise
-
-    def _record_token_usage(self, input_tokens: int, output_tokens: int, text_length: int,
-                            cache_creation_tokens: int = 0, cache_read_tokens: int = 0):
-        """记录 token 使用情况（含缓存统计）"""
-        if self._token_stats["session_start"] is None:
-            self._token_stats["session_start"] = datetime.now().isoformat()
-
-        self._token_stats["total_input_tokens"] += input_tokens
-        self._token_stats["total_output_tokens"] += output_tokens
-        self._token_stats["total_requests"] += 1
-
-        # Prompt Cache 统计
-        self._token_stats["cache_creation_tokens"] += cache_creation_tokens
-        self._token_stats["cache_read_tokens"] += cache_read_tokens
-        if cache_read_tokens > 0:
-            self._token_stats["cache_hits"] += 1
-        elif cache_creation_tokens > 0:
-            self._token_stats["cache_misses"] += 1
-
-        # 保留最近 100 条记录
-        self._token_stats["requests_log"].append({
-            "timestamp": datetime.now().isoformat(),
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "text_length": text_length,
-            "cache_creation": cache_creation_tokens,
-            "cache_read": cache_read_tokens
-        })
-        if len(self._token_stats["requests_log"]) > 100:
-            self._token_stats["requests_log"] = self._token_stats["requests_log"][-100:]
-
-    @classmethod
-    def get_token_stats(cls) -> Dict:
-        """获取 token 统计信息（含 Prompt Cache）"""
-        stats = cls._token_stats.copy()
-        total_tokens = stats["total_input_tokens"] + stats["total_output_tokens"]
-
-        # Claude Sonnet 价格:
-        # - 普通 input: $3/M
-        # - 普通 output: $15/M
-        # - Cache write (creation): $3.75/M (+25%)
-        # - Cache read: $0.30/M (-90%)
-        input_cost = stats["total_input_tokens"] / 1_000_000 * 3
-        output_cost = stats["total_output_tokens"] / 1_000_000 * 15
-        cache_write_cost = stats.get("cache_creation_tokens", 0) / 1_000_000 * 3.75
-        cache_read_cost = stats.get("cache_read_tokens", 0) / 1_000_000 * 0.30
-        total_cost = input_cost + output_cost + cache_write_cost + cache_read_cost
-
-        # 计算缓存节省的费用（如果没有缓存，这些 token 要按 $3/M 计费）
-        cache_read_tokens = stats.get("cache_read_tokens", 0)
-        saved_cost = cache_read_tokens / 1_000_000 * (3 - 0.30)  # 节省 $2.70/M
-
-        # 计算平均值
-        avg_input = stats["total_input_tokens"] / max(stats["total_requests"], 1)
-        avg_output = stats["total_output_tokens"] / max(stats["total_requests"], 1)
-
-        # 缓存命中率
-        cache_hits = stats.get("cache_hits", 0)
-        cache_misses = stats.get("cache_misses", 0)
-        cache_total = cache_hits + cache_misses
-        cache_hit_rate = (cache_hits / cache_total * 100) if cache_total > 0 else 0
-
-        return {
-            "total_input_tokens": stats["total_input_tokens"],
-            "total_output_tokens": stats["total_output_tokens"],
-            "total_tokens": total_tokens,
-            "total_requests": stats["total_requests"],
-            "avg_input_tokens_per_request": round(avg_input, 1),
-            "avg_output_tokens_per_request": round(avg_output, 1),
-            "estimated_cost_usd": round(total_cost, 4),
-            "session_start": stats["session_start"],
-            "recent_requests": stats["requests_log"][-10:],  # 最近 10 条
-            # Prompt Cache 统计
-            "cache": {
-                "creation_tokens": stats.get("cache_creation_tokens", 0),
-                "read_tokens": cache_read_tokens,
-                "hits": cache_hits,
-                "misses": cache_misses,
-                "hit_rate_percent": round(cache_hit_rate, 1),
-                "saved_cost_usd": round(saved_cost, 4)
-            }
-        }
-
-    @classmethod
-    def reset_token_stats(cls):
-        """重置 token 统计"""
-        cls._token_stats = {
-            "total_input_tokens": 0,
-            "total_output_tokens": 0,
-            "total_requests": 0,
-            "session_start": None,
-            "requests_log": [],
-            "cache_creation_tokens": 0,
-            "cache_read_tokens": 0,
-            "cache_hits": 0,
-            "cache_misses": 0
-        }
-
     # ============ Main Translation Method ============
     def translate_text(self, text: str, target_lang: str = "zh",
                        glossary: List[Dict] = None, context: str = None,
-                       source_lang: str = None,
-                       enable_fallback: bool = True) -> str:
+                       source_lang: str = None, **kwargs) -> str:
         """
-        Translate text (main entry point)
+        Translate text using vLLM (main entry point)
 
         Args:
             text: Text to translate
@@ -1078,32 +743,13 @@ Please check the following items:
             glossary: List of term mappings
             context: Previous conversation context
             source_lang: Source language hint
-            enable_fallback: If True, fallback to vLLM when Claude fails
 
         Returns:
             Translated text
         """
-        # 空文本直接返回
         if not text:
             return ""
-        if self.provider == "vllm":
-            return self.translate_with_vllm(text, target_lang, source_lang, glossary)
-        elif self.provider == "claude":
-            try:
-                return self.translate_with_claude(text, target_lang, source_lang, glossary)
-            except Exception as e:
-                if enable_fallback and self.vllm_base_url:
-                    print(f"[TranslateService] Claude API failed: {e}")
-                    print(f"[TranslateService] Falling back to vLLM...")
-                    try:
-                        return self.translate_with_vllm(text, target_lang, source_lang, glossary)
-                    except Exception as vllm_error:
-                        print(f"[TranslateService] vLLM fallback also failed: {vllm_error}")
-                        raise e  # 抛出原始 Claude 错误
-                else:
-                    raise
-        else:
-            raise ValueError(f"Unknown provider: {self.provider}. Supported: vllm, claude")
+        return self.translate_with_vllm(text, target_lang, source_lang, glossary)
 
     def translate_with_smart_routing(self, text: str, subject: str = "",
                                       target_lang: str = "zh",
@@ -1111,408 +757,63 @@ Please check the following items:
                                       source_lang: str = None,
                                       translate_subject: bool = True) -> Dict:
         """
-        智能路由翻译 - 基于复杂度选择最优引擎
-
-        策略：
-        1. vLLM 快速评估复杂度（规则优先，必要时用LLM）
-        2. 根据复杂度选择引擎：
-           - 简单/中等(≤70分): vLLM 直接翻译（免费，质量好）
-           - 复杂(>70): Claude（正文）+ vLLM（签名）
+        翻译邮件（使用 vLLM 本地模型）
 
         Args:
             text: 邮件正文
-            subject: 邮件标题（用于复杂度分析和联合翻译）
-            translate_subject: 是否同时翻译标题（标题+正文一起翻译提高理解深度）
+            subject: 邮件标题
+            target_lang: 目标语言
+            glossary: 术语表
+            source_lang: 源语言
+            translate_subject: 是否同时翻译标题
 
         Returns:
             {
-                "translated_text": str,          # 正文翻译
-                "subject_translated": str,       # 标题翻译（如果 translate_subject=True）
-                "provider_used": str,
+                "translated_text": str,
+                "subject_translated": str,
+                "provider_used": "vllm",
                 "complexity": {"level", "score"},
-                "fallback_reason": str | None
+                "fallback_reason": None
             }
         """
         from services.email_analyzer import get_email_analyzer, ComplexityLevel
 
-        # 1. 评估复杂度
+        # 评估复杂度（仅用于日志）
         try:
             analyzer = get_email_analyzer(self.vllm_base_url, self.vllm_model)
             complexity, score = analyzer.quick_complexity_check(text, subject)
-            print(f"[SmartRouting] Complexity: {complexity.value} (score={score})")
+            print(f"[Translate] Complexity: {complexity.value} (score={score})")
         except Exception as e:
-            print(f"[SmartRouting] Complexity check failed: {e}, defaulting to MEDIUM")
+            print(f"[Translate] Complexity check failed: {e}, defaulting to MEDIUM")
             complexity = ComplexityLevel.MEDIUM
             score = 50
 
-        # 2. 根据复杂度选择策略
-        # 阈值与 email_analyzer.py 中的复杂度等级对齐：
-        #   - SIMPLE: <= 30 分
-        #   - MEDIUM: 31-70 分
-        #   - COMPLEX: > 70 分
-        # SIMPLE 和 MEDIUM 使用 vLLM（免费），COMPLEX 使用 Claude（更强但付费）
-        VLLM_THRESHOLD = 70  # 70分以下用 vLLM（覆盖 SIMPLE + MEDIUM）
-
-        if score <= VLLM_THRESHOLD:
-            # 简单/中等邮件：vLLM 直接翻译（免费，有提示词理解上下文）
-            print(f"[SmartRouting] Score {score} <= {VLLM_THRESHOLD} (SIMPLE/MEDIUM) -> vLLM")
-            return self._translate_simple(text, target_lang, source_lang, glossary, score,
-                                          subject if translate_subject else None)
-        else:
-            # 复杂邮件：Claude（正文）+ vLLM（签名）
-            print(f"[SmartRouting] Score {score} > {VLLM_THRESHOLD} (COMPLEX) -> Claude+vLLM")
-            return self._translate_complex(text, subject, target_lang, source_lang, glossary, score,
-                                           translate_subject)
-
-    def _parse_combined_translation(self, translated: str, original_subject: str,
-                                      original_body: str) -> Tuple[str, str]:
-        """
-        解析联合翻译结果，分离标题和正文翻译
-
-        Args:
-            translated: 模型输出的翻译结果（可能包含 [SUBJECT]...[/SUBJECT] 和 [BODY]...[/BODY]）
-            original_subject: 原始标题（用于回退）
-            original_body: 原始正文（用于长度估算）
-
-        Returns:
-            (subject_translated, body_translated)
-        """
-        # 方法1：尝试解析标记格式
-        subject_match = re.search(r'\[SUBJECT\]\s*(.*?)\s*\[/SUBJECT\]', translated, re.DOTALL)
-        body_match = re.search(r'\[BODY\]\s*(.*?)\s*\[/BODY\]', translated, re.DOTALL)
-
-        if subject_match and body_match:
-            return subject_match.group(1).strip(), body_match.group(1).strip()
-
-        # 方法2：如果模型没有保留标记，尝试用换行分割
-        # 假设第一段是标题翻译，其余是正文
-        lines = translated.strip().split('\n', 1)
-        if len(lines) == 2:
-            first_line = lines[0].strip()
-            rest = lines[1].strip()
-
-            # 检查第一行是否像标题（较短，不包含段落标记）
-            if len(first_line) < 200 and '\n\n' not in first_line:
-                return first_line, rest
-
-        # 方法3：使用原始标题长度比例估算
-        # 假设翻译前后长度比例相似
-        if original_subject and original_body:
-            subject_ratio = len(original_subject) / (len(original_subject) + len(original_body))
-            estimated_subject_len = int(len(translated) * subject_ratio * 1.2)  # 给一些余量
-
-            # 在估算位置附近找换行符
-            search_start = max(0, estimated_subject_len - 50)
-            search_end = min(len(translated), estimated_subject_len + 50)
-
-            newline_pos = translated.find('\n', search_start, search_end)
-            if newline_pos != -1:
-                return translated[:newline_pos].strip(), translated[newline_pos:].strip()
-
-        # 方法4：回退 - 单独翻译标题
-        print("[SmartRouting] Failed to parse combined translation, translating subject separately")
-        try:
-            subject_translated = self.translate_with_vllm(
-                original_subject, "zh", None, None
-            )
-            # 整个翻译结果当作正文
-            return subject_translated, translated
-        except Exception as e:
-            print(f"[SmartRouting] Fallback subject translation failed: {e}")
-            # 最终回退：返回原始标题
-            return original_subject, translated
-
-    def _translate_simple(self, text: str, target_lang: str, source_lang: str,
-                          glossary: List[Dict], score: int, subject: str = None) -> Dict:
-        """简单邮件翻译 - vLLM 直接翻译
-
-        注意：邮件链处理（提取新内容、复用历史翻译）已在 emails.py 中完成，
-        这里只负责翻译传入的文本。
-
-        Args:
-            subject: 如果提供，则与正文一起翻译（提高标题翻译的上下文理解）
-        """
-        try:
-            subject_translated = None
-
-            if subject:
-                # 分开翻译标题和正文（避免联合翻译时标记解析失败的问题）
-                print(f"[SmartRouting] Simple email -> vLLM (separate translation, score={score})")
-
-                # 先翻译正文
-                body_translated = self.translate_with_vllm(
-                    text, target_lang, source_lang, glossary,
-                    complexity_score=score
-                )
-
-                # 再翻译标题
-                subject_translated = self.translate_with_vllm(
-                    subject, target_lang, source_lang, glossary,
-                    complexity_score=score
-                )
-            else:
-                print(f"[SmartRouting] Simple email -> vLLM ({len(text)} chars, score={score})")
-                body_translated = self.translate_with_vllm(text, target_lang, source_lang, glossary,
-                                                              complexity_score=score)
-
-            result = {
-                "translated_text": body_translated,
-                "provider_used": "vllm",
-                "complexity": {"level": "simple", "score": score},
-                "fallback_reason": None
-            }
-            if subject_translated:
-                result["subject_translated"] = subject_translated
-
-            return result
-
-        except Exception as e:
-            print(f"[SmartRouting] vLLM failed: {e}, falling back to Claude")
-            return self._translate_with_fallback(text, target_lang, source_lang, glossary,
-                                                  {"level": "simple", "score": score})
-
-    def _translate_complex(self, text: str, subject: str, target_lang: str,
-                           source_lang: str, glossary: List[Dict], score: int,
-                           translate_subject: bool = True) -> Dict:
-        """
-        复杂邮件翻译 - 拆分翻译策略
-
-        正文用 Claude（理解能力强），问候语/签名用 vLLM（免费）
-
-        Args:
-            translate_subject: 是否同时翻译标题
-        """
-        from services.email_analyzer import get_email_analyzer
-
+        # 统一使用 vLLM 翻译
         subject_translated = None
 
-        # 如果需要翻译标题，分开用 Claude 翻译（避免标记解析问题）
+        # 翻译正文
+        body_translated = self.translate_with_vllm(
+            text, target_lang, source_lang, glossary,
+            complexity_score=score
+        )
+
+        # 翻译标题
         if translate_subject and subject:
-            try:
-                # 对于复杂邮件，分开翻译标题和正文
-                print(f"[SmartRouting] Complex email -> Claude (separate translation)")
+            subject_translated = self.translate_with_vllm(
+                subject, target_lang, source_lang, glossary,
+                complexity_score=score
+            )
 
-                # 先翻译正文
-                text_translated = self._translate_body_with_claude(
-                    text, target_lang, source_lang, glossary
-                )
-
-                # 再翻译标题
-                subject_translated = self._translate_body_with_claude(
-                    subject, target_lang, source_lang, glossary
-                )
-
-                result = {
-                    "translated_text": text_translated,
-                    "subject_translated": subject_translated,
-                    "provider_used": "claude",
-                    "complexity": {"level": "complex", "score": score},
-                    "fallback_reason": None
-                }
-                return result
-            except Exception as e:
-                print(f"[SmartRouting] Combined subject+body translation failed: {e}")
-                # 继续使用分拆策略
-
-        try:
-            # 获取完整分析（包含结构拆分）
-            analyzer = get_email_analyzer(self.vllm_base_url, self.vllm_model)
-            analysis = analyzer.analyze_email(text, subject)
-
-            if analysis.should_split and analysis.structure.body:
-                print(f"[SmartRouting] Complex email -> Split translation")
-
-                translated_parts = []
-
-                # 翻译问候语（用 vLLM）
-                if analysis.structure.greeting:
-                    try:
-                        greeting_translated = self._translate_with_vllm_or_fallback(
-                            analysis.structure.greeting, target_lang, source_lang
-                        )
-                        translated_parts.append(greeting_translated)
-                    except Exception as e:
-                        print(f"[Translate] Greeting translation failed, using original: {e}")
-                        translated_parts.append(analysis.structure.greeting)
-
-                # 翻译正文（用 Claude）
-                body_translated = self._translate_body_with_claude(
-                    analysis.structure.body, target_lang, source_lang, glossary
-                )
-                translated_parts.append(body_translated)
-
-                # 翻译签名（用 vLLM）
-                if analysis.structure.signature:
-                    try:
-                        sig_translated = self._translate_with_vllm_or_fallback(
-                            analysis.structure.signature, target_lang, source_lang
-                        )
-                        translated_parts.append(sig_translated)
-                    except Exception as e:
-                        print(f"[Translate] Signature translation failed, using original: {e}")
-                        translated_parts.append(analysis.structure.signature)
-
-                result = {
-                    "translated_text": "\n\n".join(translated_parts),
-                    "provider_used": "claude+vllm",
-                    "complexity": {"level": "complex", "score": score},
-                    "fallback_reason": None,
-                    "split_translation": True
-                }
-
-                # 如果需要翻译标题，单独用 vLLM 翻译
-                if translate_subject and subject and not subject_translated:
-                    try:
-                        subject_translated = self.translate_with_vllm(subject, target_lang, source_lang)
-                        result["subject_translated"] = subject_translated
-                    except Exception as e:
-                        print(f"[SmartRouting] Subject translation failed: {e}")
-
-                return result
-
-        except Exception as e:
-            print(f"[SmartRouting] Split translation failed: {e}")
-
-        # 拆分失败，整体用 Claude 翻译
-        result = self._translate_with_claude_fallback(text, target_lang, source_lang, glossary,
-                                                       {"level": "complex", "score": score})
-
-        # 如果需要翻译标题，单独用 vLLM 翻译
-        if translate_subject and subject:
-            try:
-                subject_translated = self.translate_with_vllm(subject, target_lang, source_lang)
-                result["subject_translated"] = subject_translated
-            except Exception as e:
-                print(f"[SmartRouting] Subject translation failed: {e}")
+        result = {
+            "translated_text": body_translated,
+            "provider_used": "vllm",
+            "complexity": {"level": complexity.value, "score": score},
+            "fallback_reason": None
+        }
+        if subject_translated:
+            result["subject_translated"] = subject_translated
 
         return result
-
-    def _translate_with_vllm_or_fallback(self, text: str, target_lang: str,
-                                            source_lang: str, glossary: List[Dict] = None) -> str:
-        """vLLM 翻译，失败则用 Claude 回退"""
-        # 首选 vLLM（免费，质量好）
-        if self.vllm_base_url:
-            try:
-                return self.translate_with_vllm(text, target_lang, source_lang, glossary)
-            except Exception as e:
-                print(f"[SmartRouting] vLLM failed: {e}")
-
-        # 回退到 Claude
-        claude_key = self.api_key or os.environ.get("CLAUDE_API_KEY")
-        if claude_key:
-            try:
-                if self.provider == "claude":
-                    return self.translate_with_claude(text, target_lang, source_lang, glossary)
-                else:
-                    temp_service = TranslateService(
-                        api_key=claude_key,
-                        provider="claude",
-                        claude_model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-20250514")
-                    )
-                    return temp_service.translate_with_claude(text, target_lang, source_lang, glossary)
-            except Exception as e:
-                print(f"[SmartRouting] Claude failed: {e}")
-
-        raise Exception("vLLM 和 Claude 都不可用")
-
-    def _translate_body_with_claude(self, text: str, target_lang: str,
-                                     source_lang: str, glossary: List[Dict]) -> str:
-        """用 Claude 翻译正文（复杂邮件用）"""
-        claude_key = self.api_key if self.provider == "claude" else os.environ.get("CLAUDE_API_KEY")
-
-        if claude_key:
-            try:
-                if self.provider == "claude":
-                    return self.translate_with_claude(text, target_lang, source_lang, glossary)
-                else:
-                    temp_service = TranslateService(
-                        api_key=claude_key,
-                        provider="claude",
-                        claude_model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-20250514")
-                    )
-                    return temp_service.translate_with_claude(text, target_lang, source_lang, glossary)
-            except Exception as e:
-                print(f"[SmartRouting] Claude failed: {e}")
-
-        # Claude 不可用，回退到 vLLM
-        return self._translate_with_vllm_or_fallback(text, target_lang, source_lang, glossary)
-
-    def _translate_with_fallback(self, text: str, target_lang: str, source_lang: str,
-                                  glossary: List[Dict], complexity: Dict) -> Dict:
-        """带回退的翻译（vLLM → Claude，跳过腾讯和DeepL）
-
-        对于邮件链，只翻译最新内容，历史引用保持原样
-        """
-        providers_tried = []
-
-        # 检查是否是邮件链，提取最新内容
-        latest_content, quoted_content = self.extract_latest_email(text)
-        has_quote = bool(quoted_content)
-
-        if has_quote:
-            print(f"[SmartRouting] 检测到邮件链: 最新内容 {len(latest_content)} 字符, 引用 {len(quoted_content)} 字符")
-            text_to_translate = latest_content
-        else:
-            text_to_translate = text
-
-        # 1. vLLM 优先（免费，质量好）
-        if self.vllm_base_url:
-            try:
-                # 传递复杂度分数
-                complexity_score = complexity.get("score") if complexity else None
-                translated = self.translate_with_vllm(text_to_translate, target_lang, source_lang, glossary,
-                                                         complexity_score=complexity_score)
-
-                # 注意：不在此处拼接引用内容，由 emails.py 统一处理
-                # 这样可以正确使用历史翻译而非原文引用
-
-                return {
-                    "translated_text": translated,
-                    "provider_used": "vllm",
-                    "complexity": complexity,
-                    "fallback_reason": None,
-                    "has_quote": has_quote
-                }
-            except Exception as e:
-                providers_tried.append(("vllm", str(e)))
-                print(f"[SmartRouting] vLLM failed in fallback: {e}")
-
-        # 2. Claude 兜底（同样只翻译最新内容）
-        result = self._translate_with_claude_fallback(text_to_translate, target_lang, source_lang, glossary, complexity)
-
-        # 注意：不在此处拼接引用内容，由 emails.py 统一处理
-        # 这样可以正确使用历史翻译而非原文引用
-        result["has_quote"] = has_quote
-
-        return result
-
-    def _translate_with_claude_fallback(self, text: str, target_lang: str, source_lang: str,
-                                         glossary: List[Dict], complexity: Dict) -> Dict:
-        """Claude 兜底翻译"""
-        claude_key = self.api_key if self.provider == "claude" else os.environ.get("CLAUDE_API_KEY")
-
-        if claude_key:
-            try:
-                if self.provider == "claude":
-                    translated = self.translate_with_claude(text, target_lang, source_lang, glossary)
-                else:
-                    temp_service = TranslateService(
-                        api_key=claude_key,
-                        provider="claude",
-                        claude_model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-20250514")
-                    )
-                    translated = temp_service.translate_with_claude(text, target_lang, source_lang, glossary)
-
-                return {
-                    "translated_text": translated,
-                    "provider_used": "claude",
-                    "complexity": complexity,
-                    "fallback_reason": "所有免费引擎不可用"
-                }
-            except Exception as e:
-                raise Exception(f"所有翻译引擎都失败，包括 Claude: {e}")
-
-        raise Exception("没有可用的翻译引擎")
 
     def translate_email_reply(self, chinese_text: str, target_lang: str,
                               conversation_history: List[Dict] = None,
@@ -1551,6 +852,74 @@ Please check the following items:
             new_lines.append(line)
 
         return "\n".join(new_lines).strip()
+
+    def translate_quoted_content(self, quoted: str, target_lang: str = "zh",
+                                  source_lang: str = None) -> str:
+        """
+        翻译引用内容（带 > 前缀的邮件回复链）
+
+        处理流程：
+        1. 去除 > 前缀
+        2. 翻译纯文本
+        3. 重新添加 > 前缀保持引用格式
+
+        Args:
+            quoted: 引用内容（可能带 > 前缀）
+            target_lang: 目标语言
+            source_lang: 源语言
+
+        Returns:
+            翻译后的引用内容（带 > 前缀）
+        """
+        if not quoted or not quoted.strip():
+            return ""
+
+        # 去除 > 前缀，保存每行是否有前缀
+        lines = quoted.split('\n')
+        clean_lines = []
+        line_prefixes = []  # 记录每行的前缀
+
+        for line in lines:
+            stripped = line.lstrip()
+            # 检测引用前缀（可能有多层：> > >）
+            prefix = ""
+            while stripped.startswith('>'):
+                prefix += '> '
+                stripped = stripped[1:].lstrip()
+
+            line_prefixes.append(prefix)
+            clean_lines.append(stripped)
+
+        # 合并纯文本进行翻译
+        clean_text = '\n'.join(clean_lines)
+
+        # 跳过太短或空的内容
+        if len(clean_text.strip()) < 10:
+            return quoted  # 内容太少，保持原样
+
+        # 翻译
+        try:
+            translated = self.translate_text(clean_text, target_lang, source_lang=source_lang)
+        except Exception as e:
+            print(f"[TranslateQuoted] Failed to translate quoted content: {e}")
+            return quoted  # 翻译失败，返回原文
+
+        # 重新添加 > 前缀
+        translated_lines = translated.split('\n')
+        result_lines = []
+
+        # 尽量匹配原始行数
+        max_lines = max(len(line_prefixes), len(translated_lines))
+        for i in range(max_lines):
+            prefix = line_prefixes[i] if i < len(line_prefixes) else '> '
+            content = translated_lines[i] if i < len(translated_lines) else ''
+
+            if content.strip():
+                result_lines.append(f"{prefix}{content}")
+            else:
+                result_lines.append("")  # 保留空行
+
+        return '\n'.join(result_lines)
 
     def close(self):
         """Close HTTP client"""

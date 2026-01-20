@@ -11,6 +11,14 @@ from datetime import datetime
 
 VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://localhost:5080")
 VLLM_MODEL = os.getenv("VLLM_MODEL", "/home/aaa/models/Qwen3-VL-8B-Instruct")
+VLLM_API_KEY = os.getenv("VLLM_API_KEY", "")
+
+def _get_vllm_headers():
+    """获取 vLLM 请求头（包含认证）"""
+    headers = {"Content-Type": "application/json"}
+    if VLLM_API_KEY:
+        headers["Authorization"] = f"Bearer {VLLM_API_KEY}"
+    return headers
 
 
 GRAMMAR_CHECK_PROMPT = """你是一位专业的校对编辑，请检查以下{language}文本中的问题：
@@ -97,6 +105,7 @@ class GrammarCheckService:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
                     f"{VLLM_BASE_URL}/v1/chat/completions",
+                    headers=_get_vllm_headers(),
                     json={
                         "model": VLLM_MODEL,
                         "messages": [

@@ -82,10 +82,10 @@
             <el-option label="法语" value="fr" />
           </el-select>
         </div>
-        <el-input
+        <RichTextEditor
+          ref="chineseEditorRef"
           v-model="form.bodyChinese"
-          type="textarea"
-          :rows="10"
+          height="250px"
           placeholder="输入邮件内容（可直接发送，或点击翻译后发送译文）"
         />
       </div>
@@ -103,6 +103,60 @@
           :rows="10"
           placeholder="点击翻译按钮生成译文，或直接在此编辑..."
         />
+      </div>
+    </div>
+
+    <!-- 附件区域 -->
+    <div
+      class="attachment-section"
+      :class="{ 'drag-over': isDragging }"
+      @dragover.prevent="onDragOver"
+      @dragleave.prevent="onDragLeave"
+      @drop.prevent="onDrop"
+    >
+      <div class="attachment-header">
+        <span class="attachment-title">
+          <el-icon><Paperclip /></el-icon>
+          附件 ({{ attachments.length }})
+        </span>
+        <div class="attachment-actions">
+          <el-button size="small" @click="triggerFileInput">
+            <el-icon><Plus /></el-icon> 添加附件
+          </el-button>
+          <span class="attachment-hint">支持拖拽文件或 Ctrl+V 粘贴图片</span>
+        </div>
+        <input
+          ref="fileInputRef"
+          type="file"
+          multiple
+          style="display: none"
+          @change="onFileSelect"
+        />
+      </div>
+
+      <!-- 附件列表 -->
+      <div v-if="attachments.length > 0" class="attachment-list">
+        <div v-for="(file, index) in attachments" :key="index" class="attachment-item">
+          <el-icon :style="{ color: getFileIconColor(file.name) }">
+            <component :is="getFileIcon(file.name)" />
+          </el-icon>
+          <span class="attachment-name" :title="file.name">{{ file.name }}</span>
+          <span class="attachment-size">{{ formatFileSize(file.size) }}</span>
+          <el-button
+            size="small"
+            type="danger"
+            text
+            @click="removeAttachment(index)"
+          >
+            <el-icon><Close /></el-icon>
+          </el-button>
+        </div>
+      </div>
+
+      <!-- 拖拽覆盖层 -->
+      <div v-if="isDragging" class="drag-overlay">
+        <el-icon class="drag-icon"><Upload /></el-icon>
+        <span>释放以添加附件</span>
       </div>
     </div>
 
@@ -229,8 +283,9 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
-import { Document, Loading, Check, Warning, Clock, Setting } from '@element-plus/icons-vue'
+import { Document, Loading, Check, Warning, Clock, Setting, Paperclip, Plus, Close, Upload, Picture, Folder, Files } from '@element-plus/icons-vue'
 import api from '@/api'
+import RichTextEditor from '@/components/RichTextEditor.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import dayjs from 'dayjs'
 
@@ -265,11 +320,27 @@ function saveCustomPhrases() {
 }
 
 function insertPhrase(phrase) {
-  // 插入到中文内容区，光标位置或末尾
-  if (form.bodyChinese.trim()) {
-    form.bodyChinese += '\n' + phrase
+  // 插入到富文本编辑器
+  const editor = chineseEditorRef.value?.getEditor()
+  if (editor) {
+    // 获取当前内容
+    const currentText = chineseEditorRef.value?.getText()?.trim()
+    if (currentText) {
+      // 有内容时，在末尾插入换行和短语
+      editor.insertText('\n' + phrase)
+    } else {
+      // 无内容时，直接设置
+      editor.setHtml('<p>' + phrase + '</p>')
+    }
+    // 聚焦到编辑器
+    editor.focus()
   } else {
-    form.bodyChinese = phrase
+    // 降级处理（编辑器未初始化时）
+    if (form.bodyChinese.trim()) {
+      form.bodyChinese += '\n' + phrase
+    } else {
+      form.bodyChinese = phrase
+    }
   }
 }
 
@@ -307,11 +378,15 @@ function saveLocalDraft() {
   try {
     autoSaveStatus.value = 'saving'
 
+    // 获取编辑器内容
+    const htmlContent = chineseEditorRef.value?.getHtml() || form.bodyChinese
+    const textContent = chineseEditorRef.value?.getText()?.trim() || form.bodyChinese.replace(/<[^>]*>/g, '').trim()
+
     const currentDraft = {
       to: form.to,
       cc: form.cc,
       subject: form.subject,
-      bodyChinese: form.bodyChinese,
+      bodyChinese: htmlContent,
       bodyTranslated: form.bodyTranslated,
       targetLanguage: form.targetLanguage,
       savedAt: new Date().toISOString()
@@ -327,8 +402,8 @@ function saveLocalDraft() {
       return
     }
 
-    // 只有有内容时才保存
-    if (!currentDraft.bodyChinese.trim() && !currentDraft.bodyTranslated.trim()) {
+    // 只有有内容时才保存（检查纯文本内容）
+    if (!textContent && !currentDraft.bodyTranslated.trim()) {
       autoSaveStatus.value = ''
       return
     }
@@ -341,8 +416,27 @@ function saveLocalDraft() {
       draftVersions.value = draftVersions.value.slice(0, MAX_VERSIONS)
     }
 
-    // 保存到 localStorage
-    localStorage.setItem(DRAFT_KEY, JSON.stringify(draftVersions.value))
+    // 保存到 localStorage（处理配额超限）
+    try {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify(draftVersions.value))
+    } catch (storageError) {
+      // 处理 QuotaExceededError
+      if (storageError.name === 'QuotaExceededError' || storageError.code === 22) {
+        console.warn('[AutoSave] localStorage quota exceeded, clearing old versions')
+        // 只保留最新版本，清理旧版本释放空间
+        draftVersions.value = draftVersions.value.slice(0, 1)
+        try {
+          localStorage.setItem(DRAFT_KEY, JSON.stringify(draftVersions.value))
+          ElMessage.warning('草稿空间已满，已自动清理历史版本')
+        } catch (retryError) {
+          // 仍然失败，放弃保存
+          console.error('[AutoSave] Still failed after clearing:', retryError)
+          throw retryError
+        }
+      } else {
+        throw storageError
+      }
+    }
 
     lastSavedTime.value = new Date()
     autoSaveStatus.value = 'saved'
@@ -408,6 +502,7 @@ const emit = defineEmits(['sent', 'cancel'])
 
 const translating = ref(false)
 const sending = ref(false)
+const chineseEditorRef = ref(null)  // 中文富文本编辑器引用
 
 const form = reactive({
   to: '',
@@ -417,6 +512,138 @@ const form = reactive({
   bodyTranslated: '',
   targetLanguage: 'en'
 })
+
+// ========== 附件上传功能 ==========
+const MAX_FILE_SIZE = 100 * 1024 * 1024  // 100MB
+const MAX_TOTAL_SIZE = 200 * 1024 * 1024  // 200MB
+const DANGEROUS_EXTENSIONS = ['.exe', '.bat', '.cmd', '.sh', '.ps1', '.msi', '.dll', '.scr']
+
+const attachments = ref([])
+const isDragging = ref(false)
+const fileInputRef = ref(null)
+let dragCounter = 0  // 用于处理子元素触发的 dragleave
+
+function triggerFileInput() {
+  fileInputRef.value?.click()
+}
+
+function onFileSelect(event) {
+  const files = Array.from(event.target.files || [])
+  addFiles(files)
+  // 清空 input 以允许选择相同文件
+  event.target.value = ''
+}
+
+function onDragOver(event) {
+  dragCounter++
+  isDragging.value = true
+}
+
+function onDragLeave(event) {
+  dragCounter--
+  if (dragCounter <= 0) {
+    isDragging.value = false
+    dragCounter = 0
+  }
+}
+
+function onDrop(event) {
+  isDragging.value = false
+  dragCounter = 0
+  const files = Array.from(event.dataTransfer?.files || [])
+  addFiles(files)
+}
+
+// 剪贴板粘贴图片
+function onPaste(event) {
+  const items = event.clipboardData?.items
+  if (!items) return
+
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      const file = item.getAsFile()
+      if (file) {
+        // 生成带时间戳的文件名
+        const ext = file.type.split('/')[1] || 'png'
+        const timestamp = dayjs().format('YYYYMMDDHHmmss')
+        const namedFile = new File([file], `粘贴图片_${timestamp}.${ext}`, { type: file.type })
+        addFiles([namedFile])
+        ElMessage.success('图片已添加为附件')
+      }
+    }
+  }
+}
+
+async function addFiles(files) {
+  for (const file of files) {
+    // 检查单个文件大小
+    if (file.size > MAX_FILE_SIZE) {
+      ElMessage.warning(`文件 "${file.name}" 超过 100MB 限制`)
+      continue
+    }
+
+    // 检查总大小
+    const currentTotal = attachments.value.reduce((sum, f) => sum + f.size, 0)
+    if (currentTotal + file.size > MAX_TOTAL_SIZE) {
+      ElMessage.warning('附件总大小超过 200MB 限制')
+      break
+    }
+
+    // 检查危险文件类型
+    const ext = '.' + file.name.split('.').pop().toLowerCase()
+    if (DANGEROUS_EXTENSIONS.includes(ext)) {
+      try {
+        await ElMessageBox.confirm(
+          `文件 "${file.name}" 是可执行文件，收件人邮箱可能会拦截。确定要添加吗？`,
+          '安全提示',
+          { type: 'warning', confirmButtonText: '仍然添加', cancelButtonText: '取消' }
+        )
+      } catch {
+        continue  // 用户取消
+      }
+    }
+
+    // 检查是否已存在同名文件
+    if (attachments.value.some(f => f.name === file.name)) {
+      ElMessage.warning(`文件 "${file.name}" 已存在`)
+      continue
+    }
+
+    attachments.value.push(file)
+  }
+}
+
+function removeAttachment(index) {
+  attachments.value.splice(index, 1)
+}
+
+function formatFileSize(bytes) {
+  if (bytes === 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
+}
+
+function getFileIcon(filename) {
+  const ext = filename.split('.').pop().toLowerCase()
+  const imageTypes = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg']
+  if (imageTypes.includes(ext)) return Picture
+  return Files
+}
+
+function getFileIconColor(filename) {
+  const ext = filename.split('.').pop().toLowerCase()
+  const colors = {
+    pdf: '#e74c3c',
+    doc: '#2980b9', docx: '#2980b9',
+    xls: '#27ae60', xlsx: '#27ae60',
+    ppt: '#e67e22', pptx: '#e67e22',
+    jpg: '#9b59b6', jpeg: '#9b59b6', png: '#9b59b6', gif: '#9b59b6',
+    zip: '#f39c12', rar: '#f39c12', '7z': '#f39c12'
+  }
+  return colors[ext] || '#95a5a6'
+}
 
 // 定时发送
 const enableSchedule = ref(false)
@@ -538,9 +765,12 @@ onMounted(() => {
 
   // 加载自定义快速短语
   loadCustomPhrases()
+
+  // 监听粘贴事件（用于粘贴图片）
+  document.addEventListener('paste', onPaste)
 })
 
-// 组件卸载时清理定时器
+// 组件卸载时清理定时器和事件监听
 onUnmounted(() => {
   if (autoSaveTimer) {
     clearInterval(autoSaveTimer)
@@ -548,6 +778,8 @@ onUnmounted(() => {
   }
   // 最后一次保存
   saveLocalDraft()
+  // 移除粘贴事件监听
+  document.removeEventListener('paste', onPaste)
 })
 
 // 监听内容变化，触发字符计数保存
@@ -556,7 +788,9 @@ watch(() => form.bodyTranslated, onContentChange)
 
 // 发送条件：左边或右边有内容即可
 const canSend = computed(() => {
-  const hasContent = form.bodyChinese.trim() || form.bodyTranslated.trim()
+  // 检查富文本编辑器的纯文本内容，或右侧译文
+  const chineseText = chineseEditorRef.value?.getText()?.trim() || form.bodyChinese.replace(/<[^>]*>/g, '').trim()
+  const hasContent = chineseText || form.bodyTranslated.trim()
   return form.to.trim() && form.subject.trim() && hasContent
 })
 
@@ -575,7 +809,10 @@ function getLanguageName(lang) {
 }
 
 async function translateContent() {
-  if (!form.bodyChinese.trim()) {
+  // 从富文本编辑器获取纯文本内容
+  const textContent = chineseEditorRef.value?.getText()?.trim() || form.bodyChinese.replace(/<[^>]*>/g, '').trim()
+
+  if (!textContent) {
     ElMessage.warning('请先输入中文内容')
     return
   }
@@ -583,7 +820,7 @@ async function translateContent() {
   translating.value = true
   try {
     const result = await api.translateReply(
-      form.bodyChinese,
+      textContent,
       form.targetLanguage,
       null,
       null
@@ -599,14 +836,18 @@ async function translateContent() {
 }
 
 async function saveDraft() {
-  if (!form.bodyChinese.trim()) {
+  // 检查是否有内容（从富文本编辑器获取纯文本）
+  const textContent = chineseEditorRef.value?.getText()?.trim() || ''
+  if (!textContent) {
     ElMessage.warning('请输入邮件内容')
     return
   }
 
   try {
+    // 保存 HTML 内容到草稿
+    const htmlContent = chineseEditorRef.value?.getHtml() || form.bodyChinese
     await api.createDraft({
-      body_chinese: form.bodyChinese,
+      body_chinese: htmlContent,
       body_translated: form.bodyTranslated,
       target_language: form.targetLanguage
     })
@@ -627,11 +868,13 @@ async function preSendChecks() {
   }
 
   // 2. 正文提到附件但没附件（检查中文和英文关键词）
-  const content = (form.bodyChinese + ' ' + form.bodyTranslated).toLowerCase()
+  // 获取纯文本内容进行检查
+  const chineseText = chineseEditorRef.value?.getText() || form.bodyChinese.replace(/<[^>]*>/g, '')
+  const content = (chineseText + ' ' + form.bodyTranslated).toLowerCase()
   const attachmentKeywords = ['附件', '附上', '附送', 'attachment', 'attached', 'attach', 'enclos']
   const mentionsAttachment = attachmentKeywords.some(kw => content.includes(kw))
-  // 目前组件不支持附件功能，所以如果提到了附件就警告
-  if (mentionsAttachment) {
+  // 如果提到了附件但没有添加附件，则警告
+  if (mentionsAttachment && attachments.value.length === 0) {
     warnings.push({ key: 'missing_attachment', message: '您提到了"附件"，但没有添加附件，确定发送？' })
   }
 
@@ -642,9 +885,10 @@ async function preSendChecks() {
   }
 
   // 4. 有中文内容但没有翻译
-  if (form.bodyChinese.trim() && !form.bodyTranslated.trim()) {
+  const chineseTextTrimmed = chineseText.trim()
+  if (chineseTextTrimmed && !form.bodyTranslated.trim()) {
     // 检查中文内容是否包含中文字符
-    const hasChinese = /[\u4e00-\u9fa5]/.test(form.bodyChinese)
+    const hasChinese = /[\u4e00-\u9fa5]/.test(chineseText)
     if (hasChinese) {
       warnings.push({ key: 'not_translated', message: '正文还未翻译，将发送左侧中文内容，确定发送？' })
     }
@@ -689,8 +933,10 @@ async function sendEmail() {
   const shouldProceed = await preSendChecks()
   if (!shouldProceed) return
 
-  // 优先发送右边翻译内容，没有则发送左边原始内容
-  const bodyToSend = form.bodyTranslated.trim() || form.bodyChinese.trim()
+  // 优先发送右边翻译内容，没有则发送左边原始内容（获取纯文本或HTML）
+  const chineseText = chineseEditorRef.value?.getText()?.trim() || form.bodyChinese.replace(/<[^>]*>/g, '').trim()
+  const chineseHtml = chineseEditorRef.value?.getHtml() || form.bodyChinese
+  const bodyToSend = form.bodyTranslated.trim() || chineseText
 
   sending.value = true
   try {
@@ -704,18 +950,20 @@ async function sendEmail() {
     // 如果是定时发送，添加 scheduled_at 参数
     if (enableSchedule.value && scheduledTime.value) {
       emailData.scheduled_at = dayjs(scheduledTime.value).toISOString()
+      // TODO: 定时发送暂不支持附件
       await api.createDraft({
         to_email: form.to,
         cc_email: form.cc,
         subject: form.subject,
-        body_chinese: form.bodyChinese,
+        body_chinese: chineseHtml,
         body_translated: form.bodyTranslated || bodyToSend,
         target_language: form.targetLanguage,
         scheduled_at: emailData.scheduled_at
       })
       ElMessage.success(`邮件已设置为 ${formatScheduleTime(scheduledTime.value)} 发送`)
     } else {
-      await api.sendEmail(emailData)
+      // 发送邮件（包含附件）
+      await api.sendEmail(emailData, attachments.value)
     }
     emit('sent')
   } catch (e) {
@@ -968,5 +1216,112 @@ async function sendEmail() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 附件区域样式 */
+.attachment-section {
+  position: relative;
+  border: 1px dashed #dcdfe6;
+  border-radius: 8px;
+  padding: 12px 16px;
+  background: #fafafa;
+  transition: all 0.3s ease;
+}
+
+.attachment-section.drag-over {
+  border-color: #409eff;
+  background: #ecf5ff;
+}
+
+.attachment-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.attachment-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 14px;
+  color: #606266;
+  font-weight: 500;
+}
+
+.attachment-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.attachment-hint {
+  font-size: 12px;
+  color: #909399;
+}
+
+.attachment-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #ebeef5;
+}
+
+.attachment-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: white;
+  border: 1px solid #e4e7ed;
+  border-radius: 4px;
+  font-size: 13px;
+  max-width: 250px;
+  transition: all 0.2s;
+}
+
+.attachment-item:hover {
+  border-color: #c0c4cc;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+.attachment-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #303133;
+}
+
+.attachment-size {
+  font-size: 12px;
+  color: #909399;
+  white-space: nowrap;
+}
+
+.drag-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(64, 158, 255, 0.1);
+  border-radius: 8px;
+  color: #409eff;
+  font-size: 16px;
+  font-weight: 500;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.drag-overlay .drag-icon {
+  font-size: 32px;
 }
 </style>

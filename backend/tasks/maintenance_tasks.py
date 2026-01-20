@@ -6,7 +6,11 @@
 - cleanup_old_translations: 清理过期翻译缓存
 - cleanup_temp_files: 清理临时文件
 - rebuild_contacts_index: 重建联系人索引
-- reset_monthly_quota: 每月重置翻译配额
+- reset_monthly_quota: 每月重置用量统计
+- cleanup_stuck_translations: 清理卡住的翻译状态
+- batch_language_detection: 批量语言检测
+
+所有翻译使用本地 vLLM 大模型，零 API 成本。
 """
 import os
 import shutil
@@ -276,8 +280,9 @@ def reset_monthly_quota(self):
             TranslationUsage.is_disabled == True
         ).update({"is_disabled": False}, synchronize_session=False)
 
-        # 为常用翻译引擎创建本月初始记录（如果不存在）
-        providers = ["vllm", "claude"]
+        # 为翻译引擎创建本月初始记录（如果不存在）
+        # 注: vLLM 免费，实际不需要配额限制，但保留记录以便统计
+        providers = ["vllm"]
         created_count = 0
 
         for provider in providers:
@@ -317,40 +322,54 @@ def reset_monthly_quota(self):
 
 
 @celery_app.task(bind=True)
-def cleanup_stuck_translations(self, timeout_minutes: int = 10, max_body_size: int = 50000):
+def cleanup_stuck_translations(self, timeout_minutes: int = 15, max_retries: int = 3, max_body_size: int = 50000):
     """
-    清理卡死的翻译状态
+    清理卡住的翻译状态 (修复版 v2.0)
 
-    自动处理超过指定时间仍为 'translating' 状态的邮件：
-    - 超大邮件 (>50KB): 标记为 failed（不再重试）
-    - 普通邮件: 重置为 pending 并触发重新翻译
+    核心逻辑:
+    1. 只处理 translate_started_at 超过 timeout_minutes 的邮件（避免误杀正在翻译的）
+    2. 检查 translate_retry_count:
+       - >= max_retries: 标记为 failed（不再重试）
+       - < max_retries: 重置为 pending（等待下次调度）
+    3. 不立即触发翻译，由 collect_and_translate_pending 任务统一调度
 
     Args:
-        timeout_minutes: 超时时间（分钟），默认 10 分钟
-        max_body_size: 最大邮件正文大小（字节），超过此大小标记为失败
+        timeout_minutes: 超时时间（分钟），默认 15 分钟
+        max_retries: 最大重试次数，默认 3 次
+        max_body_size: 最大邮件正文大小（字节），超过此大小直接标记为失败
 
     Returns:
         dict: 处理结果
     """
     from database.models import Email
-    from sqlalchemy import and_
+    from sqlalchemy import and_, or_
 
     db = get_db_session()
 
     try:
-        # 超时阈值（使用 created_at，因为 emails 表没有 updated_at）
-        # 对于 translating 状态，如果 10 分钟内没完成就认为卡住了
-        cutoff = datetime.utcnow() - timedelta(minutes=timeout_minutes)
+        now = datetime.utcnow()
+        cutoff = now - timedelta(minutes=timeout_minutes)
 
-        # 查找卡死的翻译任务
-        # 注意：使用 created_at 作为参考，因为邮件可能很久前创建但刚开始翻译
-        # 所以我们只检查状态为 translating 的邮件，不限制时间
-        # 改为：检查所有 translating 状态的邮件，因为正常翻译应该几分钟内完成
+        # 查找卡住的翻译任务:
+        # 1. 状态为 translating
+        # 2. translate_started_at 存在且超过 timeout_minutes
+        #    或者 translate_started_at 为 NULL（兼容旧数据）且 created_at 超过 1 小时
         stuck_emails = db.query(Email).filter(
-            Email.translation_status == "translating"
+            Email.translation_status == "translating",
+            or_(
+                # 有开始时间且超时
+                and_(
+                    Email.translate_started_at.isnot(None),
+                    Email.translate_started_at < cutoff
+                ),
+                # 无开始时间（旧数据），使用 created_at 且超过 1 小时
+                and_(
+                    Email.translate_started_at.is_(None),
+                    Email.created_at < now - timedelta(hours=1)
+                )
+            )
         ).all()
 
-        # 如果没有卡住的邮件，返回
         if not stuck_emails:
             return {
                 "success": True,
@@ -361,44 +380,50 @@ def cleanup_stuck_translations(self, timeout_minutes: int = 10, max_body_size: i
 
         reset_count = 0
         failed_count = 0
-        reset_ids = []
 
         for email in stuck_emails:
             body_len = len(email.body_original or "")
+            retry_count = email.translate_retry_count or 0
 
+            # 情况1: 超大邮件 - 直接失败
             if body_len > max_body_size:
-                # 超大邮件标记为失败
                 email.translation_status = 'failed'
+                email.last_translate_attempt = now
                 failed_count += 1
                 print(f"[TranslationCleanup] Email {email.id} marked failed (too large: {body_len} bytes)")
+
+            # 情况2: 超过最大重试次数 - 标记失败
+            elif retry_count >= max_retries:
+                email.translation_status = 'failed'
+                email.last_translate_attempt = now
+                failed_count += 1
+                print(f"[TranslationCleanup] Email {email.id} marked failed (max retries exceeded: {retry_count})")
+
+            # 情况3: 可以重试 - 重置为 pending
             else:
-                # 普通邮件重置为 pending
                 email.translation_status = 'pending'
+                email.last_translate_attempt = now
                 reset_count += 1
-                reset_ids.append((email.id, email.account_id))
-                print(f"[TranslationCleanup] Email {email.id} reset to pending")
+                print(f"[TranslationCleanup] Email {email.id} reset to pending (retry {retry_count + 1}/{max_retries})")
 
         db.commit()
 
-        # 触发重新翻译（最多 5 个，避免队列堆积）
-        triggered = 0
-        if reset_ids:
-            from tasks.translate_tasks import translate_email_task
-            for email_id, account_id in reset_ids[:5]:
-                translate_email_task.delay(email_id, account_id)
-                triggered += 1
+        # 不再立即触发翻译，让 collect_and_translate_pending 任务统一调度
+        # 这样可以避免队列堆积和重复提交
 
         result = {
             "success": True,
             "reset_count": reset_count,
             "failed_count": failed_count,
-            "triggered_translation": triggered,
-            "timestamp": datetime.utcnow().isoformat()
+            "total_processed": reset_count + failed_count,
+            "timeout_minutes": timeout_minutes,
+            "max_retries": max_retries,
+            "timestamp": now.isoformat()
         }
 
         if reset_count + failed_count > 0:
-            print(f"[TranslationCleanup] Cleaned up {reset_count + failed_count} stuck emails "
-                  f"(reset: {reset_count}, failed: {failed_count}, triggered: {triggered})")
+            print(f"[TranslationCleanup] Processed {reset_count + failed_count} stuck emails "
+                  f"(reset: {reset_count}, failed: {failed_count})")
 
         return result
 

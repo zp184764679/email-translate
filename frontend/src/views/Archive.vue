@@ -355,9 +355,15 @@ async function saveFolder() {
 
 async function deleteFolder(folder) {
   try {
+    // 检查是否有子文件夹
+    const hasChildren = folder.children && folder.children.length > 0
+    const confirmMessage = hasChildren
+      ? `文件夹"${folder.name}"包含 ${folder.children.length} 个子文件夹，删除后所有子文件夹和邮件都将被恢复到收件箱。确定要删除吗？`
+      : `确定要删除文件夹"${folder.name}"吗？文件夹中的邮件将被恢复到收件箱。`
+
     await ElMessageBox.confirm(
-      `确定要删除文件夹"${folder.name}"吗？文件夹中的邮件将被恢复到收件箱。`,
-      '删除确认',
+      confirmMessage,
+      hasChildren ? '删除文件夹及子文件夹' : '删除确认',
       { type: 'warning' }
     )
     await api.deleteArchiveFolder(folder.id)
